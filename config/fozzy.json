@@ -1,0 +1,47 @@
+{
+  "timeout_seconds": 10.0,
+  "delay_seconds": 0.50,
+  "max_permutations": 512,
+  "quick_fuzz_list": "resources/quick_fuzz_list.txt",
+  "output_dir": null,
+  "dry_run": false,
+  "max_background_workers": 16,
+  "max_workers_per_domain": 8,
+  "max_workers_per_subdomain": 1,
+  "max_requests_per_endpoint": null,
+  "live_report_interval_seconds": 5.0,
+  "body_preview_limit": 50000,
+  "reflection_alert_ignore_exact": ["test"],
+  "default_generic_by_type": {
+    "bool": "true",
+    "int": "1",
+    "float": "1.0",
+    "uuid": "00000000-0000-4000-8000-000000000000",
+    "date": "2024-01-01",
+    "datetime": "2024-01-01T00:00:00Z",
+    "email": "test@example.com",
+    "url": "https://example.com",
+    "hex": "deadbeef",
+    "token": "sampletoken",
+    "empty": "",
+    "string": "test"
+  },
+  "type_priority": [
+    "uuid",
+    "datetime",
+    "date",
+    "email",
+    "url",
+    "bool",
+    "float",
+    "int",
+    "hex",
+    "token",
+    "empty",
+    "string"
+  ],
+  "request_headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Accept": "*/*"
+  }
+}

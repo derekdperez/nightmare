@@ -3,6 +3,8 @@
 
 Usage:
     python nightmare.py https://example.com --help
+    python nightmare.py --batch-workers 8
+      (no URL: read targets from targets_file in config or --targets-file)
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import os
 import random
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -67,6 +70,17 @@ DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS = 90.0
 DEFAULT_EVIDENCE_BODY_MAX_BYTES = 4096
 # urllib probe: never read unbounded bodies (large downloads otherwise look like a hang).
 HTTP_PROBE_BODY_READ_MAX = DEFAULT_EVIDENCE_BODY_MAX_BYTES + 1
+# Above this response size, skip expensive selectors (e.g. every non-link href, all src,
+# regex over HTML, and scanning every URL-like attribute). Huge SPAs otherwise look "frozen"
+# for minutes while lxml walks millions of attributes.
+LINK_EXTRACTION_FULL_MAX_BYTES = 2 * 1024 * 1024
+# Cap how much HTML we regex-scan for quoted paths/URLs (inline JS can be multi‑MB).
+MAX_EMBEDDED_REGEX_SCAN_BYTES = 512 * 1024
+# XPath union: only attributes that commonly carry URLs (never use //@* on large documents).
+_URL_ATTRIBUTE_XPATH = (
+    "//@href|//@src|//@poster|//@cite|//@data-src|//@data-href|//@data-url|//@data-link|"
+    "//@data-action|//@data-background|//@data-full-url|//@data-uri"
+)
 EVIDENCE_FILE_EXTENSION = ".json.gz"
 EVIDENCE_GZIP_COMPRESSLEVEL = 9
 
@@ -1122,6 +1136,8 @@ def get_response_text(response: scrapy.http.Response) -> str:
 
 def extract_embedded_urls(response: scrapy.http.Response) -> set[str]:
     response_text = get_response_text(response)
+    if len(response_text) > MAX_EMBEDDED_REGEX_SCAN_BYTES:
+        response_text = response_text[:MAX_EMBEDDED_REGEX_SCAN_BYTES]
     discovered_urls: set[str] = set()
 
     for match in re.finditer(r"""["'](/(?!/)[^"'<>\s]{1,2048})["']""", response_text):
@@ -1140,7 +1156,7 @@ def extract_embedded_urls(response: scrapy.http.Response) -> set[str]:
 def extract_attribute_urls(response: scrapy.http.Response) -> set[str]:
     discovered_urls: set[str] = set()
 
-    for raw_value in response.xpath("//@*").getall():
+    for raw_value in response.xpath(_URL_ATTRIBUTE_XPATH).getall():
         value = (raw_value or "").strip()
         if not value:
             continue
@@ -1159,7 +1175,8 @@ def extract_attribute_urls(response: scrapy.http.Response) -> set[str]:
     return discovered_urls
 
 
-def extract_discovery_candidates(response: scrapy.http.Response) -> dict[str, set[str]]:
+def extract_discovery_candidates(response: scrapy.http.Response) -> tuple[dict[str, set[str]], bool]:
+    """Return (candidates, used_lightweight_only). Lightweight mode skips very expensive passes."""
     candidates: dict[str, set[str]] = defaultdict(set)
 
     for href in response.css("a::attr(href)").getall():
@@ -1167,6 +1184,16 @@ def extract_discovery_candidates(response: scrapy.http.Response) -> dict[str, se
 
     for action in response.css("form::attr(action)").getall():
         candidates["form_action"].add(normalize_url(urljoin(response.url, action)))
+
+    body_len = len(response.body or b"")
+    if body_len > LINK_EXTRACTION_FULL_MAX_BYTES:
+        logging.getLogger("nightmare").info(
+            "Large response (%d bytes) at %s: lightweight link extraction only "
+            "(skipping heavy DOM scans and full-page embedded URL regex)",
+            body_len,
+            response.url,
+        )
+        return candidates, True
 
     for href in response.css("*:not(a):not(form)::attr(href)").getall():
         candidates["href_reference"].add(normalize_url(urljoin(response.url, href)))
@@ -1180,7 +1207,7 @@ def extract_discovery_candidates(response: scrapy.http.Response) -> dict[str, se
     for attribute_url in extract_attribute_urls(response):
         candidates["attribute_route"].add(attribute_url)
 
-    return candidates
+    return candidates, False
 
 
 def is_markup_response(response: scrapy.http.Response) -> bool:
@@ -1333,10 +1360,13 @@ class DomainSpider(scrapy.Spider):
     ):
         super().__init__(*args, **kwargs)
         self.start_url = normalize_url(start_url)
-        initial_start_urls = start_urls or [self.start_url]
+        # Empty list means "resume found nothing to crawl" — do not substitute ``start_url`` here,
+        # or we'd re-queue an already-visited seed and Scrapy would exit with zero requests.
+        if start_urls is None:
+            initial_start_urls = [self.start_url]
+        else:
+            initial_start_urls = list(start_urls)
         self.start_urls = [normalize_url(url) for url in initial_start_urls if isinstance(url, str) and url.strip()]
-        if not self.start_urls:
-            self.start_urls = [self.start_url]
         self.root_domain = root_domain
         self.max_pages = max_pages
         self.state = state
@@ -1508,7 +1538,12 @@ class DomainSpider(scrapy.Spider):
             self._save_session_state()
             return
 
-        candidates = extract_discovery_candidates(response)
+        candidates, lightweight_extraction = extract_discovery_candidates(response)
+        if lightweight_extraction and self.progress is not None:
+            self.progress.info(
+                f"Large HTML ({len(response.body or b'')} bytes) at {current_url}: "
+                "using fast link extraction only (anchors and forms); crawl continues."
+            )
         source_counts = ", ".join(
             f"{source_type}={len(urls)}" for source_type, urls in sorted(candidates.items())
         ) or "none"
@@ -2086,6 +2121,80 @@ def merge_source_of_truth_payload(existing: dict[str, Any], current: dict[str, A
     return merged
 
 
+def _dedupe_parameter_rows(parameters: Any) -> list[dict[str, Any]]:
+    """One row per parameter name; union observed values and types."""
+    if not isinstance(parameters, list):
+        return []
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in parameters:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        types_in = row.get("observed_data_types", [])
+        if not isinstance(types_in, list):
+            types_in = []
+        type_set = {str(t).strip().lower() for t in types_in if str(t).strip()}
+        if not type_set and isinstance(row.get("canonical_data_type"), str):
+            ct = str(row.get("canonical_data_type", "")).strip().lower()
+            if ct:
+                type_set.add(ct)
+        values_in = row.get("observed_values", [])
+        value_set = {str(v) for v in (values_in if isinstance(values_in, list) else []) if v is not None}
+        if name not in by_name:
+            by_name[name] = {
+                "name": name,
+                "observed_data_types": sorted(type_set),
+                "observed_values": sorted(value_set),
+                "canonical_data_type": merge_query_types(set(type_set) if type_set else {"string"}),
+            }
+            continue
+        cur = by_name[name]
+        prev_types = set(cur.get("observed_data_types", [])) if isinstance(cur.get("observed_data_types"), list) else set()
+        merged_types = {str(t).strip().lower() for t in prev_types if str(t).strip()} | type_set
+        cur["observed_data_types"] = sorted(merged_types)
+        prev_vals = set(cur.get("observed_values", [])) if isinstance(cur.get("observed_values"), list) else set()
+        cur["observed_values"] = sorted({str(v) for v in prev_vals | value_set})
+        cur["canonical_data_type"] = merge_query_types(merged_types if merged_types else {"string"})
+    return [by_name[key] for key in sorted(by_name.keys())]
+
+
+def deduplicate_parameter_inventory_entries(entries: Any) -> list[dict[str, Any]]:
+    """Unique ``url`` keys (normalized); merged ``parameters`` without duplicate names."""
+    if not isinstance(entries, list):
+        return []
+    by_url: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_url = str(entry.get("url", "")).strip()
+        if not raw_url:
+            continue
+        norm = normalize_url(raw_url)
+        parsed = urlparse(norm)
+        host = parsed.netloc.lower()
+        path = parsed.path or "/"
+        if path != "/":
+            path = path.rstrip("/") or "/"
+        row_params = _dedupe_parameter_rows(entry.get("parameters"))
+        if norm not in by_url:
+            merged = dict(entry)
+            merged["url"] = norm
+            merged["host"] = host
+            merged["path"] = path
+            merged["parameters"] = row_params
+            by_url[norm] = merged
+            continue
+        existing = by_url[norm]
+        combined_params = _dedupe_parameter_rows(
+            (existing.get("parameters") if isinstance(existing.get("parameters"), list) else [])
+            + (entry.get("parameters") if isinstance(entry.get("parameters"), list) else [])
+        )
+        existing["parameters"] = combined_params
+    return [by_url[key] for key in sorted(by_url.keys())]
+
+
 def build_source_of_truth_payload(root_domain: str, state: CrawlState) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     source_urls = sorted(set(filter_urls_for_source_of_truth(list(state.url_inventory.keys()))))
@@ -2101,10 +2210,11 @@ def build_source_of_truth_payload(root_domain: str, state: CrawlState) -> dict[s
 
 
 def build_parameter_inventory_payload(source_of_truth_payload: dict[str, Any]) -> dict[str, Any]:
+    raw_entries = source_of_truth_payload.get("parameterized_urls", [])
     return {
         "generated_at_utc": source_of_truth_payload.get("updated_at_utc") or source_of_truth_payload.get("generated_at_utc"),
         "root_domain": source_of_truth_payload.get("root_domain"),
-        "entries": source_of_truth_payload.get("parameterized_urls", []),
+        "entries": deduplicate_parameter_inventory_entries(raw_entries),
     }
 
 
@@ -3199,6 +3309,31 @@ def probe_url_existence(
     }
 
 
+def effective_crawl_seeds(
+    start_urls: list[str],
+    state: CrawlState,
+    root_domain: str,
+    max_pages: int,
+) -> list[str]:
+    """URLs the spider would actually schedule in ``start()`` (matches DomainSpider logic)."""
+    normalized_seeds = [normalize_url(u) for u in start_urls if isinstance(u, str) and u.strip()]
+    remaining_budget = max(0, max_pages - len(state.visited_urls))
+    if remaining_budget <= 0:
+        return []
+    out: list[str] = []
+    for seed_url in normalized_seeds:
+        if seed_url in state.visited_urls:
+            continue
+        if not is_allowed_domain(seed_url, root_domain):
+            continue
+        if not should_crawl_url(seed_url):
+            continue
+        out.append(seed_url)
+        if len(out) >= remaining_budget:
+            break
+    return out
+
+
 def crawl_domain(
     start_url: str,
     max_pages: int,
@@ -3324,6 +3459,16 @@ def crawl_domain(
     if scrapy_log_file:
         process_settings["LOG_FILE"] = scrapy_log_file
 
+    queued = effective_crawl_seeds(start_urls, state, root_domain, max_pages)
+    if not queued and progress is not None:
+        session_hint = f" Session file: {session_path.resolve()}" if session_path else ""
+        progress.info(
+            "No crawl requests will be sent: every seed/ frontier URL is already visited or skipped "
+            f"(e.g. static asset extension), or the page budget is exhausted.{session_hint} "
+            "For a fresh crawl, run with --no-resume or delete that session file and set "
+            '"resume": false in config.'
+        )
+
     process = CrawlerProcess(settings=process_settings)
     process.crawl(
         DomainSpider,
@@ -3376,12 +3521,387 @@ def crawl_domain(
     return root_domain, state
 
 
+BATCH_STATE_SCHEMA_VERSION = 1
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        SYNCHRONIZE = 0x00100000
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    else:
+        return True
+
+
+def load_target_file_entries(targets_path: Path) -> list[dict[str, Any]]:
+    text = targets_path.read_text(encoding="utf-8-sig")
+    entries: list[dict[str, Any]] = []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        entry_id = hashlib.sha1(f"{line_no}:{stripped}".encode("utf-8")).hexdigest()[:16]
+        entries.append({"entry_id": entry_id, "line": line_no, "raw": stripped})
+    return entries
+
+
+def prepare_target_entry_fields(entry: dict[str, Any]) -> None:
+    if entry.get("start_url") and entry.get("root_domain"):
+        return
+    raw = str(entry.get("raw", "")).strip()
+    if any(ch in raw for ch in "*?"):
+        entry["status"] = "skipped"
+        entry["error"] = "wildcard target; specify a concrete hostname/URL for crawling"
+        return
+    try:
+        url = coerce_http_https_start_url(raw)
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("URL must have an http(s) scheme and hostname")
+        if any(ch.isspace() for ch in parsed.hostname):
+            raise ValueError("hostname contains whitespace (invalid URL)")
+        if "*" in (parsed.hostname or "") or "?" in (parsed.hostname or ""):
+            raise ValueError("hostname wildcards are not supported")
+        root_domain = get_root_domain(parsed.hostname)
+        if not root_domain:
+            raise ValueError("unable to derive registrable domain")
+        entry["start_url"] = url
+        entry["root_domain"] = root_domain
+    except Exception as exc:
+        entry["status"] = "skipped"
+        entry["error"] = str(exc)[:800]
+
+
+def reconcile_batch_state(
+    existing: dict[str, Any] | None,
+    targets_path: Path,
+    target_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(existing, dict):
+        for item in existing.get("entries", []):
+            if isinstance(item, dict) and item.get("entry_id"):
+                by_id[str(item["entry_id"])] = item
+    merged_entries: list[dict[str, Any]] = []
+    for row in target_rows:
+        eid = str(row["entry_id"])
+        if eid in by_id:
+            merged_entries.append(by_id[eid])
+            continue
+        merged_entries.append(
+            {
+                "entry_id": eid,
+                "line": row["line"],
+                "raw": row["raw"],
+                "status": "pending",
+                "start_url": None,
+                "root_domain": None,
+                "error": None,
+                "started_at_utc": None,
+                "completed_at_utc": None,
+                "exit_code": None,
+                "worker_pid": None,
+            }
+        )
+    return {
+        "schema_version": BATCH_STATE_SCHEMA_VERSION,
+        "targets_path": str(targets_path.resolve()),
+        "targets_file_mtime": targets_path.stat().st_mtime,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "entries": merged_entries,
+    }
+
+
+def recover_stale_running_entries(state: dict[str, Any]) -> None:
+    for entry in state.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status", "")) == "interrupted":
+            entry["status"] = "pending"
+            entry["worker_pid"] = None
+            entry["started_at_utc"] = None
+            entry["completed_at_utc"] = None
+            entry["exit_code"] = None
+            continue
+        if str(entry.get("status", "")) != "running":
+            continue
+        pid = int(entry.get("worker_pid") or 0)
+        if not process_is_running(pid):
+            entry["status"] = "pending"
+            entry["error"] = (entry.get("error") or "").strip() or "recovered stale run (worker process ended unexpectedly)"
+            entry["worker_pid"] = None
+            entry["started_at_utc"] = None
+
+
+def domain_lock_file_path(lock_dir: Path, domain: str) -> Path:
+    safe = re.sub(r"[^\w.-]+", "_", domain).strip("._-")[:180] or "domain"
+    return lock_dir / f"{safe}.lock"
+
+
+def _domain_lock_payload_stale(payload: dict[str, Any], lock_path: Path, max_age_seconds: float) -> bool:
+    try:
+        pid = int(payload.get("pid") or 0)
+    except Exception:
+        return True
+    if pid > 0 and process_is_running(pid):
+        return False
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        return True
+    return age > max_age_seconds
+
+
+def acquire_domain_lock_file(lock_dir: Path, domain: str, *, max_age_seconds: float = 6 * 3600) -> Path | None:
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    path = domain_lock_file_path(lock_dir, domain)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return path
+    except FileExistsError:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+            payload = json.loads(raw) if raw else {}
+            if isinstance(payload, dict) and not _domain_lock_payload_stale(payload, path, max_age_seconds):
+                return None
+        except Exception:
+            pass
+        try:
+            path.unlink()
+        except OSError:
+            return None
+        return acquire_domain_lock_file(lock_dir, domain, max_age_seconds=max_age_seconds)
+
+
+def write_domain_lock_pid(lock_path: Path, pid: int) -> None:
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": int(pid),
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def release_domain_lock_file(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
+def filter_argv_for_batch_child(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg in ("--batch-workers", "--targets-file", "--batch-state-dir"):
+            skip = True
+            continue
+        if arg.startswith("--batch-workers=") or arg.startswith("--targets-file=") or arg.startswith("--batch-state-dir="):
+            continue
+        out.append(arg)
+    return out
+
+
+def run_multi_target_orchestrator(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    config_path: Path,
+) -> None:
+    targets_raw = merged_value(args.targets_file, config, "targets_file", "targets.txt")
+    targets_path = Path(str(targets_raw)).expanduser()
+    if not targets_path.is_absolute():
+        targets_path = (BASE_DIR / targets_path).resolve()
+    if not targets_path.is_file():
+        raise FileNotFoundError(f"Targets file not found: {targets_path}")
+
+    worker_count = int(merged_value(args.batch_workers, config, "batch_workers", 8))
+    if worker_count < 1:
+        raise ValueError("batch_workers must be at least 1")
+
+    state_dir_raw = merged_value(args.batch_state_dir, config, "batch_state_dir", None)
+    if state_dir_raw:
+        state_dir = Path(str(state_dir_raw)).expanduser()
+        if not state_dir.is_absolute():
+            state_dir = (OUTPUT_DIR / state_dir).resolve()
+    else:
+        state_dir = (OUTPUT_DIR / "batch_state").resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_path = state_dir / "batch_run_state.json"
+    lock_dir = state_dir / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+
+    target_rows = load_target_file_entries(targets_path)
+    existing_state: dict[str, Any] | None = None
+    if state_path.is_file():
+        try:
+            existing_state = read_json_file(state_path)
+        except Exception:
+            existing_state = None
+    state = reconcile_batch_state(existing_state, targets_path, target_rows)
+    recover_stale_running_entries(state)
+    for entry in state["entries"]:
+        if isinstance(entry, dict) and entry.get("status") == "pending":
+            prepare_target_entry_fields(entry)
+    state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write_json(state_path, state)
+
+    script_path = Path(__file__).resolve()
+    child_suffix = filter_argv_for_batch_child(sys.argv[1:])
+
+    pending_queue: list[dict[str, Any]] = [
+        e for e in state["entries"] if isinstance(e, dict) and e.get("status") == "pending" and e.get("start_url")
+    ]
+    active: dict[str, tuple[subprocess.Popen, Path | None, dict[str, Any]]] = {}
+    print(
+        f"[batch] targets={targets_path} ({len(target_rows)} non-empty lines), "
+        f"workers={worker_count}, state={state_path}",
+        flush=True,
+    )
+
+    def persist() -> None:
+        state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        _atomic_write_json(state_path, state)
+
+    def terminate_running_workers() -> None:
+        for _eid, (proc, lock_path, _ent) in list(active.items()):
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            release_domain_lock_file(lock_path)
+
+    def handle_sigint(signum: int, frame: Any) -> None:
+        print("\n[batch] interrupt: terminating active workers…", flush=True)
+        terminate_running_workers()
+        for entry in state.get("entries", []):
+            if isinstance(entry, dict) and entry.get("status") == "running":
+                entry["status"] = "interrupted"
+                entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+                entry["error"] = (entry.get("error") or "").strip() or "batch orchestrator interrupted"
+        persist()
+        force_process_exit(130)
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    worst_exit = 0
+    try:
+        while pending_queue or active:
+            while len(active) < worker_count and pending_queue:
+                entry = pending_queue.pop(0)
+                domain = str(entry.get("root_domain") or "")
+                lock_path = acquire_domain_lock_file(lock_dir, domain)
+                if lock_path is None:
+                    print(f"[batch] skip (lock busy): {domain} — {entry.get('start_url')}", flush=True)
+                    entry["status"] = "skipped"
+                    entry["error"] = "domain lock held by another live process"
+                    entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+                    persist()
+                    continue
+                start_url = str(entry.get("start_url") or "")
+                cmd = [sys.executable, "-u", str(script_path), start_url] + child_suffix
+                entry["status"] = "running"
+                entry["started_at_utc"] = datetime.now(timezone.utc).isoformat()
+                entry["completed_at_utc"] = None
+                entry["exit_code"] = None
+                entry["worker_pid"] = None
+                entry["error"] = None
+                persist()
+                print(f"[batch] spawn: {domain} pid-pending cmd={start_url!r}", flush=True)
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(BASE_DIR),
+                    env=os.environ.copy(),
+                )
+                entry["worker_pid"] = proc.pid
+                write_domain_lock_pid(lock_path, proc.pid)
+                active[str(entry["entry_id"])] = (proc, lock_path, entry)
+                persist()
+
+            if not active:
+                break
+
+            time.sleep(0.25)
+            for entry_id, (proc, lock_path, entry) in list(active.items()):
+                code = proc.poll()
+                if code is None:
+                    continue
+                release_domain_lock_file(lock_path)
+                del active[entry_id]
+                entry["exit_code"] = int(code)
+                entry["worker_pid"] = None
+                entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+                if code == 0:
+                    entry["status"] = "completed"
+                    entry["error"] = None
+                else:
+                    entry["status"] = "failed"
+                    entry["error"] = f"subprocess exited with code {code}"
+                    worst_exit = 1
+                print(
+                    f"[batch] finished: {entry.get('root_domain')} exit={code} url={entry.get('start_url')!r}",
+                    flush=True,
+                )
+                persist()
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        terminate_running_workers()
+        persist()
+
+    summary_counts: dict[str, int] = defaultdict(int)
+    for entry in state.get("entries", []):
+        if isinstance(entry, dict):
+            summary_counts[str(entry.get("status", "unknown"))] += 1
+    print(f"[batch] done. State file: {state_path}", flush=True)
+    print(f"[batch] summary: {dict(summary_counts)}", flush=True)
+    if worst_exit != 0:
+        force_process_exit(1)
+
+
 def parse_args() -> argparse.Namespace:
     ensure_string_resources_loaded()
     parser = argparse.ArgumentParser(
         description=get_string_config_value(HELP_TEXTS, "parser_description")
     )
-    parser.add_argument("url", help=get_string_config_value(HELP_TEXTS, "url_help"))
+    parser.add_argument(
+        "url",
+        nargs="?",
+        default=None,
+        help=get_string_config_value(HELP_TEXTS, "url_help"),
+    )
     parser.add_argument(
         "--config",
         default="nightmare.json",
@@ -3508,6 +4028,12 @@ def parse_args() -> argparse.Namespace:
         help=get_string_config_value(HELP_TEXTS, "resume_help"),
     )
     parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        default=None,
+        help=get_string_config_value(HELP_TEXTS, "no_resume_help"),
+    )
+    parser.add_argument(
         "--log-file",
         default=None,
         help=get_string_config_value(HELP_TEXTS, "log_file_help"),
@@ -3561,6 +4087,22 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help=get_string_config_value(HELP_TEXTS, "no_truncated_for_ai_help"),
     )
+    parser.add_argument(
+        "--targets-file",
+        default=None,
+        help=get_string_config_value(HELP_TEXTS, "targets_file_help"),
+    )
+    parser.add_argument(
+        "--batch-workers",
+        type=int,
+        default=None,
+        help=get_string_config_value(HELP_TEXTS, "batch_workers_help"),
+    )
+    parser.add_argument(
+        "--batch-state-dir",
+        default=None,
+        help=get_string_config_value(HELP_TEXTS, "batch_state_dir_help"),
+    )
     return parser.parse_args()
 
 
@@ -3589,6 +4131,11 @@ def main() -> None:
     config = read_json_file(config_path)
     apply_extension_config(config)
 
+    url_arg = optional_string(args.url)
+    if not url_arg:
+        run_multi_target_orchestrator(args, config, config_path)
+        return
+
     max_pages = int(merged_value(args.max_pages, config, "max_pages", 300))
     model = str(merged_value(args.model, config, "model", "gpt-5-mini"))
     openai_timeout = float(
@@ -3607,6 +4154,8 @@ def main() -> None:
     verbose = bool(merged_value(args.verbose, config, "verbose", False))
     no_ai = bool(merged_value(args.no_ai, config, "no_ai", False))
     resume = bool(merged_value(args.resume, config, "resume", False))
+    if args.no_resume:
+        resume = False
     html_report_enabled = bool(merged_value(args.html_report, config, "html_report", False))
     truncated_for_ai = bool(merged_value(args.truncated_for_ai, config, "truncated_for_ai", True))
     app_log_level_name = str(merged_value(args.log_level, config, "log_level", "INFO")).upper()
@@ -3640,7 +4189,7 @@ def main() -> None:
     if ai_probe_delay <= 0:
         raise ValueError("ai_probe_delay must be greater than 0")
 
-    args.url = coerce_http_https_start_url(args.url)
+    args.url = coerce_http_https_start_url(url_arg)
     parsed_url = urlparse(args.url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
         raise ValueError("url must be a valid http/https URL")

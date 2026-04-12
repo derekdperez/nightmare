@@ -1,6 +1,6 @@
 ﻿{
   "parser_description": "Crawl a domain, build a sitemap, infer likely API endpoints, and optionally ask OpenAI for additional URLs and analysis.",
-  "url_help": "Starting URL to crawl (http/https, or a bare hostname like example.com — https is assumed).",
+  "url_help": "Starting URL to crawl (http/https, or a bare hostname like example.com — https is assumed). Omit to run in batch mode using targets_file (see config) or --targets-file.",
   "config_help": "Path to JSON config file. Relative paths resolve under config/.",
   "max_pages_help": "Maximum number of pages to crawl before stopping.",
   "model_help": "OpenAI model name to use for AI-assisted stages.",
@@ -23,6 +23,7 @@
   "no_ai_help": "Skip all OpenAI-assisted stages and generate only local artifacts.",
   "session_state_output_help": "Path for the crawl session-state JSON file. Relative paths resolve under output/.",
   "resume_help": "Resume from an existing crawl session-state file instead of starting fresh.",
+  "no_resume_help": "Ignore saved session state and crawl from scratch (overrides config resume and --resume).",
   "log_file_help": "Path for the application log file. Relative paths resolve under output/.",
   "log_level_help": "Application log level for the log file (for example INFO or DEBUG).",
   "console_log_level_help": "Console log level for application logs.",
@@ -32,5 +33,8 @@
   "html_report_output_help": "Path for the HTML report output. Relative paths resolve under output/. Default: output/<root-domain>/report.html.",
   "ai_data_output_help": "Path for the AI endpoint-schema data file. Relative paths resolve under output/.",
   "truncated_for_ai_help": "Mark compact AI payloads as truncated when data is sampled down for model context.",
-  "no_truncated_for_ai_help": "Disable the truncated_for_ai flag in compact AI payloads."
+  "no_truncated_for_ai_help": "Disable the truncated_for_ai flag in compact AI payloads.",
+  "targets_file_help": "Text file of target hosts/URLs (one per line, # comments allowed). Used when no url argument is given. Relative paths resolve against the repo root (nightmare.py directory).",
+  "batch_workers_help": "Maximum concurrent domain crawls when running without a url (each crawl runs in its own subprocess). Overrides config batch_workers.",
+  "batch_state_dir_help": "Directory for batch_run_state.json and per-domain lock files. Relative paths resolve under output/. Default: output/batch_state."
 }
