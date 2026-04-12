@@ -12,6 +12,7 @@
   "condensed_sitemap_output_help": "Path for the condensed sitemap JSON output. Relative paths resolve under output/.",
   "url_inventory_output_help": "Path for the URL inventory JSON output. Relative paths resolve under output/.",
   "evidence_dir_help": "Directory where crawl and verification evidence files are stored. Relative paths resolve under output/.",
+  "crawl_wordlist_help": "Path to a newline-delimited path wordlist used to seed spider requests (default: resources/wordlists/file_path_list.txt). Relative paths resolve from the repo root; bare filenames also search resources/wordlists/.",
   "verify_timeout_help": "Timeout in seconds for URL verification requests.",
   "verify_delay_help": "Delay in seconds between URL verification requests.",
   "verify_urls_help": "Verify discovered URLs with follow-up requests after the crawl completes.",

@@ -1,0 +1,9 @@
+TODO
+
+Now:
+- Remove html report generation logic from fozzy - move to separate report generating tool in it's own file
+
+Soon:
+- Implement a better way to keep track of TODO items
+
+Later:

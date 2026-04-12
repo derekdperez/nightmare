@@ -31,6 +31,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -96,8 +97,8 @@ def default_fozzy_config() -> dict[str, Any]:
         "max_workers_per_subdomain": 1,
         "max_requests_per_endpoint": None,
         "live_report_interval_seconds": 5.0,
-        "body_preview_limit": 2048,
-        "reflection_alert_ignore_exact": ["test"],
+        "body_preview_limit": 50000,
+        "reflection_alert_ignore_exact": ["test"," ",""],
         "default_generic_by_type": {
             "bool": "true",
             "int": "1",
@@ -451,7 +452,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Override fozzy.json max_background_workers (default 8, same idea as nightmare.json batch_workers). "
-            "Per eTLD+1 and per-host caps also apply (max_workers_per_domain / max_workers_per_subdomain)."
+            "Per eTLD+1 and per-host caps also apply (max_workers_per_domain / max_workers_per_subdomain). "
+            "When running with no parameters file (--scan-root incremental mode), this also controls concurrent domain runs."
         ),
     )
     parser.add_argument(
@@ -4007,22 +4009,105 @@ def run_incremental_domains(args: argparse.Namespace) -> None:
         print(f"Master results summary HTML: {master_html} ({n_dom} domain output tree(s))")
         return
 
-    print(f"Incremental Fozzy: running {len(to_run)} domain(s) under {scan_root}")
+    cfg = build_effective_fozzy_config(args)
+    domain_workers = max(1, int(cfg.get("max_background_workers", 1)))
+    print(
+        f"Incremental Fozzy: running {len(to_run)} domain(s) under {scan_root} "
+        f"with {domain_workers} concurrent domain worker(s)"
+    )
+    if domain_workers > 1:
+        print(
+            "Each domain run is executed as an isolated child process to enable true multi-domain parallelism "
+            "and avoid shared global-state contention."
+        )
 
-    for domain_dir, params_path in to_run:
-        print(f"\n=== {domain_dir.name} ===\nParameters: {params_path}", flush=True)
-        result = run_fozzy_for_parameters(params_path, args)
-        if result.get("interrupted") or result.get("cancelled_by_user"):
-            print(f"Stopped after {domain_dir.name}; incremental state not updated for this domain.", flush=True)
-            break
-        if "domains" not in state or not isinstance(state["domains"], dict):
-            state["domains"] = {}
-        state["domains"][domain_dir.name] = {
-            "folder_max_mtime_ns": folder_tree_max_mtime_ns(domain_dir),
-            "last_completed_run_utc": datetime.now(timezone.utc).isoformat(),
-            "parameters_path": str(params_path),
-        }
-        save_incremental_state(state_path, state)
+    if "domains" not in state or not isinstance(state["domains"], dict):
+        state["domains"] = {}
+
+    script_path = Path(__file__).resolve()
+    pending: list[tuple[Path, Path]] = list(to_run)
+    active: dict[str, tuple[subprocess.Popen, Path, Path]] = {}
+    failed_domains: list[tuple[str, int]] = []
+    interrupted = False
+
+    def build_child_command(params_path: Path) -> list[str]:
+        cmd = [sys.executable, str(script_path), str(params_path), "--config", str(args.fozzy_config), "--batch"]
+        if args.timeout is not None:
+            cmd += ["--timeout", str(args.timeout)]
+        if args.delay is not None:
+            cmd += ["--delay", str(args.delay)]
+        if args.max_permutations is not None:
+            cmd += ["--max-permutations", str(args.max_permutations)]
+        if args.max_requests_per_endpoint is not None:
+            cmd += ["--max-requests-per-endpoint", str(args.max_requests_per_endpoint)]
+        if args.quick_fuzz_list is not None:
+            cmd += ["--quick-fuzz-list", str(args.quick_fuzz_list)]
+        if args.output_dir is not None:
+            cmd += ["--output-dir", str(args.output_dir)]
+        if args.dry_run:
+            cmd.append("--dry-run")
+        if args.live:
+            cmd.append("--live")
+        # Global incremental worker pool controls overall domain fan-out in this mode.
+        # Keep each child domain runner single-worker to prevent N x M thread explosion.
+        cmd += ["--max-background-workers", "1", "--max-workers-per-domain", "1", "--max-workers-per-subdomain", "1"]
+        return cmd
+
+    try:
+        while pending or active:
+            while pending and len(active) < domain_workers:
+                domain_dir, params_path = pending.pop(0)
+                print(f"\n=== {domain_dir.name} ===\nParameters: {params_path}", flush=True)
+                child_cmd = build_child_command(params_path)
+                proc = subprocess.Popen(child_cmd, cwd=str(FOZZY_BASE_DIR))
+                active[domain_dir.name] = (proc, domain_dir, params_path)
+
+            finished: list[str] = []
+            for domain_name, (proc, domain_dir, params_path) in list(active.items()):
+                code = proc.poll()
+                if code is None:
+                    continue
+                finished.append(domain_name)
+                if code == 0:
+                    state["domains"][domain_dir.name] = {
+                        "folder_max_mtime_ns": folder_tree_max_mtime_ns(domain_dir),
+                        "last_completed_run_utc": datetime.now(timezone.utc).isoformat(),
+                        "parameters_path": str(params_path),
+                    }
+                    save_incremental_state(state_path, state)
+                else:
+                    failed_domains.append((domain_dir.name, int(code)))
+                    print(
+                        f"Warning: domain run failed for {domain_dir.name} (exit={code}). "
+                        "Incremental state was not updated for this domain.",
+                        flush=True,
+                    )
+            for domain_name in finished:
+                active.pop(domain_name, None)
+
+            if active:
+                time.sleep(0.2)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupt received; terminating active domain workers...", flush=True)
+        for proc, _domain_dir, _params_path in active.values():
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        for proc, _domain_dir, _params_path in active.values():
+            try:
+                proc.wait(timeout=5.0)
+            except Exception:
+                pass
+
+    if failed_domains:
+        print("\nIncremental failures:", flush=True)
+        for domain_name, code in failed_domains:
+            print(f"  - {domain_name}: exit={code}", flush=True)
+    if interrupted:
+        print("Incremental run interrupted; some domains may have partial outputs.", flush=True)
 
     master_json, master_html, n_dom = write_master_results_summary(scan_root, prefer_nested=None)
     print(f"\nMaster results summary JSON: {master_json}")

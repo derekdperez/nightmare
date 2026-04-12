@@ -650,6 +650,34 @@ def resolve_output_path(path_value: str) -> Path:
     return OUTPUT_DIR / path
 
 
+def resolve_wordlist_path(path_value: str) -> Path:
+    """Resolve crawl wordlist paths relative to repo root by default.
+
+    Bare filenames fall back to ``resources/wordlists`` for convenience.
+    """
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    repo_relative = BASE_DIR / path
+    if repo_relative.exists():
+        return repo_relative
+    if len(path.parts) == 1:
+        return BASE_DIR / "resources" / "wordlists" / path
+    return repo_relative
+
+
+def format_repo_relative_path(path: Path) -> str:
+    resolved = path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    try:
+        return resolved.relative_to(BASE_DIR).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
 def merged_value(cli_value: Any, config: dict[str, Any], key: str, default: Any) -> Any:
     if cli_value is not None:
         return cli_value
@@ -917,6 +945,8 @@ class CrawlState:
     url_inventory: dict[str, UrlInventoryRecord] = field(default_factory=dict)
     #: Normalized crawl seed URLs built from ``file_path_list.txt`` (for reporting under ``guessed_paths/``).
     wordlist_path_seeds: list[str] = field(default_factory=list)
+    #: Source path used for wordlist path seed generation (repo-relative when possible).
+    wordlist_source: str = FILE_PATH_WORDLIST_DISCOVERED_FROM
 
 
 DIRECT_DISCOVERY_SOURCES = {
@@ -968,6 +998,7 @@ def crawl_state_to_dict(state: CrawlState) -> dict[str, Any]:
         "link_graph": {source: sorted(targets) for source, targets in state.link_graph.items()},
         "url_inventory": {url: record.to_dict() for url, record in state.url_inventory.items()},
         "wordlist_path_seeds": list(state.wordlist_path_seeds),
+        "wordlist_source": str(state.wordlist_source or FILE_PATH_WORDLIST_DISCOVERED_FROM),
     }
 
 
@@ -1033,6 +1064,9 @@ def crawl_state_from_dict(payload: dict[str, Any]) -> CrawlState:
         state.wordlist_path_seeds = [
             normalize_url(u) for u in wordlist_seeds if isinstance(u, str) and u.strip()
         ]
+    wordlist_source = payload.get("wordlist_source")
+    if isinstance(wordlist_source, str) and wordlist_source.strip():
+        state.wordlist_source = wordlist_source.strip()
 
     return state
 
@@ -3327,9 +3361,13 @@ def probe_url_existence(
     }
 
 
-def load_file_path_wordlist_seed_urls(normalized_start_url: str, root_domain: str) -> list[str]:
-    """Build absolute http(s) URLs from ``resources/wordlists/file_path_list.txt`` for the crawl origin."""
-    if not FILE_PATH_WORDLIST_PATH.is_file():
+def load_path_wordlist_seed_urls(
+    normalized_start_url: str,
+    root_domain: str,
+    wordlist_path: Path,
+) -> list[str]:
+    """Build absolute same-domain URLs from a path wordlist for the crawl origin."""
+    if not wordlist_path.is_file():
         return []
     parsed = urlparse(normalized_start_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -3340,15 +3378,18 @@ def load_file_path_wordlist_seed_urls(normalized_start_url: str, root_domain: st
     origin = urlunparse((parsed.scheme, parsed.netloc, "/", "", "", ""))
     out: list[str] = []
     try:
-        text = FILE_PATH_WORDLIST_PATH.read_text(encoding="utf-8", errors="replace")
+        text = wordlist_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     for line in text.splitlines():
-        raw = line.strip()
+        raw = line.split("#", 1)[0].strip()
         if not raw or raw.startswith("#"):
             continue
-        path_part = raw if raw.startswith("/") else f"/{raw}"
-        full = normalize_url(urljoin(origin, path_part))
+        if raw.startswith("http://") or raw.startswith("https://"):
+            full = normalize_url(raw)
+        else:
+            path_part = raw if raw.startswith("/") else f"/{raw}"
+            full = normalize_url(urljoin(origin, path_part))
         if not is_allowed_domain(full, root_domain):
             continue
         out.append(full)
@@ -3381,7 +3422,7 @@ def write_wordlist_guessed_paths_index(site_output_dir: Path, state: CrawlState)
         entries.append({"url": url, "visited": visited, "http_status": code_i, "hit": is_hit})
     payload: dict[str, Any] = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "wordlist_source": FILE_PATH_WORDLIST_DISCOVERED_FROM,
+        "wordlist_source": str(getattr(state, "wordlist_source", "") or FILE_PATH_WORDLIST_DISCOVERED_FROM),
         "wordlist_paths_total": len(seeds),
         "visited_count": visited_count,
         "hits_count": hits,
@@ -3431,6 +3472,7 @@ def crawl_domain(
     resume: bool = False,
     scrapy_log_level: str = "WARNING",
     scrapy_log_file: str | None = None,
+    crawl_wordlist_path: Path | None = None,
     verbose: bool = False,
     progress: ProgressReporter | None = None,
 ) -> tuple[str, CrawlState]:
@@ -3522,9 +3564,19 @@ def crawl_domain(
             evidence_file=seed_evidence_file,
         )
 
-    wl_from_file = load_file_path_wordlist_seed_urls(normalized_start_url, root_domain)
+    active_wordlist_path = crawl_wordlist_path or FILE_PATH_WORDLIST_PATH
+    state.wordlist_source = format_repo_relative_path(active_wordlist_path)
+    wl_from_file = load_path_wordlist_seed_urls(normalized_start_url, root_domain, active_wordlist_path)
     state.wordlist_path_seeds = sorted(set(state.wordlist_path_seeds) | set(wl_from_file))
     if wl_from_file:
+        for guessed_url in wl_from_file:
+            register_url_discovery(
+                state=state,
+                url=guessed_url,
+                source_type="file_path_wordlist",
+                discovered_from=state.wordlist_source,
+                evidence_file="",
+            )
         seen_seed = set(start_urls)
         for u in wl_from_file:
             if u not in seen_seed:
@@ -3532,20 +3584,36 @@ def crawl_domain(
                 seen_seed.add(u)
         if progress is not None:
             progress.info(
-                f"Appended {len(wl_from_file)} URL(s) from {FILE_PATH_WORDLIST_DISCOVERED_FROM} as crawl seeds "
-                f"({len(state.wordlist_path_seeds)} unique paths tracked; max_pages may limit how many run)"
+                f"Appended {len(wl_from_file)} URL(s) from {state.wordlist_source} as crawl seeds "
+                f"({len(state.wordlist_path_seeds)} unique paths tracked)"
             )
-    elif progress is not None and not FILE_PATH_WORDLIST_PATH.is_file():
-        progress.info(f"No path wordlist crawl seeds: missing file {FILE_PATH_WORDLIST_PATH}")
+    elif progress is not None and not active_wordlist_path.is_file():
+        progress.info(f"No path wordlist crawl seeds: missing file {active_wordlist_path}")
 
     wordlist_seed_set = set(state.wordlist_path_seeds)
+    unique_seed_urls = {
+        normalize_url(u) for u in start_urls if isinstance(u, str) and u.strip() and is_allowed_domain(u, root_domain)
+    }
+    pending_seed_urls = {
+        seed_url
+        for seed_url in unique_seed_urls
+        if seed_url not in state.visited_urls and (seed_url in wordlist_seed_set or should_crawl_url(seed_url))
+    }
+    effective_max_pages = max(max_pages, len(state.visited_urls) + len(pending_seed_urls))
+    if effective_max_pages != max_pages and progress is not None:
+        progress.info(
+            "Expanded crawl page budget to include all pending seed URLs: "
+            f"configured_max_pages={max_pages}, effective_max_pages={effective_max_pages}, "
+            f"pending_seed_urls={len(pending_seed_urls)}, pending_wordlist_paths="
+            f"{len([u for u in pending_seed_urls if u in wordlist_seed_set])}"
+        )
 
     if session_path is not None:
         save_session_state(
             session_state_path=session_path,
             start_url=normalized_start_url,
             root_domain=root_domain,
-            max_pages=max_pages,
+            max_pages=effective_max_pages,
             state=state,
         )
 
@@ -3563,7 +3631,7 @@ def crawl_domain(
         process_settings["LOG_FILE"] = scrapy_log_file
 
     queued = effective_crawl_seeds(
-        start_urls, state, root_domain, max_pages, wordlist_seed_urls=wordlist_seed_set
+        start_urls, state, root_domain, effective_max_pages, wordlist_seed_urls=wordlist_seed_set
     )
     if not queued and progress is not None:
         session_hint = f" Session file: {session_path.resolve()}" if session_path else ""
@@ -3580,7 +3648,7 @@ def crawl_domain(
         start_url=normalized_start_url,
         start_urls=start_urls,
         root_domain=root_domain,
-        max_pages=max_pages,
+        max_pages=effective_max_pages,
         state=state,
         evidence_dir=evidence_dir,
         session_state_path=str(session_path) if session_path is not None else None,
@@ -3620,7 +3688,7 @@ def crawl_domain(
             session_state_path=session_path,
             start_url=normalized_start_url,
             root_domain=root_domain,
-            max_pages=max_pages,
+            max_pages=effective_max_pages,
             state=state,
         )
 
@@ -4092,6 +4160,11 @@ def parse_args() -> argparse.Namespace:
         help=get_string_config_value(HELP_TEXTS, "evidence_dir_help"),
     )
     parser.add_argument(
+        "--crawl-wordlist",
+        default=None,
+        help=get_string_config_value(HELP_TEXTS, "crawl_wordlist_help"),
+    )
+    parser.add_argument(
         "--verify-timeout",
         type=float,
         default=None,
@@ -4274,6 +4347,10 @@ def main() -> None:
     ai_probe_per_host_max = int(merged_value(args.ai_probe_per_host_max, config, "ai_probe_per_host_max", 8))
     verify_timeout = float(merged_value(args.verify_timeout, config, "verify_timeout", 12.0))
     crawl_delay = float(merged_value(args.crawl_delay, config, "crawl_delay", 0.25))
+    crawl_wordlist_raw = optional_string(
+        merged_value(args.crawl_wordlist, config, "crawl_wordlist", FILE_PATH_WORDLIST_DISCOVERED_FROM)
+    )
+    crawl_wordlist_path = resolve_wordlist_path(crawl_wordlist_raw or FILE_PATH_WORDLIST_DISCOVERED_FROM)
     verify_delay = float(merged_value(args.verify_delay, config, "verify_delay", crawl_delay))
     ai_probe_delay = float(merged_value(args.ai_probe_delay, config, "ai_probe_delay", verify_delay))
     verify_urls = bool(merged_value(args.verify_urls, config, "verify_urls", False))
@@ -4464,6 +4541,7 @@ def main() -> None:
     progress.info(
         f"Throttle settings: crawl_delay={crawl_delay}s, max_delay={max_delay}s, verify_delay={verify_delay}s, verify_urls={verify_urls}"
     )
+    progress.info(f"Crawl path wordlist: {format_repo_relative_path(crawl_wordlist_path)}")
 
     interrupted = False
     interrupt_stage = ""
@@ -4483,6 +4561,7 @@ def main() -> None:
             resume=resume,
             scrapy_log_level=scrapy_log_level_name,
             scrapy_log_file=str(scrapy_log_file_path),
+            crawl_wordlist_path=crawl_wordlist_path,
             verbose=verbose,
             progress=progress,
         )
