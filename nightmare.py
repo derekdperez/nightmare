@@ -50,6 +50,8 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 NOT_FOUND_STATUSES = {404, 410}
 BASE_DIR = Path(__file__).resolve().parent
+FILE_PATH_WORDLIST_PATH = BASE_DIR / "resources" / "wordlists" / "file_path_list.txt"
+FILE_PATH_WORDLIST_DISCOVERED_FROM = "resources/wordlists/file_path_list.txt"
 CONFIG_DIR = BASE_DIR / "config"
 OUTPUT_DIR = BASE_DIR / "output"
 HELP_CONFIG_PATH = CONFIG_DIR / "nightmare.help.json"
@@ -913,6 +915,8 @@ class CrawlState:
     visited_urls: set[str] = field(default_factory=set)
     link_graph: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     url_inventory: dict[str, UrlInventoryRecord] = field(default_factory=dict)
+    #: Normalized crawl seed URLs built from ``file_path_list.txt`` (for reporting under ``guessed_paths/``).
+    wordlist_path_seeds: list[str] = field(default_factory=list)
 
 
 DIRECT_DISCOVERY_SOURCES = {
@@ -929,6 +933,7 @@ INFERENCE_DISCOVERY_SOURCES = {
     "ai_probe_request",
     "crawl_response",
     "seed_input",
+    "file_path_wordlist",
 }
 
 
@@ -962,6 +967,7 @@ def crawl_state_to_dict(state: CrawlState) -> dict[str, Any]:
         "visited_urls": sorted(state.visited_urls),
         "link_graph": {source: sorted(targets) for source, targets in state.link_graph.items()},
         "url_inventory": {url: record.to_dict() for url, record in state.url_inventory.items()},
+        "wordlist_path_seeds": list(state.wordlist_path_seeds),
     }
 
 
@@ -1021,6 +1027,12 @@ def crawl_state_from_dict(payload: dict[str, Any]) -> CrawlState:
     for url in state.discovered_urls:
         if url not in state.url_inventory:
             state.url_inventory[url] = UrlInventoryRecord(url=url)
+
+    wordlist_seeds = payload.get("wordlist_path_seeds", [])
+    if isinstance(wordlist_seeds, list):
+        state.wordlist_path_seeds = [
+            normalize_url(u) for u in wordlist_seeds if isinstance(u, str) and u.strip()
+        ]
 
     return state
 

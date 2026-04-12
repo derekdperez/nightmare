@@ -19,7 +19,7 @@ api.larksuite.com
 www.ultimateears.com
 liberty-qa.wnba.com
 www.dyson.com.mx
--api-acronis.com
+api-acronis.com
 university.marriott.com
 book.booktandl.com
 platform.tiktokpangle.us
@@ -591,7 +591,7 @@ js.klarna.com
 passwordchallenge.marriott.com
 sockets.geneva-staging.chat
 onegraph.com
--eu.truecaller.com
+eu.truecaller.com
 blinkit.com
 runnr.in
 ebctest.cybersource.com/merchantvelocity
@@ -990,7 +990,7 @@ myaccount.payoneer.com
 www.meesho.com
 crypto.com/nft
 valkyries-dev.wnba.com
--noneu.truecaller.com
+noneu.truecaller.com
 paypal.me
 sc-corp.net
 hypermint.com
@@ -1430,7 +1430,7 @@ psynet.gg
 effecthouse.tiktok.com
 10x.redoxengine.com
 tumblr.com
--asia-south1.truecaller.com
+asia-south1.truecaller.com
 tktnew.com
 pangle-mediation-ttp.tiktokpangle.us
 tiktokv.com
@@ -1681,7 +1681,7 @@ mds.marriott.com
 www.logitech.com.cn
 xiaomiyoupin.com
 sockets.geneva-staging.com
---your-own-1password-account--.1password.com
+your-own-1password-account--.1password.com
 vacations.universalstudioshollywood.com
 www.syfe.com
 www.dyson.se

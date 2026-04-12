@@ -4,6 +4,8 @@
 Usage:
     python fozzy.py output/example.com/example.com.parameters.json
     python fozzy.py --write-master-report path/to/output_or_fozzy-output
+    python fozzy.py --generate-master-report
+        Regenerates all_domains.results_summary.json/html under --scan-root (default ./output).
     python fozzy.py
         With no parameters file, scans --scan-root (default: ./output) for Nightmare domain
         folders, runs Fozzy for any domain whose folder has new/changed files since the last
@@ -11,7 +13,7 @@ Usage:
         to run every domain that has a parameters file.
 
     Repo-wide master report (all domains): output/all_domains.results_summary.html when the
-    layout is output/<domain>/fozzy-output/<domain>/results/ (see --write-master-report).
+    layout is output/<domain>/fozzy-output/<domain>/results/ (see --write-master-report or --generate-master-report).
 
 Settings load from config/fozzy.json next to this script (override with --config).
 CLI flags only override individual values when passed.
@@ -35,12 +37,33 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Callable
+
+# Semaphore / RLock misuse or runtime issues should warn, not abort a long fuzz run.
+_FOZZY_LOCK_ERRORS: tuple[type[BaseException], ...] = (RuntimeError, ValueError, AttributeError)
+
+
+def _fozzy_safe_release(label: str, release_fn: Callable[[], None]) -> None:
+    try:
+        release_fn()
+    except _FOZZY_LOCK_ERRORS as exc:
+        print(f"Warning: Fozzy lock release ({label}) skipped: {exc}", flush=True)
+
+
+def _fozzy_with_rlock(lock: threading.RLock | None, context: str, fn: Callable[[], Any]) -> Any:
+    if lock is None:
+        return fn()
+    try:
+        with lock:
+            return fn()
+    except _FOZZY_LOCK_ERRORS as exc:
+        print(f"Warning: Fozzy {context}: {exc}", flush=True)
+        return fn()
 
 
 try:
@@ -242,13 +265,25 @@ class HostDomainFuzzGate:
         self._meta_lock = threading.Lock()
 
     def _domain_sem(self, reg_domain: str) -> threading.Semaphore:
-        with self._meta_lock:
+        try:
+            with self._meta_lock:
+                if reg_domain not in self._domain_sems:
+                    self._domain_sems[reg_domain] = threading.Semaphore(self._max_per_domain)
+                return self._domain_sems[reg_domain]
+        except _FOZZY_LOCK_ERRORS as exc:
+            print(f"Warning: Fozzy gate meta-lock (domain map): {exc}", flush=True)
             if reg_domain not in self._domain_sems:
                 self._domain_sems[reg_domain] = threading.Semaphore(self._max_per_domain)
             return self._domain_sems[reg_domain]
 
     def _host_sem(self, host: str) -> threading.Semaphore:
-        with self._meta_lock:
+        try:
+            with self._meta_lock:
+                if host not in self._host_sems:
+                    self._host_sems[host] = threading.Semaphore(self._max_per_subdomain)
+                return self._host_sems[host]
+        except _FOZZY_LOCK_ERRORS as exc:
+            print(f"Warning: Fozzy gate meta-lock (host map): {exc}", flush=True)
             if host not in self._host_sems:
                 self._host_sems[host] = threading.Semaphore(self._max_per_subdomain)
             return self._host_sems[host]
@@ -259,17 +294,47 @@ class HostDomainFuzzGate:
             self._domain_sem(reg_domain).acquire()
             try:
                 self._host_sem(host).acquire()
-            except Exception:
-                self._domain_sem(reg_domain).release()
+            except BaseException:
+                _fozzy_safe_release(
+                    "gate domain (after host acquire failure)",
+                    lambda: self._domain_sem(reg_domain).release(),
+                )
                 raise
-        except Exception:
-            self._global_sem.release()
+        except BaseException:
+            _fozzy_safe_release(
+                "gate global (after domain acquire failure)",
+                lambda: self._global_sem.release(),
+            )
             raise
 
     def release(self, host: str, reg_domain: str) -> None:
-        self._host_sem(host).release()
-        self._domain_sem(reg_domain).release()
-        self._global_sem.release()
+        _fozzy_safe_release("gate host", lambda: self._host_sem(host).release())
+        _fozzy_safe_release("gate domain", lambda: self._domain_sem(reg_domain).release())
+        _fozzy_safe_release("gate global", lambda: self._global_sem.release())
+
+    def try_acquire_nonblocking(self, host: str, reg_domain: str) -> bool:
+        """Acquire global + domain + host slots, all non-blocking; release any partial on failure.
+
+        Used by the parallel scheduler so a thread is not assigned a job that blocks on host
+        while still holding a global worker slot (which would serialize unrelated subdomains).
+        """
+        if not self._global_sem.acquire(blocking=False):
+            return False
+        dom = self._domain_sem(reg_domain)
+        if not dom.acquire(blocking=False):
+            _fozzy_safe_release("gate global (try_acquire domain busy)", lambda: self._global_sem.release())
+            return False
+        try:
+            hsem = self._host_sem(host)
+            if not hsem.acquire(blocking=False):
+                _fozzy_safe_release("gate domain (try_acquire host busy)", lambda: dom.release())
+                _fozzy_safe_release("gate global (try_acquire host busy)", lambda: self._global_sem.release())
+                return False
+        except BaseException:
+            _fozzy_safe_release("gate domain (try_acquire host exception)", lambda: dom.release())
+            _fozzy_safe_release("gate global (try_acquire host exception)", lambda: self._global_sem.release())
+            raise
+        return True
 
 
 def _resume_get(
@@ -279,10 +344,7 @@ def _resume_get(
 ) -> Any:
     if not isinstance(resume, dict):
         return None
-    if lock is None:
-        return resume.get(key)
-    with lock:
-        return resume.get(key)
+    return _fozzy_with_rlock(lock, "resume read lock", lambda: resume.get(key))
 
 
 @dataclass
@@ -315,7 +377,7 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         default=None,
         help=(
-            "Path to <domain>.parameters.json. Omit (with no --write-master-report) to scan --scan-root "
+            "Path to <domain>.parameters.json. Omit (with no master-report-only flag) to scan --scan-root "
             "and run every domain folder that has new/changed files since the last run."
         ),
     )
@@ -421,12 +483,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--generate-master-report",
+        nargs="?",
+        const=True,
+        default=None,
+        metavar="AGGREGATE_ROOT",
+        help=(
+            "Regenerate all_domains.results_summary.json/html from on-disk results and exit. "
+            "With no argument, uses --scan-root (default: output). "
+            "Same aggregation as --write-master-report; if both are set, --write-master-report wins."
+        ),
+    )
+    parser.add_argument(
         "--scan-root",
         type=str,
         default="output",
         help=(
             "When no parameters file is given: directory containing per-domain Nightmare folders "
-            "(default: output next to fozzy.py). Incremental state is stored as .fozzy_incremental_state.json here."
+            "(default: output next to fozzy.py). Incremental state is stored as .fozzy_incremental_state.json here. "
+            "Also the default root for --generate-master-report when that flag is used without a path."
         ),
     )
     parser.add_argument(
@@ -445,10 +520,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When scanning --scan-root: run Fozzy for every domain that has a parameters file, ignoring incremental state.",
     )
-    ns = parser.parse_args()
-    if ns.write_master_report:
-        return ns
-    return ns
+    return parser.parse_args()
 
 
 def ensure_directory(path: Path) -> None:
@@ -1775,6 +1847,9 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
             "Value",
             "Baseline response",
             "Anomaly response",
+            "Baseline time (ms)",
+            "Anomaly time (ms)",
+            "Time diff (ms)",
             "Baseline size (bytes)",
             "Anomaly size (bytes)",
             "Size diff (bytes)",
@@ -1804,6 +1879,9 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
             '<th data-type="string">Value</th>',
             '<th data-type="number">Baseline response</th>',
             '<th data-type="number">Anomaly response</th>',
+            '<th data-type="number">Baseline time (ms)</th>',
+            '<th data-type="number">Anomaly time (ms)</th>',
+            '<th data-type="number">Time diff (ms)</th>',
             '<th data-type="number">Baseline size (bytes)</th>',
             '<th data-type="number">Anomaly size (bytes)</th>',
             '<th data-type="number">Size diff (bytes)</th>',
@@ -1827,6 +1905,9 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         "Filter value",
         "Filter baseline (code or phrase)",
         "Filter anomaly (code or phrase)",
+        "Filter baseline ms",
+        "Filter anomaly ms",
+        "Filter time diff ms (anomaly − baseline)",
         "Filter baseline bytes",
         "Filter anomaly bytes",
         "Filter diff bytes",
@@ -1918,6 +1999,27 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         baseline_raw = str(baseline_status)
         anomaly_raw = str(anomaly_status)
 
+        elapsed_b_ms, elapsed_a_ms, elapsed_diff_ms = _pair_elapsed_ms_summary(baseline_response, anomaly_response)
+        if elapsed_b_ms is None:
+            baseline_ms_cell = "<td data-raw=''>—</td>"
+        else:
+            baseline_ms_cell = f"<td data-raw='{elapsed_b_ms}'>{elapsed_b_ms}</td>"
+        if elapsed_a_ms is None:
+            anomaly_ms_cell = "<td data-raw=''>—</td>"
+        else:
+            anomaly_ms_cell = f"<td data-raw='{elapsed_a_ms}'>{elapsed_a_ms}</td>"
+        if elapsed_diff_ms is None:
+            time_diff_cell = "<td data-raw=''>—</td>"
+        else:
+            td_cls = "size-diff-zero"
+            if elapsed_diff_ms > 0:
+                td_cls = "size-diff-pos"
+            elif elapsed_diff_ms < 0:
+                td_cls = "size-diff-neg"
+            time_diff_cell = (
+                f"<td data-raw='{elapsed_diff_ms}'><span class='{td_cls}'>{elapsed_diff_ms:+d}</span></td>"
+            )
+
         diff_class = "size-diff-zero"
         if size_diff > 0:
             diff_class = "size-diff-pos"
@@ -1933,7 +2035,12 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
             domain_display, domain_raw_cell = clip_cell(source_domain_raw)
             domain_cell = f"<td data-raw='{html.escape(domain_raw_cell)}'>{domain_display}</td>"
 
-        body_search = f"{result_type_raw}\n{source_domain_raw}\n{baseline_body}\n{anomaly_body}".lower()
+        body_search = (
+            f"{result_type_raw}\n{source_domain_raw}\n{baseline_body}\n{anomaly_body}\n"
+            f"{elapsed_b_ms if elapsed_b_ms is not None else ''}\n"
+            f"{elapsed_a_ms if elapsed_a_ms is not None else ''}\n"
+            f"{elapsed_diff_ms if elapsed_diff_ms is not None else ''}"
+        ).lower()
 
         detail_rows_html.append(
             f"<tr class='detail-data-row' data-search-extra='{html.escape(body_search)}'>"
@@ -1945,6 +2052,9 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
             f"<td data-raw='{html.escape(value_raw)}'>{value_display}</td>"
             f"<td data-raw='{html.escape(baseline_raw)}'><a href='#' class='resp-link' data-kind='baseline' data-id='{html.escape(response_id)}'>{baseline_display}</a></td>"
             f"<td data-raw='{html.escape(anomaly_raw)}'><a href='#' class='resp-link' data-kind='anomaly' data-id='{html.escape(response_id)}'>{anomaly_display}</a></td>"
+            f"{baseline_ms_cell}"
+            f"{anomaly_ms_cell}"
+            f"{time_diff_cell}"
             f"<td data-raw='{html.escape(size_bytes_text(baseline_size))}'>{html.escape(size_bytes_text(baseline_size))}</td>"
             f"<td data-raw='{html.escape(size_bytes_text(anomaly_size))}'>{html.escape(size_bytes_text(anomaly_size))}</td>"
             f"<td data-raw='{html.escape(diff_text)}'><span class='{diff_class}'>{html.escape(diff_text)}</span></td>"
@@ -3380,22 +3490,33 @@ def run_fozzy_for_parameters(
             state_lock = threading.RLock()
 
             def safe_progress(msg: str) -> None:
-                with state_lock:
+                def _do_print() -> None:
                     print(msg, flush=True)
 
+                _fozzy_with_rlock(state_lock, "parallel progress lock", _do_print)
+
             def mark_request_completed_safe(entry: dict[str, Any]) -> None:
-                with state_lock:
+                def _do_mark() -> None:
                     mark_request_completed(entry)
+
+                _fozzy_with_rlock(state_lock, "parallel resume-save lock", _do_mark)
 
             def maybe_refresh_live_report_safe(force: bool = False) -> None:
                 nonlocal last_live_report_refresh
-                with state_lock:
+
+                def _throttle() -> bool:
+                    nonlocal last_live_report_refresh
                     now = time.monotonic()
                     if not force and (now - last_live_report_refresh) < float(
                         cfg["live_report_interval_seconds"]
                     ):
-                        return
+                        return False
                     last_live_report_refresh = now
+                    return True
+
+                should_write = _fozzy_with_rlock(state_lock, "parallel live-report throttle lock", _throttle)
+                if not should_write:
+                    return
                 write_results_summary(
                     root_domain=root_domain,
                     parameters_path=parameters_path,
@@ -3446,14 +3567,15 @@ def run_fozzy_for_parameters(
                 )
                 results_by_index: dict[int, dict[str, Any]] = {}
 
-                def run_one(index: int, job: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+                def run_after_gate_acquired(
+                    index: int,
+                    job: dict[str, Any],
+                    host_key: str,
+                    reg: str,
+                ) -> tuple[int, dict[str, Any]]:
+                    """Run ``fuzz_group``; caller must have acquired the gate for ``host_key``/``reg``."""
                     grp = job["group"]
-                    host_key = grp.host.lower()
-                    reg = registrable_domain(host_key) or host_key
-                    gate_acquired = False
                     try:
-                        gate.acquire(host_key, reg)
-                        gate_acquired = True
                         if stop_event.is_set():
                             return index, {
                                 "host": grp.host,
@@ -3492,46 +3614,83 @@ def run_fozzy_for_parameters(
                         )
                         return index, summary
                     finally:
-                        if gate_acquired:
-                            gate.release(host_key, reg)
+                        gate.release(host_key, reg)
 
                 try:
+                    pending_jobs: list[tuple[int, dict[str, Any]]] = list(
+                        enumerate(selected_group_jobs)
+                    )
+                    in_flight: dict[Any, int] = {}
                     with ThreadPoolExecutor(max_workers=max_background_workers) as executor:
-                        future_to_index = {
-                            executor.submit(run_one, idx, job): idx
-                            for idx, job in enumerate(selected_group_jobs)
-                        }
-                        for future in as_completed(future_to_index):
-                            idx = future_to_index[future]
-                            try:
-                                i, group_summary = future.result()
-                                results_by_index[i] = group_summary
-                                if group_summary.get("interrupted_by_user"):
-                                    interrupted = True
-                                    gj = selected_group_jobs[i]["group"]
-                                    interrupted_group = f"{gj.host}{gj.path}"
+                        while pending_jobs or in_flight:
+                            if not stop_event.is_set():
+                                scan_again = True
+                                while (
+                                    scan_again
+                                    and len(in_flight) < max_background_workers
+                                    and pending_jobs
+                                ):
+                                    scan_again = False
+                                    for pos, (idx, job) in enumerate(pending_jobs):
+                                        grp = job["group"]
+                                        host_key = grp.host.lower()
+                                        reg = registrable_domain(host_key) or host_key
+                                        if gate.try_acquire_nonblocking(host_key, reg):
+                                            pending_jobs.pop(pos)
+                                            fut = executor.submit(
+                                                run_after_gate_acquired,
+                                                idx,
+                                                job,
+                                                host_key,
+                                                reg,
+                                            )
+                                            in_flight[fut] = idx
+                                            scan_again = True
+                                            break
+                            if not in_flight:
+                                if pending_jobs and not stop_event.is_set():
+                                    safe_progress(
+                                        "Warning: Fozzy parallel scheduler stalled "
+                                        f"(pending={len(pending_jobs)} jobs, none runnable)."
+                                    )
+                                break
+                            done, _pending_f = wait(
+                                in_flight.keys(),
+                                return_when=FIRST_COMPLETED,
+                            )
+                            for fut in done:
+                                idx = in_flight.pop(fut)
+                                try:
+                                    i, group_summary = fut.result()
+                                    results_by_index[i] = group_summary
+                                    if group_summary.get("interrupted_by_user"):
+                                        interrupted = True
+                                        gj = selected_group_jobs[i]["group"]
+                                        interrupted_group = f"{gj.host}{gj.path}"
+                                        stop_event.set()
+                                except KeyboardInterrupt:
                                     stop_event.set()
-                            except KeyboardInterrupt:
-                                stop_event.set()
-                                raise
-                            except Exception as exc:
-                                grp = selected_group_jobs[idx]["group"]
-                                safe_progress(f"[{grp.host}{grp.path}] worker error: {exc}")
-                                results_by_index[idx] = {
-                                    "host": grp.host,
-                                    "path": grp.path,
-                                    "permutation_count": len(selected_group_jobs[idx]["permutations"]),
-                                    "total_requests": 0,
-                                    "baseline_requests": 0,
-                                    "fuzz_requests": 0,
-                                    "anomalies": 0,
-                                    "reflections": 0,
-                                    "skipped_requests": 0,
-                                    "skipped_by_endpoint_cap": 0,
-                                    "anomaly_entries": [],
-                                    "reflection_entries": [],
-                                    "worker_error": str(exc),
-                                }
+                                    raise
+                                except Exception as exc:
+                                    grp = selected_group_jobs[idx]["group"]
+                                    safe_progress(f"[{grp.host}{grp.path}] worker error: {exc}")
+                                    results_by_index[idx] = {
+                                        "host": grp.host,
+                                        "path": grp.path,
+                                        "permutation_count": len(
+                                            selected_group_jobs[idx]["permutations"]
+                                        ),
+                                        "total_requests": 0,
+                                        "baseline_requests": 0,
+                                        "fuzz_requests": 0,
+                                        "anomalies": 0,
+                                        "reflections": 0,
+                                        "skipped_requests": 0,
+                                        "skipped_by_endpoint_cap": 0,
+                                        "anomaly_entries": [],
+                                        "reflection_entries": [],
+                                        "worker_error": str(exc),
+                                    }
                 except KeyboardInterrupt:
                     interrupted = True
                     interrupted_group = interrupted_group or "parallel_fuzz"
@@ -3715,8 +3874,15 @@ def run_incremental_domains(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    master_root: Path | None = None
     if args.write_master_report:
         master_root = Path(str(args.write_master_report)).expanduser().resolve()
+    elif args.generate_master_report is not None:
+        if args.generate_master_report is True:
+            master_root = resolve_scan_root_for_incremental(str(args.scan_root))
+        else:
+            master_root = Path(str(args.generate_master_report)).expanduser().resolve()
+    if master_root is not None:
         if not master_root.is_dir():
             raise FileNotFoundError(f"Master report root not found or not a directory: {master_root}")
         master_json, master_html, n_dom = write_master_results_summary(master_root, prefer_nested=None)
