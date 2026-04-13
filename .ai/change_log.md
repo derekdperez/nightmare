@@ -266,3 +266,6 @@
   - Central bootstrap now installs standalone docker-compose binary automatically if compose plugin/command is missing.
   - Worker cloud-init uses same fallback.
 - Why: many Amazon Linux images do not provide docker-compose-plugin package, which previously caused setup failure.
+- Fixed bootstrap failure when Docker is installed but current user lacks socket permissions.
+  - deploy/bootstrap-central-auto.sh now detects Docker access mode and falls back to sudo for compose commands automatically.
+- Why: Amazon Linux ec2-user often needs re-login after docker group changes; bootstrap should continue in current session.

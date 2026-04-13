@@ -24,6 +24,7 @@ AWS_REGION=""
 REPO_URL=""
 REPO_BRANCH="main"
 COMPOSE_CMD=""
+DOCKER_USE_SUDO=0
 
 usage() {
   cat <<'USAGE'
@@ -128,6 +129,36 @@ resolve_compose_cmd() {
   fi
   COMPOSE_CMD=""
   return 1
+}
+
+detect_docker_access_mode() {
+  if docker info >/dev/null 2>&1; then
+    DOCKER_USE_SUDO=0
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
+    DOCKER_USE_SUDO=1
+    echo "Docker socket requires elevated access; using sudo for compose commands."
+    return 0
+  fi
+  echo "Docker daemon is unreachable (no direct or sudo access)." >&2
+  return 1
+}
+
+run_compose() {
+  if [[ "$DOCKER_USE_SUDO" -eq 1 ]]; then
+    if [[ "$COMPOSE_CMD" == "docker compose" ]]; then
+      sudo docker compose "$@"
+    else
+      sudo docker-compose "$@"
+    fi
+  else
+    if [[ "$COMPOSE_CMD" == "docker compose" ]]; then
+      docker compose "$@"
+    else
+      docker-compose "$@"
+    fi
+  fi
 }
 
 install_standalone_compose_if_needed() {
@@ -319,6 +350,7 @@ resolve_compose_cmd || {
   echo "docker compose (or docker-compose) is required." >&2
   exit 1
 }
+detect_docker_access_mode || exit 1
 
 mkdir -p "$TLS_DIR"
 POSTGRES_DB="${POSTGRES_DB_DEFAULT}"
@@ -355,7 +387,7 @@ EOF
 chmod 600 "$WORKER_ENV_FILE"
 
 cd "$DEPLOY_DIR"
-"${COMPOSE_CMD}" -f docker-compose.central.yml --env-file .env up -d --build
+run_compose -f docker-compose.central.yml --env-file .env up -d --build
 
 echo "Central stack is running."
 echo "Generated files:"
