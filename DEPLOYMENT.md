@@ -80,6 +80,10 @@ The central bootstrap will:
 - launch worker EC2 instances,
 - pass cloud-init that installs dependencies, clones repo, and starts worker containers automatically.
 
+`provision-workers-aws.sh` automatic coordinator settings:
+- If `--coordinator-base-url` and `--api-token` are omitted, the script auto-loads them from `deploy/.env` (`COORDINATOR_BASE_URL`, `COORDINATOR_API_TOKEN`).
+- This allows running worker provisioning directly on the central VM without manually copying token/URL flags.
+
 AWS credentials requirement for auto-provisioning:
 - The central VM running `bootstrap-central-auto.sh --auto-provision-workers ...` must have valid AWS credentials.
 - Best practice: attach an IAM instance profile role to the central EC2 instance with:

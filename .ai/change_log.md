@@ -271,3 +271,5 @@
 - Why: Amazon Linux ec2-user often needs re-login after docker group changes; bootstrap should continue in current session.
 - Added AWS credential preflight in deploy/provision-workers-aws.sh using ws sts get-caller-identity with actionable remediation guidance.
 - Why: central setup could succeed, then worker provisioning failed late with opaque "Unable to locate credentials".
+- deploy/provision-workers-aws.sh now auto-loads coordinator URL/token from deploy/.env when flags are omitted.
+- Why: operators should not need to manually look up or pass coordinator credentials after central bootstrap.

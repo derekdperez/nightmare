@@ -48,6 +48,15 @@ require_cmd() {
   fi
 }
 
+load_key_from_env_file() {
+  local key="$1"
+  local env_file="$2"
+  if [[ ! -f "$env_file" ]]; then
+    return 0
+  fi
+  awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=")+1); exit}' "$env_file"
+}
+
 ensure_aws_credentials() {
   if aws sts get-caller-identity "${region_args[@]}" >/dev/null 2>&1; then
     return 0
@@ -141,9 +150,23 @@ if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
   exit 2
 fi
 
+CENTRAL_ENV_FILE="${DEPLOY_DIR}/.env"
+if [[ -z "$COORDINATOR_BASE_URL" ]]; then
+  COORDINATOR_BASE_URL="$(load_key_from_env_file "COORDINATOR_BASE_URL" "$CENTRAL_ENV_FILE")"
+fi
+if [[ -z "$API_TOKEN" ]]; then
+  API_TOKEN="$(load_key_from_env_file "COORDINATOR_API_TOKEN" "$CENTRAL_ENV_FILE")"
+fi
+if [[ -z "$REGION" ]]; then
+  REGION="$(load_key_from_env_file "AWS_REGION" "$CENTRAL_ENV_FILE")"
+fi
+
 for required in AMI_ID SUBNET_ID SECURITY_GROUP_IDS REPO_URL COORDINATOR_BASE_URL API_TOKEN; do
   if [[ -z "${!required}" ]]; then
     echo "Missing required option for provisioning: --$(echo "$required" | tr 'A-Z_' 'a-z-')" >&2
+    if [[ "$required" == "COORDINATOR_BASE_URL" || "$required" == "API_TOKEN" ]]; then
+      echo "Tip: run this script from repo root after central bootstrap so deploy/.env is available." >&2
+    fi
     exit 2
   fi
 done
