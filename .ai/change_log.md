@@ -2,6 +2,12 @@
 
 ## 2026-04-12
 
+- Added `requirements.txt` at repo root for pip installs with core runtime dependencies:
+  - `openai`
+  - `scrapy`
+  - `tldextract`
+- Why: provide a standard `pip install -r requirements.txt` setup path.
+
 - Updated `pack.py` / `unpack.py` transport format:
   - `pack.py` now writes a base64-JSON transport envelope (`transport_encoding: base64-json`) so the packed text payload itself is encoded for transport.
   - `unpack.py` now decodes that envelope before restoring files, with backward compatibility for older raw packed JSON format.
