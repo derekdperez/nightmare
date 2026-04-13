@@ -1,0 +1,32 @@
+{
+  "pack_schema_version": 1,
+  "generated_at_utc": "2026-04-12T23:25:53.762900+00:00",
+  "root": ".",
+  "excluded_directories": [
+    "output"
+  ],
+  "directory_count": 2,
+  "file_count": 2,
+  "directories": [
+    "a",
+    "a/b"
+  ],
+  "files": [
+    {
+      "path": "a/b/hello.txt",
+      "size_bytes": 16,
+      "sha256": "6600cce3a93121e79f93ad2175251d6d4c9b2a1241fbc1a8a45058e94e16ecd2",
+      "mode": 438,
+      "encoding": "base64",
+      "content": "77u/aGVsbG8gd29ybGQNCg=="
+    },
+    {
+      "path": "a/raw.bin",
+      "size_bytes": 5,
+      "sha256": "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+      "mode": 438,
+      "encoding": "base64",
+      "content": "AQIDBAU="
+    }
+  ]
+}

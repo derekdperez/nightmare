@@ -4,6 +4,7 @@
   "max_permutations": 512,
   "quick_fuzz_list": "resources/quick_fuzz_list.txt",
   "output_dir": null,
+  "log_file": null,
   "dry_run": false,
   "max_background_workers": 4,
   "incremental_domain_workers": 4,

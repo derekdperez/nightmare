@@ -22,6 +22,7 @@ CLI flags only override individual values when passed.
 from __future__ import annotations
 
 import argparse
+import atexit
 import copy
 import difflib
 import hashlib
@@ -91,6 +92,7 @@ def default_fozzy_config() -> dict[str, Any]:
         "max_permutations": 512,
         "quick_fuzz_list": "resources/quick_fuzz_list.txt",
         "output_dir": None,
+        "log_file": None,
         "dry_run": False,
         "max_background_workers": 8,
         "incremental_domain_workers": 8,
@@ -207,10 +209,128 @@ def normalize_fozzy_config(cfg: dict[str, Any]) -> None:
     cfg["quick_fuzz_list"] = str(qfl or "resources/quick_fuzz_list.txt").strip() or "resources/quick_fuzz_list.txt"
     od = cfg.get("output_dir")
     cfg["output_dir"] = str(od).strip() if od not in (None, "") else None
+    lf = cfg.get("log_file")
+    cfg["log_file"] = str(lf).strip() if lf not in (None, "") else None
 
 
 _ACTIVE_FOZZY_CONFIG: dict[str, Any] = copy.deepcopy(default_fozzy_config())
 normalize_fozzy_config(_ACTIVE_FOZZY_CONFIG)
+
+
+_FOZZY_LOG_HANDLE: Any = None
+
+
+class _StreamTee:
+    def __init__(self, original: Any, mirror_handle: Any):
+        self._original = original
+        self._mirror = mirror_handle
+
+    def write(self, data: str) -> int:
+        text = str(data)
+        wrote = self._original.write(text)
+        try:
+            self._mirror.write(text)
+        except Exception:
+            pass
+        return wrote
+
+    def flush(self) -> None:
+        try:
+            self._original.flush()
+        except Exception:
+            pass
+        try:
+            self._mirror.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        try:
+            return bool(self._original.isatty())
+        except Exception:
+            return False
+
+    def fileno(self) -> int:
+        return self._original.fileno()
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._original, "encoding", "utf-8")
+
+
+def _resolve_optional_log_file_path(raw: str | None) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    p = Path(text).expanduser()
+    if not p.is_absolute():
+        p = (FOZZY_BASE_DIR / p).resolve()
+    else:
+        p = p.resolve()
+    return p
+
+
+def resolve_default_fozzy_log_path(args: argparse.Namespace, cfg_hint: dict[str, Any] | None = None) -> Path:
+    if args.write_master_report:
+        return Path(str(args.write_master_report)).expanduser().resolve() / "fozzy.master_report.log"
+    if args.generate_master_report is not None:
+        if args.generate_master_report is True:
+            return resolve_scan_root_for_incremental(str(args.scan_root)) / "fozzy.master_report.log"
+        return Path(str(args.generate_master_report)).expanduser().resolve() / "fozzy.master_report.log"
+    if not args.parameters_file:
+        return resolve_scan_root_for_incremental(str(args.scan_root)) / "fozzy.incremental.log"
+
+    params_path = Path(str(args.parameters_file)).expanduser()
+    if not params_path.is_absolute():
+        params_path = params_path.resolve()
+    else:
+        params_path = params_path.resolve()
+    root_domain = params_path.stem
+    try:
+        payload = read_json(params_path)
+        root_domain = str(payload.get("root_domain", root_domain)).strip().lower() or root_domain
+    except Exception:
+        pass
+
+    cfg_local = cfg_hint or {}
+    out_raw = cfg_local.get("output_dir")
+    if out_raw:
+        output_dir = Path(str(out_raw)).expanduser().resolve()
+    else:
+        output_dir = (params_path.parent / "fozzy-output" / root_domain).resolve()
+    return output_dir / f"{root_domain}.fozzy.log"
+
+
+def install_fozzy_log_tee(log_path: Path) -> None:
+    global _FOZZY_LOG_HANDLE
+    ensure_directory(log_path.parent)
+    handle = log_path.open("a", encoding="utf-8")
+    _FOZZY_LOG_HANDLE = handle
+    sys.stdout = _StreamTee(sys.stdout, handle)  # type: ignore[assignment]
+    sys.stderr = _StreamTee(sys.stderr, handle)  # type: ignore[assignment]
+    print(
+        f"[fozzy] logging to {log_path} (pid={os.getpid()}, started_utc={datetime.now(timezone.utc).isoformat()})",
+        flush=True,
+    )
+
+
+def _close_fozzy_log_tee() -> None:
+    global _FOZZY_LOG_HANDLE
+    h = _FOZZY_LOG_HANDLE
+    if h is None:
+        return
+    _FOZZY_LOG_HANDLE = None
+    try:
+        h.flush()
+    except Exception:
+        pass
+    try:
+        h.close()
+    except Exception:
+        pass
+
+
+atexit.register(_close_fozzy_log_tee)
 
 
 def active_fozzy_config() -> dict[str, Any]:
@@ -442,6 +562,14 @@ def parse_args() -> argparse.Namespace:
         help="Override fozzy.json output_dir; default artifact layout if unset in both.",
     )
     parser.add_argument(
+        "--log-file",
+        default=None,
+        help=(
+            "Optional log file path for this fozzy process. Relative paths resolve against the directory "
+            "containing fozzy.py. If omitted, fozzy writes to a mode-specific default log path."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Plan only; overrides fozzy.json dry_run.",
@@ -576,6 +704,8 @@ def build_effective_fozzy_config(args: argparse.Namespace) -> dict[str, Any]:
         cfg["quick_fuzz_list"] = str(args.quick_fuzz_list).strip()
     if args.output_dir is not None:
         cfg["output_dir"] = str(args.output_dir).strip() or None
+    if args.log_file is not None:
+        cfg["log_file"] = str(args.log_file).strip() or None
     if args.max_background_workers is not None:
         cfg["max_background_workers"] = int(args.max_background_workers)
     if args.incremental_domain_workers is not None:
@@ -1733,6 +1863,9 @@ def build_results_summary_payload(
     ext_rows = extras.get("extractor_matches")
     if isinstance(ext_rows, list):
         anomaly_summary_payload["extractor_matches"] = ext_rows
+    log_files = extras.get("log_files")
+    if isinstance(log_files, list):
+        anomaly_summary_payload["log_files"] = log_files
     return anomaly_summary_payload
 
 
@@ -1762,6 +1895,69 @@ def load_extractor_match_rows_for_master(
             str(x.get("match_file", "")).lower(),
         )
     )
+    return rows
+
+
+def _relative_path_text(path: Path, root: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def discover_log_files_for_master(master_root: Path, pairs: list[tuple[str, Path]]) -> list[dict[str, Any]]:
+    """Collect likely log files for display in the master HTML viewer."""
+    root = master_root.resolve()
+    candidates: set[Path] = set()
+
+    for filename in ("fozzy.incremental.log", "fozzy.master_report.log", "extractor.log"):
+        p = root / filename
+        if p.is_file():
+            candidates.add(p.resolve())
+
+    for child in root.iterdir() if root.is_dir() else []:
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        for p in child.glob("*.log"):
+            if p.is_file():
+                candidates.add(p.resolve())
+
+    for _domain_name, domain_output in pairs:
+        if not domain_output.is_dir():
+            continue
+        for p in domain_output.glob("*.log"):
+            if p.is_file():
+                candidates.add(p.resolve())
+        site_dir = resolve_site_directory_from_domain_output(domain_output)
+        if site_dir and site_dir.is_dir():
+            for pattern in ("*_nightmare.log", "*_scrapy.log", "*.fozzy.log"):
+                for p in site_dir.glob(pattern):
+                    if p.is_file():
+                        candidates.add(p.resolve())
+
+    rows: list[dict[str, Any]] = []
+    for p in sorted(candidates, key=lambda x: _relative_path_text(x, root).lower()):
+        try:
+            stat = p.stat()
+            size_bytes = int(stat.st_size)
+            mtime_utc = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+        except OSError:
+            size_bytes = 0
+            mtime_utc = ""
+        rel = _relative_path_text(p, root)
+        fetch_path = rel
+        if rel == p.as_posix():
+            fetch_path = p.as_posix()
+        rows.append(
+            {
+                "label": rel,
+                "path": fetch_path,
+                "absolute_path": p.as_posix(),
+                "size_bytes": size_bytes,
+                "modified_utc": mtime_utc,
+            }
+        )
     return rows
 
 
@@ -1800,6 +1996,7 @@ def write_master_results_summary(
     folder_files = list_results_files_for_master(pairs)
     domain_inv_rows, per_route_rows, per_route_truncated = build_master_domain_inventory_tables(pairs)
     extractor_match_rows = load_extractor_match_rows_for_master(master_root, pairs)
+    log_files = discover_log_files_for_master(master_root, pairs)
     payload = build_results_summary_payload(
         root_domain="all_domains",
         parameters_path=master_root,
@@ -1816,6 +2013,7 @@ def write_master_results_summary(
             "master_per_route_inventory": per_route_rows,
             "master_per_route_inventory_truncated": per_route_truncated,
             "extractor_matches": extractor_match_rows,
+            "log_files": log_files,
         },
     )
     json_path = master_root / "all_domains.results_summary.json"
@@ -2129,121 +2327,14 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
     inventory_script_html = ""
     extractor_section_html = ""
     extractor_script_html = ""
-    master_inv_rows = payload.get("master_domain_inventory")
-    master_route_rows = payload.get("master_per_route_inventory")
-    if str(payload.get("summary_scope", "")) == "master" and isinstance(master_inv_rows, list) and master_inv_rows:
-        dom_lines: list[str] = []
-        sum_unique = 0
-        sum_with_p = 0
-        sum_slots = 0
-        sum_hosts = 0
-        max_max = 0
-        for inv in master_inv_rows:
-            if not isinstance(inv, dict):
-                continue
-            lbl = str(inv.get("domain_label", "") or "")
-            src = str(inv.get("source", "") or "")
-            ur = int(inv.get("unique_routes", 0) or 0)
-            rwp = int(inv.get("routes_with_parameters", 0) or 0)
-            tps = int(inv.get("total_parameter_slots", 0) or 0)
-            mx = int(inv.get("max_parameters_on_route", 0) or 0)
-            uh = int(inv.get("unique_hosts", 0) or 0)
-            avg = inv.get("avg_parameters_on_parameterized_routes", 0)
-            try:
-                avg_f = float(avg) if avg is not None else 0.0
-            except (TypeError, ValueError):
-                avg_f = 0.0
-            site = str(inv.get("site_folder", "") or "")
-            sum_unique += ur
-            sum_with_p += rwp
-            sum_slots += tps
-            sum_hosts += uh
-            max_max = max(max_max, mx)
-            dom_lines.append(
-                "<tr>"
-                f"<td data-raw='{html.escape(lbl)}'><span class='clip-cell' title='{html.escape(lbl)}'>{html.escape(lbl)}</span></td>"
-                f"<td data-raw='{html.escape(src)}'>{html.escape(src)}</td>"
-                f"<td data-raw='{ur}'>{ur}</td>"
-                f"<td data-raw='{rwp}'>{rwp}</td>"
-                f"<td data-raw='{tps}'>{tps}</td>"
-                f"<td data-raw='{mx}'>{mx}</td>"
-                f"<td data-raw='{avg_f}'>{avg_f}</td>"
-                f"<td data-raw='{uh}'>{uh}</td>"
-                f"<td data-raw='{html.escape(site)}'><span class='clip-cell' title='{html.escape(site)}'>{html.escape(site)}</span></td>"
-                "</tr>"
-            )
-        dom_tbody = "\n".join(dom_lines) if dom_lines else "<tr><td colspan='9'>No rows</td></tr>"
-        dom_tfoot = (
-            "<tfoot><tr>"
-            "<td data-raw='totals'><strong>Totals / max</strong></td>"
-            "<td data-raw=''></td>"
-            f"<td data-raw='{sum_unique}'><strong>{sum_unique}</strong></td>"
-            f"<td data-raw='{sum_with_p}'><strong>{sum_with_p}</strong></td>"
-            f"<td data-raw='{sum_slots}'><strong>{sum_slots}</strong></td>"
-            f"<td data-raw='{max_max}'><strong>{max_max}</strong></td>"
-            "<td data-raw=''></td>"
-            f"<td data-raw='{sum_hosts}'><strong>{sum_hosts}</strong></td>"
-            "<td data-raw=''></td>"
-            "</tr></tfoot>"
-        )
-        n_dom = len([r for r in master_inv_rows if isinstance(r, dict)])
-        route_note = ""
-        route_block = ""
-        if isinstance(master_route_rows, list) and master_route_rows:
-            trunc = bool(payload.get("master_per_route_inventory_truncated"))
-            route_note = (
-                "<p class='inventory-note'>Per-route rows (scheme + host + path), sorted by parameter count. "
-                + ("List truncated for report size; re-run with a smaller workspace or inspect each domain's "
-                   "<code>*.fozzy.inventory.json</code> for the full list. "
-                   if trunc
-                   else "")
-                + "</p>"
-            )
-            rlines: list[str] = []
-            for rr in master_route_rows:
-                if not isinstance(rr, dict):
-                    continue
-                dl = str(rr.get("domain_label", "") or "")
-                ho = str(rr.get("host", "") or "")
-                pa = str(rr.get("path", "") or "")
-                sc = str(rr.get("scheme", "") or "https")
-                pc = int(rr.get("parameter_count", 0) or 0)
-                rlines.append(
-                    "<tr>"
-                    f"<td data-raw='{html.escape(dl)}'><span class='clip-cell' title='{html.escape(dl)}'>{html.escape(dl)}</span></td>"
-                    f"<td data-raw='{html.escape(ho)}'>{html.escape(ho)}</td>"
-                    f"<td data-raw='{html.escape(pa)}'><span class='clip-cell' title='{html.escape(pa)}'>{html.escape(pa)}</span></td>"
-                    f"<td data-raw='{html.escape(sc)}'>{html.escape(sc)}</td>"
-                    f"<td data-raw='{pc}'>{pc}</td>"
-                    "</tr>"
-                )
-            rt_body = "\n".join(rlines) if rlines else "<tr><td colspan='5'>No routes</td></tr>"
-            route_block = f"""
-    <h3>Routes and parameter counts</h3>
-    {route_note}
-    <div class="count-note" id="masterRouteInventoryCount"></div>
-    <div class="scroll-inventory">
-      <table id="masterRouteInventoryTable" class="data-table">
-        <thead>
-          <tr>
-            <th data-type="string">Domain</th>
-            <th data-type="string">Host</th>
-            <th data-type="string">Path</th>
-            <th data-type="string">Scheme</th>
-            <th data-type="number">Parameters</th>
-          </tr>
-        </thead>
-        <tbody>{rt_body}</tbody>
-      </table>
-    </div>"""
-        inventory_sections_html = f"""
+    log_viewer_section_html = ""
+    log_viewer_script_html = ""
+    if str(payload.get("summary_scope", "")) == "master":
+        inventory_sections_html = """
   <section class="inventory-section">
     <h3>Domain inventory (Nightmare / Fozzy)</h3>
-    <p class="inventory-note">
-      {n_dom} domain output folder(s). Unique routes are distinct scheme+host+path groups from
-      <code>*.fozzy.inventory.json</code> when present, otherwise <code>&lt;domain&gt;.parameters.json</code>.
-      &ldquo;Routes with parameters&rdquo; have at least one tracked query parameter; &ldquo;Total parameter names&rdquo;
-      sums parameter slots across those routes (same name on one route counts once).
+    <p class="inventory-note" id="masterDomainInventoryNote">
+      Loading domain inventory from summary JSON...
     </p>
     <div class="count-note" id="masterDomainInventoryCount"></div>
     <div class="scroll-inventory">
@@ -2261,25 +2352,36 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
             <th data-type="string">Site folder</th>
           </tr>
         </thead>
-        <tbody>{dom_tbody}</tbody>
-        {dom_tfoot}
+        <tbody><tr><td colspan='9'>Loading...</td></tr></tbody>
       </table>
     </div>
-    {route_block}
+    <h3>Routes and parameter counts</h3>
+    <p class="inventory-note" id="masterRouteInventoryNote">
+      Per-route rows (scheme + host + path), sorted by parameter count.
+    </p>
+    <div class="count-note" id="masterRouteInventoryCount"></div>
+    <div class="scroll-inventory">
+      <table id="masterRouteInventoryTable" class="data-table">
+        <thead>
+          <tr>
+            <th data-type="string">Domain</th>
+            <th data-type="string">Host</th>
+            <th data-type="string">Path</th>
+            <th data-type="string">Scheme</th>
+            <th data-type="number">Parameters</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan='5'>Loading...</td></tr></tbody>
+      </table>
+    </div>
   </section>"""
         inventory_script_html = """
       setupTable("masterDomainInventoryTable", "masterDomainInventoryCount");
       enableResizableColumns("masterDomainInventoryTable");
-"""
-        if isinstance(master_route_rows, list) and master_route_rows:
-            inventory_script_html += """
       setupTable("masterRouteInventoryTable", "masterRouteInventoryCount");
       enableResizableColumns("masterRouteInventoryTable");
 """
 
-    ext_rows = payload.get("extractor_matches")
-    if str(payload.get("summary_scope", "")) == "master" and isinstance(ext_rows, list):
-        ext_lines: list[str] = []
         ext_filter_placeholders = [
             "Filter domain",
             "Filter URL",
@@ -2297,57 +2399,12 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
                 f'<th><input data-col="{col_idx}" type="text" placeholder="{html.escape(ph)}"></th>'
             )
         ext_thead_filters = '<tr class="filters">\n          ' + "\n          ".join(ext_filter_cells) + "\n        </tr>"
-        for er in ext_rows:
-            if not isinstance(er, dict):
-                continue
-            dl = str(er.get("domain_label", "") or "")
-            u = str(er.get("url", "") or "")
-            fn = str(er.get("filter_name", "") or "")
-            try:
-                imp = int(er.get("importance_score", 0) or 0)
-            except (TypeError, ValueError):
-                imp = 0
-            sc = str(er.get("scope", "") or "")
-            side = str(er.get("response_side", "") or "")
-            prev = str(er.get("match_preview", "") or "")
-            rf = str(er.get("result_file", "") or "")
-            mf = str(er.get("match_file", "") or "")
-            rt = str(er.get("result_type", "") or "")
-            extra = f"{prev}\n{rt}\n{fn}\n{imp}\n{sc}\n{side}".lower()
-            rf_h = file_href(rf)
-            mf_h = file_href(mf)
-            rf_cell = (
-                f"<td data-raw='{html.escape(rf)}'><a class='file-link' title='{html.escape(rf)}' "
-                f"href='{html.escape(rf_h)}' target='_blank' rel='noopener noreferrer'>result JSON</a></td>"
-                if rf
-                else "<td data-raw=''>—</td>"
-            )
-            mf_cell = (
-                f"<td data-raw='{html.escape(mf)}'><a class='file-link' title='{html.escape(mf)}' "
-                f"href='{html.escape(mf_h)}' target='_blank' rel='noopener noreferrer'>match record</a></td>"
-                if mf
-                else "<td data-raw=''>—</td>"
-            )
-            ext_lines.append(
-                f"<tr class='detail-data-row' data-search-extra='{html.escape(extra)}'>"
-                f"<td data-raw='{html.escape(dl)}'><span class='clip-cell' title='{html.escape(dl)}'>{html.escape(dl)}</span></td>"
-                f"<td data-raw='{html.escape(u)}'><span class='clip-cell' title='{html.escape(u)}'>{html.escape(u)}</span></td>"
-                f"<td data-raw='{html.escape(fn)}'><span class='clip-cell' title='{html.escape(fn)}'>{html.escape(fn)}</span></td>"
-                f"<td data-raw='{imp}'>{imp}</td>"
-                f"<td data-raw='{html.escape(sc)}'>{html.escape(sc)}</td>"
-                f"<td data-raw='{html.escape(side)}'>{html.escape(side)}</td>"
-                f"<td data-raw='{html.escape(prev)}'><span class='clip-cell' title='{html.escape(prev)}'>{html.escape(prev)}</span></td>"
-                f"{rf_cell}"
-                f"{mf_cell}"
-                "</tr>"
-            )
-        ext_tbody = "\n".join(ext_lines) if ext_lines else "<tr><td colspan='9'>No extractor matches</td></tr>"
-        nex = len([x for x in ext_rows if isinstance(x, dict)])
+
         extractor_section_html = f"""
   <section class="inventory-section">
     <h3>Extractor matches (regex vs Fozzy responses)</h3>
-    <p class="inventory-note">
-      {nex} row(s) from per-domain <code>extractor/summary.json</code> (run <code>python extractor.py</code> after new Fozzy results).
+    <p class="inventory-note" id="extractorInventoryNote">
+      Loading rows from per-domain <code>extractor/summary.json</code> artifacts.
       Each match is also stored under <code>extractor/matches/</code> as its own JSON file.
     </p>
     <div class="count-note" id="extractorMatchesCount"></div>
@@ -2367,13 +2424,35 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
           </tr>
           {ext_thead_filters}
         </thead>
-        <tbody>{ext_tbody}</tbody>
+        <tbody><tr><td colspan='9'>Loading...</td></tr></tbody>
       </table>
     </div>
   </section>"""
         extractor_script_html = """
       setupTable("extractorMatchesTable", "extractorMatchesCount");
       enableResizableColumns("extractorMatchesTable");
+"""
+
+    master_log_files = payload.get("log_files")
+    if str(payload.get("summary_scope", "")) == "master" and isinstance(master_log_files, list):
+        log_viewer_section_html = """
+  <section class="inventory-section">
+    <h3>Log viewer</h3>
+    <p class="inventory-note">
+      Select a discovered log file and load it from disk. Very large logs are truncated client-side for display.
+    </p>
+    <div class="detail-toolbar">
+      <label class="group-by-label" for="masterLogSelect">Log file</label>
+      <select id="masterLogSelect" title="Discovered log files"></select>
+      <button id="masterLogLoad" type="button">Load</button>
+      <span class="detail-toolbar-hint" id="masterLogMeta"></span>
+    </div>
+    <div class="scroll-inventory">
+      <pre id="masterLogViewer" style="margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;font-size:12px;"></pre>
+    </div>
+  </section>"""
+        log_viewer_script_html = """
+      setupMasterLogViewer();
 """
 
     return f"""<!doctype html>
@@ -2440,6 +2519,7 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
   <h2>{html.escape(report_heading)}</h2>
   {inventory_sections_html}
   {extractor_section_html}
+  {log_viewer_section_html}
   <div class="detail-toolbar">
     {detail_group_by_select_html}
     <span class="detail-toolbar-hint">Click a group header to collapse or expand rows.</span>
@@ -2469,6 +2549,7 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
       let responseData = {response_data_json};
       let responseDataById = new Map(responseData.map((item) => [String(item.id), item]));
       const summaryJsonFilename = {json.dumps(summary_json_filename, ensure_ascii=False).replace("</", "<\\/")};
+      const masterLogFiles = {json.dumps(master_log_files if isinstance(master_log_files, list) else [], ensure_ascii=False).replace("</", "<\\/")};
       const stateStorageKey = "fozzy-report-state:" + String(window.location.href.split("#")[0]);
       const stateNamePrefix = "fozzy-report-state:";
 
@@ -2851,6 +2932,168 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         return out.join("\\n");
       }}
 
+      function renderMasterDomainInventoryRows(rows) {{
+        const out = [];
+        let sumUnique = 0;
+        let sumWithParams = 0;
+        let sumSlots = 0;
+        let sumHosts = 0;
+        let maxParams = 0;
+        (Array.isArray(rows) ? rows : []).forEach((inv) => {{
+          if (!inv || typeof inv !== "object") return;
+          const lbl = String(inv.domain_label || "");
+          const src = String(inv.source || "");
+          const ur = Number(inv.unique_routes || 0) || 0;
+          const rwp = Number(inv.routes_with_parameters || 0) || 0;
+          const tps = Number(inv.total_parameter_slots || 0) || 0;
+          const mx = Number(inv.max_parameters_on_route || 0) || 0;
+          const avg = Number(inv.avg_parameters_on_parameterized_routes || 0) || 0;
+          const uh = Number(inv.unique_hosts || 0) || 0;
+          const site = String(inv.site_folder || "");
+          sumUnique += ur;
+          sumWithParams += rwp;
+          sumSlots += tps;
+          sumHosts += uh;
+          maxParams = Math.max(maxParams, mx);
+          out.push(
+            "<tr>"
+            + `<td data-raw='${{escapeHtml(lbl)}}'>${{clipCellHtml(lbl)}}</td>`
+            + `<td data-raw='${{escapeHtml(src)}}'>${{escapeHtml(src)}}</td>`
+            + `<td data-raw='${{ur}}'>${{ur}}</td>`
+            + `<td data-raw='${{rwp}}'>${{rwp}}</td>`
+            + `<td data-raw='${{tps}}'>${{tps}}</td>`
+            + `<td data-raw='${{mx}}'>${{mx}}</td>`
+            + `<td data-raw='${{avg}}'>${{avg}}</td>`
+            + `<td data-raw='${{uh}}'>${{uh}}</td>`
+            + `<td data-raw='${{escapeHtml(site)}}'>${{clipCellHtml(site)}}</td>`
+            + "</tr>"
+          );
+        }});
+        const tfoot = (
+          "<tfoot><tr>"
+          + "<td data-raw='totals'><strong>Totals / max</strong></td>"
+          + "<td data-raw=''></td>"
+          + `<td data-raw='${{sumUnique}}'><strong>${{sumUnique}}</strong></td>`
+          + `<td data-raw='${{sumWithParams}}'><strong>${{sumWithParams}}</strong></td>`
+          + `<td data-raw='${{sumSlots}}'><strong>${{sumSlots}}</strong></td>`
+          + `<td data-raw='${{maxParams}}'><strong>${{maxParams}}</strong></td>`
+          + "<td data-raw=''></td>"
+          + `<td data-raw='${{sumHosts}}'><strong>${{sumHosts}}</strong></td>`
+          + "<td data-raw=''></td>"
+          + "</tr></tfoot>"
+        );
+        return {{
+          tbodyHtml: out.length ? out.join("\\n") : "<tr><td colspan='9'>No rows</td></tr>",
+          tfootHtml: tfoot,
+          count: out.length
+        }};
+      }}
+
+      function renderMasterRouteInventoryRows(rows) {{
+        const out = [];
+        (Array.isArray(rows) ? rows : []).forEach((rr) => {{
+          if (!rr || typeof rr !== "object") return;
+          const dl = String(rr.domain_label || "");
+          const ho = String(rr.host || "");
+          const pa = String(rr.path || "");
+          const sc = String(rr.scheme || "https");
+          const pc = Number(rr.parameter_count || 0) || 0;
+          out.push(
+            "<tr>"
+            + `<td data-raw='${{escapeHtml(dl)}}'>${{clipCellHtml(dl)}}</td>`
+            + `<td data-raw='${{escapeHtml(ho)}}'>${{escapeHtml(ho)}}</td>`
+            + `<td data-raw='${{escapeHtml(pa)}}'>${{clipCellHtml(pa)}}</td>`
+            + `<td data-raw='${{escapeHtml(sc)}}'>${{escapeHtml(sc)}}</td>`
+            + `<td data-raw='${{pc}}'>${{pc}}</td>`
+            + "</tr>"
+          );
+        }});
+        return out.length ? out.join("\\n") : "<tr><td colspan='5'>No routes</td></tr>";
+      }}
+
+      function renderExtractorRows(rows) {{
+        const out = [];
+        (Array.isArray(rows) ? rows : []).forEach((er) => {{
+          if (!er || typeof er !== "object") return;
+          const dl = String(er.domain_label || "");
+          const u = String(er.url || "");
+          const fn = String(er.filter_name || "");
+          const imp = Number(er.importance_score || 0) || 0;
+          const sc = String(er.scope || "");
+          const side = String(er.response_side || "");
+          const prev = String(er.match_preview || "");
+          const rf = String(er.result_file || "");
+          const mf = String(er.match_file || "");
+          const rt = String(er.result_type || "");
+          const extra = `${{prev}}\\n${{rt}}\\n${{fn}}\\n${{imp}}\\n${{sc}}\\n${{side}}`.toLowerCase();
+          const rfCell = rf
+            ? `<td data-raw='${{escapeHtml(rf)}}'><a class='file-link' title='${{escapeHtml(rf)}}' href='${{escapeHtml(fileHref(rf))}}' target='_blank' rel='noopener noreferrer'>result JSON</a></td>`
+            : "<td data-raw=''>—</td>";
+          const mfCell = mf
+            ? `<td data-raw='${{escapeHtml(mf)}}'><a class='file-link' title='${{escapeHtml(mf)}}' href='${{escapeHtml(fileHref(mf))}}' target='_blank' rel='noopener noreferrer'>match record</a></td>`
+            : "<td data-raw=''>—</td>";
+          out.push(
+            `<tr class='detail-data-row' data-search-extra='${{escapeHtml(extra)}}'>`
+            + `<td data-raw='${{escapeHtml(dl)}}'>${{clipCellHtml(dl)}}</td>`
+            + `<td data-raw='${{escapeHtml(u)}}'>${{clipCellHtml(u)}}</td>`
+            + `<td data-raw='${{escapeHtml(fn)}}'>${{clipCellHtml(fn)}}</td>`
+            + `<td data-raw='${{imp}}'>${{imp}}</td>`
+            + `<td data-raw='${{escapeHtml(sc)}}'>${{escapeHtml(sc)}}</td>`
+            + `<td data-raw='${{escapeHtml(side)}}'>${{escapeHtml(side)}}</td>`
+            + `<td data-raw='${{escapeHtml(prev)}}'>${{clipCellHtml(prev)}}</td>`
+            + rfCell
+            + mfCell
+            + "</tr>"
+          );
+        }});
+        return out.length ? out.join("\\n") : "<tr><td colspan='9'>No extractor matches</td></tr>";
+      }}
+
+      function populateMasterSectionsFromPayload(loadedPayload) {{
+        if (!loadedPayload || typeof loadedPayload !== "object") return;
+        const masterInvRows = Array.isArray(loadedPayload.master_domain_inventory) ? loadedPayload.master_domain_inventory : [];
+        const routeRows = Array.isArray(loadedPayload.master_per_route_inventory) ? loadedPayload.master_per_route_inventory : [];
+        const extractorRows = Array.isArray(loadedPayload.extractor_matches) ? loadedPayload.extractor_matches : [];
+
+        const domainTable = document.getElementById("masterDomainInventoryTable");
+        if (domainTable) {{
+          const tbody = domainTable.querySelector("tbody");
+          if (tbody) {{
+            const rendered = renderMasterDomainInventoryRows(masterInvRows);
+            tbody.innerHTML = rendered.tbodyHtml;
+            const oldTfoot = domainTable.querySelector("tfoot");
+            if (oldTfoot) oldTfoot.remove();
+            domainTable.insertAdjacentHTML("beforeend", rendered.tfootHtml);
+            const note = document.getElementById("masterDomainInventoryNote");
+            if (note) {{
+              note.textContent =
+                `${{rendered.count}} domain output folder(s). Unique routes are distinct scheme+host+path groups from *.fozzy.inventory.json when present, otherwise <domain>.parameters.json.`;
+            }}
+          }}
+        }}
+
+        const routeTable = document.getElementById("masterRouteInventoryTable");
+        if (routeTable) {{
+          const tbody = routeTable.querySelector("tbody");
+          if (tbody) tbody.innerHTML = renderMasterRouteInventoryRows(routeRows);
+          const routeNote = document.getElementById("masterRouteInventoryNote");
+          if (routeNote && loadedPayload.master_per_route_inventory_truncated) {{
+            routeNote.textContent = "Per-route rows are truncated for report size; inspect per-domain *.fozzy.inventory.json for full list.";
+          }}
+        }}
+
+        const extractorTable = document.getElementById("extractorMatchesTable");
+        if (extractorTable) {{
+          const tbody = extractorTable.querySelector("tbody");
+          if (tbody) tbody.innerHTML = renderExtractorRows(extractorRows);
+          const exNote = document.getElementById("extractorInventoryNote");
+          if (exNote) {{
+            exNote.textContent =
+              `${{extractorRows.length}} row(s) from per-domain extractor/summary.json artifacts. Each match is also stored under extractor/matches/.`;
+          }}
+        }}
+      }}
+
       async function loadReportPayloadFromDisk() {{
         const fallback = String(window.location.pathname || "").replace(/\\.html?$/i, ".json");
         const target = String(summaryJsonFilename || "").trim() || fallback;
@@ -2876,6 +3119,89 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         }} catch {{
           return null;
         }}
+      }}
+
+      async function loadTextFromPath(targetPath) {{
+        const path = String(targetPath || "").trim();
+        if (!path) return null;
+        try {{
+          const rsp = await fetch(path, {{ cache: "no-store" }});
+          if (rsp.ok) return await rsp.text();
+        }} catch {{
+        }}
+        try {{
+          return await new Promise((resolve, reject) => {{
+            const xhr = new XMLHttpRequest();
+            xhr.open("GET", path, true);
+            xhr.onreadystatechange = () => {{
+              if (xhr.readyState !== 4) return;
+              if ((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) resolve(xhr.responseText || "");
+              else reject(new Error(`HTTP ${{xhr.status}}`));
+            }};
+            xhr.onerror = () => reject(new Error("network error"));
+            xhr.send();
+          }});
+        }} catch {{
+          return null;
+        }}
+      }}
+
+      function setupMasterLogViewer() {{
+        const select = document.getElementById("masterLogSelect");
+        const btn = document.getElementById("masterLogLoad");
+        const meta = document.getElementById("masterLogMeta");
+        const pre = document.getElementById("masterLogViewer");
+        if (!select || !btn || !pre) return;
+
+        const rows = Array.isArray(masterLogFiles) ? masterLogFiles.filter((x) => x && typeof x === "object") : [];
+        select.innerHTML = "";
+        if (!rows.length) {{
+          pre.textContent = "No log files discovered for this master report.";
+          if (meta) meta.textContent = "";
+          btn.disabled = true;
+          return;
+        }}
+
+        rows.forEach((row, idx) => {{
+          const path = String(row.path || "");
+          const label = String(row.label || path || `log_${{idx + 1}}`);
+          const opt = document.createElement("option");
+          opt.value = path;
+          opt.textContent = label;
+          select.appendChild(opt);
+        }});
+
+        async function loadSelected() {{
+          const path = String(select.value || "");
+          const row = rows.find((x) => String(x.path || "") === path) || null;
+          pre.textContent = "Loading log...";
+          const txt = await loadTextFromPath(path);
+          if (txt == null) {{
+            pre.textContent =
+              "Unable to load selected log file from this page context. " +
+              "Try opening the report via a local HTTP server.";
+            return;
+          }}
+          const maxChars = 2_000_000;
+          if (txt.length > maxChars) {{
+            pre.textContent = txt.slice(txt.length - maxChars);
+          }} else {{
+            pre.textContent = txt;
+          }}
+          if (meta) {{
+            const size = row ? Number(row.size_bytes || 0) : 0;
+            const mtime = row ? String(row.modified_utc || "") : "";
+            const abs = row ? String(row.absolute_path || "") : "";
+            const sizeText = Number.isFinite(size) ? `${{size}} bytes` : "";
+            meta.textContent = [sizeText, mtime, abs].filter(Boolean).join("  ");
+          }}
+        }}
+
+        btn.addEventListener("click", loadSelected);
+        select.addEventListener("change", () => {{
+          if (meta) meta.textContent = "";
+        }});
+        loadSelected();
       }}
 
       const modalBackdrop = document.getElementById("modalBackdrop");
@@ -3019,6 +3345,7 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         const detailBody = detailTable ? detailTable.querySelector("tbody") : null;
         const loadedPayload = await loadReportPayloadFromDisk();
         if (loadedPayload && detailBody) {{
+          populateMasterSectionsFromPayload(loadedPayload);
           const discrepancies = Array.isArray(loadedPayload.discrepancies) ? loadedPayload.discrepancies : [];
           responseData = buildResponseDataFromDiscrepancies(discrepancies);
           responseDataById = new Map(responseData.map((item) => [String(item.id), item]));
@@ -3032,6 +3359,7 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
 
         {inventory_script_html}
         {extractor_script_html}
+        {log_viewer_script_html}
         setupTable("detailTable", "detailCount");
         enableResizableColumns("detailTable");
       }}
@@ -4334,6 +4662,11 @@ def run_incremental_domains(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    cfg_for_log = build_effective_fozzy_config(args)
+    explicit_log_path = _resolve_optional_log_file_path(cfg_for_log.get("log_file"))
+    selected_log_path = explicit_log_path or resolve_default_fozzy_log_path(args, cfg_hint=cfg_for_log)
+    install_fozzy_log_tee(selected_log_path)
+
     master_root: Path | None = None
     if args.write_master_report:
         master_root = Path(str(args.write_master_report)).expanduser().resolve()

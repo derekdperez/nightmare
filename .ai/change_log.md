@@ -2,6 +2,34 @@
 
 ## 2026-04-12
 
+- Updated `pack.py` / `unpack.py` transport format:
+  - `pack.py` now writes a base64-JSON transport envelope (`transport_encoding: base64-json`) so the packed text payload itself is encoded for transport.
+  - `unpack.py` now decodes that envelope before restoring files, with backward compatibility for older raw packed JSON format.
+- Why: explicit transport-safe encoding was requested in addition to per-file base64 content storage.
+
+- Added repository pack/unpack utilities:
+  - New `pack.py`: creates a single `packed.json` containing directory paths, file paths, metadata, and base64 file contents.
+  - New `unpack.py`: restores files/folders from `packed.json` with path traversal safety checks.
+  - `pack.py` excludes the `output/` directory tree and skips the output `packed.json` file itself.
+- Why: provide deterministic project snapshot/restore workflow without relying on external archive formats.
+
+- Optimized `fozzy.py --generate-master-report` HTML generation to avoid large inline table payloads:
+  - Removed server-side row inlining for `master_domain_inventory`, `master_per_route_inventory`, and `extractor_matches`.
+  - Master report now emits lightweight table shells and populates those sections client-side from loaded summary JSON.
+- Why: reduce master-report generation stalls and keep HTML output lightweight and data-driven.
+
+- Added persistent process logging for `fozzy.py` and `extractor.py`:
+  - `fozzy.py` now supports config/CLI `log_file` and defaults to mode-specific logs:
+    - single-domain run: `<domain-output>/<root_domain>.fozzy.log`
+    - incremental run: `<scan-root>/fozzy.incremental.log`
+    - master-report generation: `<master-root>/fozzy.master_report.log`
+  - `extractor.py` now defaults to `<scan-root>/extractor.log` and supports `--log-file`.
+- Why: operators need durable logs instead of console-only output.
+- Added master-report log viewer in `all_domains.results_summary.html`:
+  - Master payload now includes discovered `log_files`.
+  - HTML includes a log selector + viewer that loads selected logs from disk at runtime.
+- Why: allow quick troubleshooting without leaving the master report.
+
 - Refactored `fozzy.py` results HTML rendering to avoid inlining large discrepancy datasets:
   - `render_anomaly_summary_html()` now emits a lightweight shell and loads discrepancy rows from the companion `*.results_summary.json` file at page load.
   - Added `summary_json_filename` to summary payloads in both single-domain and master summary writers.

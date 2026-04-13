@@ -12,3 +12,10 @@
 - In `fozzy.py` incremental mode (no parameters file), `incremental_domain_workers` controls how many domains run concurrently; each child domain process is intentionally constrained to single-worker fuzzing to maintain bounded total concurrency.
 - Master report HTML should always include extractor table schema with `Importance score` numeric column (even when there are zero extractor rows) to keep sorting/filter behavior and downstream parsing stable.
 - Fozzy report HTML should load detailed discrepancy table rows from companion summary JSON on page load (`summary_json_filename`) instead of embedding all discrepancy row data inline in the HTML.
+- `fozzy.py` and `extractor.py` should always write persistent process logs via stdout/stderr tee:
+  - `fozzy.py`: mode-specific default log paths (single-domain/incremental/master) with optional `log_file` override.
+  - `extractor.py`: default `<scan-root>/extractor.log` with optional `--log-file`.
+- Master results payload should include discovered `log_files` so the master HTML report can provide an in-page log viewer.
+- Master report sections for domain inventory, per-route inventory, and extractor matches should be rendered client-side from summary JSON data at page load, not inlined into generated HTML rows.
+- Project snapshot format convention (`pack.py`/`unpack.py`): store file contents as base64 with explicit metadata in JSON, preserve deterministic path ordering, and exclude `output/` from packed snapshots.
+- Transport convention for packed snapshots: wrap the full packed payload as base64 JSON text (`transport_encoding: base64-json`) and decode during unpack; maintain backward compatibility with older raw pack JSON where feasible.

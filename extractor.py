@@ -15,8 +15,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -30,6 +32,75 @@ DEFAULT_WORDLIST = EXTRACTOR_BASE / "resources" / "wordlists" / "extractor_list.
 DEFAULT_SCAN_ROOT = EXTRACTOR_BASE / "output"
 STATE_FILE_NAME = ".extractor_incremental_state.json"
 MAX_MATCHES_PER_RULE_PER_RESULT_FILE = 300
+
+_EXTRACTOR_LOG_HANDLE: Any = None
+
+
+class _StreamTee:
+    def __init__(self, original: Any, mirror_handle: Any):
+        self._original = original
+        self._mirror = mirror_handle
+
+    def write(self, data: str) -> int:
+        text = str(data)
+        wrote = self._original.write(text)
+        try:
+            self._mirror.write(text)
+        except Exception:
+            pass
+        return wrote
+
+    def flush(self) -> None:
+        try:
+            self._original.flush()
+        except Exception:
+            pass
+        try:
+            self._mirror.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        try:
+            return bool(self._original.isatty())
+        except Exception:
+            return False
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._original, "encoding", "utf-8")
+
+
+def install_extractor_log_tee(log_path: Path) -> None:
+    global _EXTRACTOR_LOG_HANDLE
+    ensure_directory(log_path.parent)
+    handle = log_path.open("a", encoding="utf-8")
+    _EXTRACTOR_LOG_HANDLE = handle
+    sys.stdout = _StreamTee(sys.stdout, handle)  # type: ignore[assignment]
+    sys.stderr = _StreamTee(sys.stderr, handle)  # type: ignore[assignment]
+    print(
+        f"[extractor] logging to {log_path} (pid={os.getpid()}, started_utc={datetime.now(timezone.utc).isoformat()})",
+        flush=True,
+    )
+
+
+def _close_extractor_log_tee() -> None:
+    global _EXTRACTOR_LOG_HANDLE
+    h = _EXTRACTOR_LOG_HANDLE
+    if h is None:
+        return
+    _EXTRACTOR_LOG_HANDLE = None
+    try:
+        h.flush()
+    except Exception:
+        pass
+    try:
+        h.close()
+    except Exception:
+        pass
+
+
+atexit.register(_close_extractor_log_tee)
 
 # Import shared discovery + mtime helpers from fozzy (fozzy does not import extractor).
 from fozzy import (  # noqa: E402
@@ -349,6 +420,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Re-run extractors for every domain regardless of incremental state.",
     )
+    p.add_argument(
+        "--log-file",
+        default=None,
+        help=(
+            "Optional extractor log file path. Relative paths resolve from repo root. "
+            "Default: <scan-root>/extractor.log"
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -360,6 +439,16 @@ def main(argv: list[str] | None = None) -> int:
     wordlist = Path(args.wordlist).expanduser()
     if not wordlist.is_absolute():
         wordlist = (EXTRACTOR_BASE / wordlist).resolve()
+    log_file_raw = str(args.log_file or "").strip()
+    if log_file_raw:
+        log_path = Path(log_file_raw).expanduser()
+        if not log_path.is_absolute():
+            log_path = (EXTRACTOR_BASE / log_path).resolve()
+        else:
+            log_path = log_path.resolve()
+    else:
+        log_path = (scan_root / "extractor.log").resolve()
+    install_extractor_log_tee(log_path)
     try:
         return run_extractor_scan(scan_root, wordlist, force=bool(args.force))
     except FileNotFoundError as exc:

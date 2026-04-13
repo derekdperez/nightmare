@@ -15,3 +15,8 @@
     - Concurrency knob: `incremental_domain_workers` (config/CLI).
   - Per-domain fuzzing inside each child: constrained to single-worker in incremental mode to keep global concurrency bounded and avoid shared-global state races.
 - Results reporting model in `fozzy.py`: summary JSON remains source-of-truth; generated HTML reads discrepancy rows from sibling summary JSON at runtime (thin-shell HTML), reducing inline payload size and duplication.
+- Master-report HTML now follows the same thin-shell model for inventory + extractor tables as well; browser runtime fills these tables from `all_domains.results_summary.json`.
+- Observability:
+  - `nightmare.py` already emits app + Scrapy logs per domain.
+  - `fozzy.py` and `extractor.py` now emit persistent process logs (stdout/stderr tee to file).
+  - Master report payload includes discovered log file metadata and the master HTML can load/view selected logs on demand.
