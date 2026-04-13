@@ -160,11 +160,11 @@ install_deps_if_missing() {
 
   if command -v yum >/dev/null 2>&1; then
     "${sudo_cmd[@]}" yum makecache -y || true
-    "${sudo_cmd[@]}" yum install -y ca-certificates curl openssl git docker
+    "${sudo_cmd[@]}" yum install -y ca-certificates curl-minimal openssl git docker
     "${sudo_cmd[@]}" yum install -y docker-compose-plugin || "${sudo_cmd[@]}" yum install -y docker-compose || true
   elif command -v dnf >/dev/null 2>&1; then
     "${sudo_cmd[@]}" dnf makecache -y || true
-    "${sudo_cmd[@]}" dnf install -y ca-certificates curl openssl git docker
+    "${sudo_cmd[@]}" dnf install -y ca-certificates curl-minimal openssl git docker
     "${sudo_cmd[@]}" dnf install -y docker-compose-plugin || "${sudo_cmd[@]}" dnf install -y docker-compose || true
   elif command -v apt-get >/dev/null 2>&1; then
     "${sudo_cmd[@]}" apt-get update

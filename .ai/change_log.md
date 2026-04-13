@@ -258,3 +258,7 @@
   - deploy/bootstrap-central-auto.sh now resolves compose CLI as docker compose or docker-compose fallback.
   - deploy/provision-workers-aws.sh cloud-init now uses the same fallback before starting worker stack.
 - Why: older AMIs often ship standalone docker-compose without compose plugin, causing version/command failures.
+- Fixed Amazon Linux 2023 dependency bootstrap conflict (curl vs curl-minimal).
+  - deploy/bootstrap-central-auto.sh now installs curl-minimal for yum/dnf hosts.
+  - deploy/provision-workers-aws.sh cloud-init also uses curl-minimal on yum/dnf.
+- Why: AL2023 ships curl-minimal by default and installing curl caused dependency solver failures.
