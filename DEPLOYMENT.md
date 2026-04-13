@@ -43,7 +43,34 @@ This script:
 - creates self-signed TLS cert/key in `deploy/tls/`,
 - writes `deploy/.env`,
 - writes `deploy/worker.env.generated` for worker VMs,
+- installs missing Linux dependencies automatically on apt-based hosts (`docker`, `docker compose`, `curl`, `openssl`),
 - rebuilds and starts the central stack.
+
+### Fully automatic: central + 20 workers from central machine
+If AWS CLI is configured on central, run:
+
+```bash
+chmod +x deploy/bootstrap-central-auto.sh deploy/provision-workers-aws.sh
+./deploy/bootstrap-central-auto.sh \
+  --auto-provision-workers 20 \
+  --aws-ami-id ami-xxxxxxxx \
+  --aws-subnet-id subnet-xxxxxxxx \
+  --aws-security-group-ids sg-aaaa,sg-bbbb \
+  --aws-instance-type t3.small \
+  --repo-url https://github.com/<owner>/<repo>.git \
+  --repo-branch main \
+  --aws-region us-east-1
+```
+
+Optional AWS flags:
+- `--aws-key-name <keypair>`
+- `--aws-iam-instance-profile <instance-profile-name>`
+
+The central bootstrap will:
+- start coordinator + Postgres,
+- generate secure `.env` and worker token file,
+- launch worker EC2 instances,
+- pass cloud-init that installs dependencies, clones repo, and starts worker containers automatically.
 
 ### Windows fast path (PowerShell)
 On central Windows VM:

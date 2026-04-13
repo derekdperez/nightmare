@@ -64,3 +64,5 @@
 - Central bootstrap convention: deploy/bootstrap-central-auto.sh is the quickest setup path on EC2; it should generate secrets/TLS, write deploy/.env, and emit deploy/worker.env.generated for workers.
 - Deployment compose convention: pass coordinator/database values as Docker build args so rebuilt images can carry runtime defaults, while still setting them via environment at container start.
 - Windows deployment convention: use deploy/bootstrap-windows.ps1 for both coordinator and worker VM bootstrap; central emits deploy/worker.env.generated for worker reuse.
+- Deployment resilience convention: shell-based bootstrap scripts should auto-install required Linux packages on apt-based hosts when missing, rather than failing immediately.
+- Cross-platform convention: enforce LF for .sh and deployment YAML via .gitattributes to avoid Linux runtime failures after Windows edits/checkouts.

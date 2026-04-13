@@ -245,3 +245,8 @@
 - Fixed deploy/bootstrap-windows.ps1 script-path resolution bug on Windows PowerShell where $MyInvocation.MyCommand.Path inside function scope can be absent.
 - Updated path bootstrap to use $PSScriptRoot with $PSCommandPath fallback.
 - Why: script crashed at startup with "property 'Path' cannot be found".
+- Enhanced deploy/bootstrap-central-auto.sh for Linux bootstrap reliability:
+  - auto-installs missing dependencies on apt-based hosts (docker, docker compose plugin, curl, openssl, git) and enables docker service.
+  - adds optional one-command worker auto-provisioning flow (--auto-provision-workers) integrated with new AWS helper script.
+- Added deploy/provision-workers-aws.sh to launch and cloud-init bootstrap worker EC2 instances directly from central.
+- Added .gitattributes rules to force LF endings for shell scripts and deployment YAML to prevent cross-platform shebang/parse failures.

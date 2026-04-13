@@ -13,11 +13,22 @@ POSTGRES_USER_DEFAULT="nightmare"
 FORCE_REGEN=0
 BASE_URL_OVERRIDE=""
 CERT_DAYS=825
+AUTO_PROVISION_WORKERS=0
+AWS_AMI_ID=""
+AWS_INSTANCE_TYPE="t3.small"
+AWS_SUBNET_ID=""
+AWS_SECURITY_GROUP_IDS=""
+AWS_KEY_NAME=""
+AWS_IAM_INSTANCE_PROFILE=""
+AWS_REGION=""
+REPO_URL=""
+REPO_BRANCH="main"
 
 usage() {
   cat <<'USAGE'
 Usage:
   ./deploy/bootstrap-central-auto.sh [--base-url https://host-or-ip] [--force]
+  ./deploy/bootstrap-central-auto.sh [--auto-provision-workers 20 --aws-ami-id ami-... --aws-subnet-id subnet-... --aws-security-group-ids sg-... --repo-url https://...]
 
 What it does:
   - generates strong Postgres password + coordinator API token
@@ -26,6 +37,7 @@ What it does:
   - writes deploy/.env
   - writes deploy/worker.env.generated (for worker VMs)
   - rebuilds and starts central docker compose stack
+  - optionally launches worker EC2 instances and auto-configures them via cloud-init
 USAGE
 }
 
@@ -39,6 +51,46 @@ while [[ $# -gt 0 ]]; do
       FORCE_REGEN=1
       shift
       ;;
+    --auto-provision-workers)
+      AUTO_PROVISION_WORKERS="${2:-0}"
+      shift 2
+      ;;
+    --aws-ami-id)
+      AWS_AMI_ID="${2:-}"
+      shift 2
+      ;;
+    --aws-instance-type)
+      AWS_INSTANCE_TYPE="${2:-t3.small}"
+      shift 2
+      ;;
+    --aws-subnet-id)
+      AWS_SUBNET_ID="${2:-}"
+      shift 2
+      ;;
+    --aws-security-group-ids)
+      AWS_SECURITY_GROUP_IDS="${2:-}"
+      shift 2
+      ;;
+    --aws-key-name)
+      AWS_KEY_NAME="${2:-}"
+      shift 2
+      ;;
+    --aws-iam-instance-profile)
+      AWS_IAM_INSTANCE_PROFILE="${2:-}"
+      shift 2
+      ;;
+    --aws-region)
+      AWS_REGION="${2:-}"
+      shift 2
+      ;;
+    --repo-url)
+      REPO_URL="${2:-}"
+      shift 2
+      ;;
+    --repo-branch)
+      REPO_BRANCH="${2:-main}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -51,11 +103,56 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if ! [[ "$AUTO_PROVISION_WORKERS" =~ ^[0-9]+$ ]]; then
+  echo "--auto-provision-workers must be an integer >= 0" >&2
+  exit 2
+fi
+
 require_cmd() {
   local name="$1"
   if ! command -v "$name" >/dev/null 2>&1; then
     echo "Missing required command: $name" >&2
     exit 1
+  fi
+}
+
+install_deps_if_missing() {
+  local missing=()
+  local needs_compose=0
+
+  for cmd in docker curl openssl; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing+=("$cmd")
+    fi
+  done
+  if ! docker compose version >/dev/null 2>&1; then
+    needs_compose=1
+  fi
+
+  if [[ "${#missing[@]}" -eq 0 && "$needs_compose" -eq 0 ]]; then
+    return 0
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Missing required dependencies (${missing[*]}) and apt-get is unavailable for auto-install." >&2
+    return 1
+  fi
+
+  echo "Installing missing dependencies (docker/curl/openssl/docker-compose-plugin)..."
+  local sudo_cmd=()
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo_cmd=(sudo)
+    else
+      echo "Run as root or install sudo to auto-install dependencies." >&2
+      return 1
+    fi
+  fi
+
+  "${sudo_cmd[@]}" apt-get update
+  "${sudo_cmd[@]}" apt-get install -y ca-certificates curl openssl git docker.io docker-compose-plugin
+  if command -v systemctl >/dev/null 2>&1; then
+    "${sudo_cmd[@]}" systemctl enable --now docker || true
   fi
 }
 
@@ -150,6 +247,7 @@ generate_cert_if_needed() {
   chmod 600 "$key_file"
 }
 
+install_deps_if_missing
 require_cmd docker
 require_cmd openssl
 require_cmd curl
@@ -199,3 +297,33 @@ echo "  - ${CERT_FILE}"
 echo "  - ${KEY_FILE}"
 echo
 echo "Use ${WORKER_ENV_FILE} on each worker VM as deploy/.env."
+
+if [[ "$AUTO_PROVISION_WORKERS" -gt 0 ]]; then
+  PROVISION_SCRIPT="${DEPLOY_DIR}/provision-workers-aws.sh"
+  if [[ ! -x "$PROVISION_SCRIPT" ]]; then
+    echo "Missing executable ${PROVISION_SCRIPT}" >&2
+    exit 1
+  fi
+  provision_cmd=(
+    "$PROVISION_SCRIPT"
+    --count "$AUTO_PROVISION_WORKERS"
+    --ami-id "$AWS_AMI_ID"
+    --instance-type "$AWS_INSTANCE_TYPE"
+    --subnet-id "$AWS_SUBNET_ID"
+    --security-group-ids "$AWS_SECURITY_GROUP_IDS"
+    --repo-url "$REPO_URL"
+    --repo-branch "$REPO_BRANCH"
+    --coordinator-base-url "$COORDINATOR_BASE_URL"
+    --api-token "$COORDINATOR_API_TOKEN"
+  )
+  if [[ -n "$AWS_KEY_NAME" ]]; then
+    provision_cmd+=(--key-name "$AWS_KEY_NAME")
+  fi
+  if [[ -n "$AWS_IAM_INSTANCE_PROFILE" ]]; then
+    provision_cmd+=(--iam-instance-profile "$AWS_IAM_INSTANCE_PROFILE")
+  fi
+  if [[ -n "$AWS_REGION" ]]; then
+    provision_cmd+=(--region "$AWS_REGION")
+  fi
+  "${provision_cmd[@]}"
+fi
