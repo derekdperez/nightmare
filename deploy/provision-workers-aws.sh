@@ -143,15 +143,10 @@ trap 'rm -f "$USER_DATA_FILE"' EXIT
 
 cat > "$USER_DATA_FILE" <<EOF
 #cloud-config
-package_update: true
-packages:
-  - ca-certificates
-  - curl
-  - git
-  - docker.io
-  - docker-compose-plugin
 runcmd:
+  - [bash, -lc, "set -euo pipefail; if command -v yum >/dev/null 2>&1; then yum makecache -y || true; yum install -y ca-certificates curl git docker openssl; yum install -y docker-compose-plugin || yum install -y docker-compose || true; elif command -v dnf >/dev/null 2>&1; then dnf makecache -y || true; dnf install -y ca-certificates curl git docker openssl; dnf install -y docker-compose-plugin || dnf install -y docker-compose || true; elif command -v apt-get >/dev/null 2>&1; then apt-get update; apt-get install -y ca-certificates curl git docker.io docker-compose-plugin openssl; else echo 'no supported package manager' >&2; exit 1; fi"]
   - [bash, -lc, "systemctl enable --now docker"]
+  - [bash, -lc, "docker compose version >/dev/null 2>&1 || { echo 'docker compose not installed' >&2; exit 1; }"]
   - [bash, -lc, "mkdir -p /opt/nightmare"]
   - [bash, -lc, "if [ ! -d /opt/nightmare/.git ]; then git clone --depth 1 --branch '${REPO_BRANCH}' '${REPO_URL}' /opt/nightmare; fi"]
   - [bash, -lc, "cd /opt/nightmare && git fetch --all --prune && git checkout '${REPO_BRANCH}' && git pull --ff-only || true"]

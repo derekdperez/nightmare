@@ -250,3 +250,7 @@
   - adds optional one-command worker auto-provisioning flow (--auto-provision-workers) integrated with new AWS helper script.
 - Added deploy/provision-workers-aws.sh to launch and cloud-init bootstrap worker EC2 instances directly from central.
 - Added .gitattributes rules to force LF endings for shell scripts and deployment YAML to prevent cross-platform shebang/parse failures.
+- Updated Linux bootstrap package-manager support to prefer yum/dnf with pt-get fallback.
+  - deploy/bootstrap-central-auto.sh now installs dependencies via yum/dnf first and validates docker compose availability.
+  - deploy/provision-workers-aws.sh cloud-init now installs packages via yum/dnf/apt detection instead of apt-only package list.
+- Why: support Amazon Linux/RHEL-style EC2 hosts where pt-get is unavailable.

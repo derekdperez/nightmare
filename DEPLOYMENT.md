@@ -43,7 +43,7 @@ This script:
 - creates self-signed TLS cert/key in `deploy/tls/`,
 - writes `deploy/.env`,
 - writes `deploy/worker.env.generated` for worker VMs,
-- installs missing Linux dependencies automatically on apt-based hosts (`docker`, `docker compose`, `curl`, `openssl`),
+- installs missing Linux dependencies automatically on `yum`/`dnf` hosts (with `apt-get` fallback) for `docker`, `docker compose`, `curl`, and `openssl`,
 - rebuilds and starts the central stack.
 
 ### Fully automatic: central + 20 workers from central machine

@@ -66,3 +66,4 @@
 - Windows deployment convention: use deploy/bootstrap-windows.ps1 for both coordinator and worker VM bootstrap; central emits deploy/worker.env.generated for worker reuse.
 - Deployment resilience convention: shell-based bootstrap scripts should auto-install required Linux packages on apt-based hosts when missing, rather than failing immediately.
 - Cross-platform convention: enforce LF for .sh and deployment YAML via .gitattributes to avoid Linux runtime failures after Windows edits/checkouts.
+- Linux bootstrap scripts should detect package manager in this order for AWS compatibility: yum, then dnf, then pt-get fallback.

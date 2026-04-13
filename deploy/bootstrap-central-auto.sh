@@ -133,12 +133,7 @@ install_deps_if_missing() {
     return 0
   fi
 
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "Missing required dependencies (${missing[*]}) and apt-get is unavailable for auto-install." >&2
-    return 1
-  fi
-
-  echo "Installing missing dependencies (docker/curl/openssl/docker-compose-plugin)..."
+  echo "Installing missing dependencies (docker/curl/openssl/docker compose)..."
   local sudo_cmd=()
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
@@ -149,10 +144,29 @@ install_deps_if_missing() {
     fi
   fi
 
-  "${sudo_cmd[@]}" apt-get update
-  "${sudo_cmd[@]}" apt-get install -y ca-certificates curl openssl git docker.io docker-compose-plugin
+  if command -v yum >/dev/null 2>&1; then
+    "${sudo_cmd[@]}" yum makecache -y || true
+    "${sudo_cmd[@]}" yum install -y ca-certificates curl openssl git docker
+    "${sudo_cmd[@]}" yum install -y docker-compose-plugin || "${sudo_cmd[@]}" yum install -y docker-compose || true
+  elif command -v dnf >/dev/null 2>&1; then
+    "${sudo_cmd[@]}" dnf makecache -y || true
+    "${sudo_cmd[@]}" dnf install -y ca-certificates curl openssl git docker
+    "${sudo_cmd[@]}" dnf install -y docker-compose-plugin || "${sudo_cmd[@]}" dnf install -y docker-compose || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    "${sudo_cmd[@]}" apt-get update
+    "${sudo_cmd[@]}" apt-get install -y ca-certificates curl openssl git docker.io docker-compose-plugin
+  else
+    echo "No supported package manager found (yum/dnf/apt-get)." >&2
+    return 1
+  fi
+
   if command -v systemctl >/dev/null 2>&1; then
     "${sudo_cmd[@]}" systemctl enable --now docker || true
+  fi
+
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "docker compose is still unavailable after package install. Install docker compose plugin manually." >&2
+    return 1
   fi
 }
 
