@@ -20,3 +20,6 @@
   - `nightmare.py` already emits app + Scrapy logs per domain.
   - `fozzy.py` and `extractor.py` now emit persistent process logs (stdout/stderr tee to file).
   - Master report payload includes discovered log file metadata and the master HTML can load/view selected logs on demand.
+- Central coordinator observability boundary:
+  - `server.py` now computes worker-fleet status in Postgres (`coordinator_targets` + `coordinator_stage_tasks`) and exposes it through `/api/coord/workers`.
+  - Worker liveness is inferred from last heartbeat timestamp relative to a configurable stale threshold (`stale_after_seconds`).

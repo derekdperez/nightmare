@@ -46,6 +46,7 @@
 - Legacy `--port` remains supported as HTTP-only fallback for compatibility.
 - Coordinator API convention: when `database_url` is configured, `/api/coord/*` endpoints are active and may be protected by `coordinator_api_token` (Bearer or `X-Coordinator-Token`).
 - Postgres is the source of truth for centralized coordinator state (targets/leases/session checkpoints) when coordinator mode is enabled.
+- Worker-fleet status convention: central server exposes `GET /api/coord/workers` (token-protected) to return per-worker heartbeat recency, active lease counts, running stage names, and aggregate online/stale counts; `stale_after_seconds` query param tunes online/stale threshold.
 - Distributed coordinator architecture convention:
   - Central `server.py` owns Postgres-backed truth for target queue, stage queue, session checkpoints, and replicated artifacts.
   - Worker VMs must claim work via lease-based APIs and maintain heartbeats; lock ownership is `(entry_id, worker_id)` for targets and `(root_domain, stage, worker_id)` for stages.

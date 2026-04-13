@@ -155,3 +155,27 @@ docker compose -f docker-compose.worker.yml --env-file .env up -d --build
 - Stage queue lock: `/api/coord/stage/claim` + heartbeat + `/complete`.
 - Session checkpoint: workers periodically POST `/api/coord/session` while Nightmare runs.
 - Artifact replication: workers upload/download artifacts through `/api/coord/artifact` so other VMs can continue.
+
+## Worker Status API (central server)
+Use this endpoint from the central machine to see all known worker VM process identities and current heartbeat/lease state:
+
+```bash
+curl -sk \
+  -H "Authorization: Bearer <COORDINATOR_API_TOKEN>" \
+  "https://<central-host>/api/coord/workers"
+```
+
+Optional stale threshold override (seconds):
+
+```bash
+curl -sk \
+  -H "Authorization: Bearer <COORDINATOR_API_TOKEN>" \
+  "https://<central-host>/api/coord/workers?stale_after_seconds=180"
+```
+
+Response includes:
+- aggregate `counts` (`total_workers`, `online_workers`, `stale_workers`),
+- per-worker `status` (`online`/`stale`),
+- `last_heartbeat_at_utc` + `seconds_since_heartbeat`,
+- active/running lease counts for targets and stage tasks,
+- active stage names for currently-running stage work.

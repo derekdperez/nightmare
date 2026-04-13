@@ -616,6 +616,109 @@ SET start_url = EXCLUDED.start_url,
             "generated_at_utc": _iso_now(),
         }
 
+    def worker_statuses(self, *, stale_after_seconds: int = DEFAULT_COORDINATOR_LEASE_SECONDS) -> dict[str, Any]:
+        stale_after = max(15, int(stale_after_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
+        sql = """
+WITH target_agg AS (
+    SELECT
+      worker_id,
+      MAX(heartbeat_at_utc) AS last_target_heartbeat,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+      COUNT(*) FILTER (
+        WHERE status = 'running'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > NOW()
+      ) AS active_target_leases
+    FROM coordinator_targets
+    WHERE worker_id IS NOT NULL AND worker_id <> ''
+    GROUP BY worker_id
+),
+stage_agg AS (
+    SELECT
+      worker_id,
+      MAX(heartbeat_at_utc) AS last_stage_heartbeat,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_stage_tasks,
+      COUNT(*) FILTER (
+        WHERE status = 'running'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > NOW()
+      ) AS active_stage_leases,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN stage ELSE NULL END), NULL) AS active_stages
+    FROM coordinator_stage_tasks
+    WHERE worker_id IS NOT NULL AND worker_id <> ''
+    GROUP BY worker_id
+)
+SELECT
+  COALESCE(t.worker_id, s.worker_id) AS worker_id,
+  CASE
+    WHEN t.last_target_heartbeat IS NULL THEN s.last_stage_heartbeat
+    WHEN s.last_stage_heartbeat IS NULL THEN t.last_target_heartbeat
+    ELSE GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat)
+  END AS last_heartbeat_at_utc,
+  COALESCE(t.running_targets, 0) AS running_targets,
+  COALESCE(s.running_stage_tasks, 0) AS running_stage_tasks,
+  COALESCE(t.active_target_leases, 0) AS active_target_leases,
+  COALESCE(s.active_stage_leases, 0) AS active_stage_leases,
+  COALESCE(s.active_stages, ARRAY[]::text[]) AS active_stages
+FROM target_agg t
+FULL OUTER JOIN stage_agg s
+  ON s.worker_id = t.worker_id
+ORDER BY worker_id ASC;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+            conn.commit()
+
+        now_utc = datetime.now(timezone.utc)
+        workers: list[dict[str, Any]] = []
+        online_count = 0
+        for row in rows:
+            worker_id = str(row[0] or "").strip()
+            last_heartbeat = row[1]
+            running_targets = int(row[2] or 0)
+            running_stage_tasks = int(row[3] or 0)
+            active_target_leases = int(row[4] or 0)
+            active_stage_leases = int(row[5] or 0)
+            active_stages_raw = row[6] if isinstance(row[6], list) else []
+            active_stages = [str(item) for item in active_stages_raw if str(item or "").strip()]
+
+            seconds_since: int | None = None
+            last_heartbeat_iso: str | None = None
+            if last_heartbeat is not None:
+                last_heartbeat_iso = last_heartbeat.isoformat()
+                delta_seconds = (now_utc - last_heartbeat).total_seconds()
+                seconds_since = max(0, int(delta_seconds))
+            is_online = seconds_since is not None and seconds_since <= stale_after
+            if is_online:
+                online_count += 1
+            workers.append(
+                {
+                    "worker_id": worker_id,
+                    "status": "online" if is_online else "stale",
+                    "last_heartbeat_at_utc": last_heartbeat_iso,
+                    "seconds_since_heartbeat": seconds_since,
+                    "running_targets": running_targets,
+                    "running_stage_tasks": running_stage_tasks,
+                    "active_target_leases": active_target_leases,
+                    "active_stage_leases": active_stage_leases,
+                    "active_stages": active_stages,
+                }
+            )
+
+        total = len(workers)
+        return {
+            "generated_at_utc": now_utc.isoformat(),
+            "stale_after_seconds": stale_after,
+            "counts": {
+                "total_workers": total,
+                "online_workers": online_count,
+                "stale_workers": max(0, total - online_count),
+            },
+            "workers": workers,
+        }
+
     def enqueue_stage(self, root_domain: str, stage: str) -> bool:
         rd = str(root_domain or "").strip().lower()
         stg = str(stage or "").strip().lower()
@@ -1006,6 +1109,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
             self._write_json(self.coordinator_store.status_summary())
+            return
+        if path == "/api/coord/workers":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            stale_after_seconds = _safe_int(
+                (query.get("stale_after_seconds") or [DEFAULT_COORDINATOR_LEASE_SECONDS])[0],
+                DEFAULT_COORDINATOR_LEASE_SECONDS,
+            )
+            self._write_json(self.coordinator_store.worker_statuses(stale_after_seconds=stale_after_seconds))
             return
         if path == "/api/coord/session":
             if self.coordinator_store is None:
