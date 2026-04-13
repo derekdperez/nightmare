@@ -1600,7 +1600,7 @@ def load_result_entries_from_folders(
 
 
 def discover_fozzy_domain_output_pairs(master_root: Path) -> list[tuple[str, Path]]:
-    """Each immediate child directory with a ``results/`` subfolder is treated as one domain output tree."""
+    """Each immediate child directory with Fozzy output, extractor output, or crawl ``collected_data/``."""
     if not master_root.is_dir():
         return []
     pairs: list[tuple[str, Path]] = []
@@ -1608,7 +1608,11 @@ def discover_fozzy_domain_output_pairs(master_root: Path) -> list[tuple[str, Pat
         if not child.is_dir() or child.name.startswith("."):
             continue
         results_sub = child / "results"
-        if results_sub.is_dir() or (child / "extractor" / "summary.json").is_file():
+        if (
+            results_sub.is_dir()
+            or (child / "extractor" / "summary.json").is_file()
+            or (child / "collected_data").is_dir()
+        ):
             pairs.append((child.name, child.resolve()))
     return pairs
 
@@ -1630,7 +1634,8 @@ def discover_fozzy_domain_output_pairs_nested(scan_root: Path) -> list[tuple[str
                 continue
             has_results = (inner / "results").is_dir()
             has_extractor_summary = (inner / "extractor" / "summary.json").is_file()
-            if not has_results and not has_extractor_summary:
+            has_collected_data = (inner / "collected_data").is_dir()
+            if not has_results and not has_extractor_summary and not has_collected_data:
                 continue
             label = inner.name
             if label in used_labels:

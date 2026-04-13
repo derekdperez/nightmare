@@ -8,7 +8,8 @@ the master report does. When a domain's ``results/`` tree has newer files than r
 
 After the Fozzy pass, optional rules from ``javascript_extractor_list.txt`` are applied to each domain's
 ``collected_data/scripts`` tree; matches go under ``collected_data/javascript_extractor/``, and progress is
-stored in ``<scan-root>/javascript_extractor_state.json`` for incremental runs.
+stored in ``<scan-root>/javascript_extractor_state.json`` for incremental runs. An interactive
+``collected_data/javascript_extractor/matches_report.html`` is written with the JS match table.
 
 Usage:
     python extractor.py
@@ -19,6 +20,7 @@ Usage:
     python extractor.py --trim --trim-remove "noisy_rule,other_rule" --trim-yes
     python extractor.py --trim --trim-disk-scan
     python extractor.py --rebuild-trim-stats
+    python extractor.py -v
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import hashlib
+import html
 import json
 import os
 import re
@@ -45,6 +48,7 @@ DEFAULT_SCAN_ROOT = EXTRACTOR_BASE / "output"
 DEFAULT_CONFIG_PATH = EXTRACTOR_BASE / "config" / "extractor.json"
 STATE_FILE_NAME = ".extractor_incremental_state.json"
 JAVASCRIPT_STATE_FILE_NAME = "javascript_extractor_state.json"
+JAVASCRIPT_EXTRACTOR_REPORT_HTML = "matches_report.html"
 MAX_MATCHES_PER_RULE_PER_RESULT_FILE = 300
 TRIM_ENUM_PROGRESS_EVERY = 100_000
 TRIM_REBUILD_PROGRESS_EVERY = 50_000
@@ -361,7 +365,214 @@ def rebuild_javascript_extractor_summary_for_domain(
     ensure_directory(js_root)
     summary_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     write_trim_stats_from_rows(js_root, domain_label, rows_out)
+    write_javascript_extractor_matches_report_html(domain_label, domain_output)
     return summary_path
+
+
+def collect_javascript_extractor_report_rows(domain_output: Path) -> list[dict[str, Any]]:
+    """One dict per ``m_*.json`` under ``collected_data/javascript_extractor/matches`` for the HTML report."""
+    js_root = javascript_extractor_root(domain_output)
+    matches_dir = js_root / "matches"
+    out: list[dict[str, Any]] = []
+    if not matches_dir.is_dir():
+        return out
+    for path in sorted(matches_dir.glob("m_*.json")):
+        detail = _read_match_detail(path)
+        if not detail:
+            continue
+        out.append(
+            {
+                "rule": str(detail.get("filter_name", "") or ""),
+                "regex": str(detail.get("regex", "") or ""),
+                "matched": str(detail.get("matched_text", "") or ""),
+                "score": int(detail.get("importance_score", 0) or 0),
+            }
+        )
+    return out
+
+
+def build_javascript_extractor_matches_report_html(domain_label: str, rows: list[dict[str, Any]]) -> str:
+    """Self-contained HTML: sortable columns, per-column filters, global search (all fields)."""
+    payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    payload = payload.replace("<", "\\u003c")
+    title_esc = html.escape(f"JavaScript extractor — {domain_label}")
+    gen_esc = html.escape(datetime.now(timezone.utc).isoformat())
+    # Template: keep `{` in CSS/JS minimal — use {{ for literal braces in f-string... actually not using f-string for body
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>__TITLE__</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, Segoe UI, Roboto, sans-serif; margin: 1rem 1.25rem; line-height: 1.45; }
+  h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+  .meta { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
+  #globalSearch { width: min(42rem, 100%); padding: 0.45rem 0.6rem; font-size: 1rem; margin-bottom: 0.75rem; }
+  .table-wrap { overflow-x: auto; border: 1px solid #8884; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { border: 1px solid #8883; padding: 0.35rem 0.5rem; vertical-align: top; text-align: left; }
+  thead th { background: #8882; position: sticky; top: 0; z-index: 2; cursor: pointer; user-select: none; white-space: nowrap; }
+  thead th:hover { background: #8884; }
+  thead tr.filters th { position: sticky; top: 2.2rem; z-index: 2; cursor: default; background: #6661; padding: 0.25rem; }
+  thead tr.filters input { width: 100%; box-sizing: border-box; font: inherit; padding: 0.25rem 0.35rem; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .col-rule { min-width: 9rem; max-width: 14rem; word-break: break-word; }
+  .col-regex { min-width: 12rem; max-width: 28rem; word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 0.82rem; }
+  .col-matched { min-width: 14rem; max-width: 36rem; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Consolas, monospace; font-size: 0.82rem; }
+  .col-score { width: 5rem; }
+  th .sortind { font-size: 0.75rem; opacity: 0.7; margin-left: 0.25rem; }
+  tbody tr:nth-child(even) { background: #8881; }
+  .empty { padding: 1rem; color: #666; }
+  .count { font-weight: 600; margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+  <h1>__TITLE__</h1>
+  <div class="meta">Generated UTC: __GEN__ · Rows: __N__</div>
+  <div class="count" id="visibleCount"></div>
+  <label for="globalSearch">Search all columns (each word must appear somewhere in the row)</label><br/>
+  <input type="search" id="globalSearch" placeholder="Words — searched across rule, regex, matched text, score…" autocomplete="off"/>
+  <div class="table-wrap">
+    <table id="grid">
+      <thead>
+        <tr>
+          <th data-col="0" scope="col">Rule name<span class="sortind" id="s0"></span></th>
+          <th data-col="1" scope="col">Regex<span class="sortind" id="s1"></span></th>
+          <th data-col="2" scope="col">Matched text<span class="sortind" id="s2"></span></th>
+          <th data-col="3" scope="col">Importance<span class="sortind" id="s3"></span></th>
+        </tr>
+        <tr class="filters">
+          <th><input type="text" data-col-filter="0" placeholder="Filter rule name…" autocomplete="off"/></th>
+          <th><input type="text" data-col-filter="1" placeholder="Filter regex…" autocomplete="off"/></th>
+          <th><input type="text" data-col-filter="2" placeholder="Filter matched text…" autocomplete="off"/></th>
+          <th><input type="text" data-col-filter="3" placeholder="Filter score…" autocomplete="off"/></th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+  <script type="application/json" id="report-data">__DATA__</script>
+  <script>
+(function () {
+  const KEYS = ["rule", "regex", "matched", "score"];
+  const ROWS = JSON.parse(document.getElementById("report-data").textContent);
+  const tbody = document.getElementById("tbody");
+  const globalSearch = document.getElementById("globalSearch");
+  const visibleCount = document.getElementById("visibleCount");
+  const colFilters = [0,1,2,3].map(function (i) {
+    return document.querySelector('input[data-col-filter="' + i + '"]');
+  });
+  let sortCol = null;
+  let sortAsc = true;
+
+  function cellStr(row, i) {
+    if (i === 3) return String(row.score);
+    return String(row[KEYS[i]] || "");
+  }
+  function rowHaystack(row) {
+    return (cellStr(row,0) + " " + cellStr(row,1) + " " + cellStr(row,2) + " " + cellStr(row,3)).toLowerCase();
+  }
+  function passesGlobal(row) {
+    const raw = (globalSearch.value || "").trim().toLowerCase();
+    if (!raw) return true;
+    const hay = rowHaystack(row);
+    const parts = raw.split(/\\s+/).filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      if (hay.indexOf(parts[i]) === -1) return false;
+    }
+    return true;
+  }
+  function passesColFilters(row) {
+    for (let i = 0; i < 4; i++) {
+      const f = (colFilters[i].value || "").trim().toLowerCase();
+      if (!f) continue;
+      if (cellStr(row, i).toLowerCase().indexOf(f) === -1) return false;
+    }
+    return true;
+  }
+  function filterRows() {
+    return ROWS.filter(function (r) { return passesGlobal(r) && passesColFilters(r); });
+  }
+  function sortRows(arr) {
+    if (sortCol === null) return arr.slice();
+    const c = sortCol;
+    const asc = sortAsc;
+    return arr.slice().sort(function (a, b) {
+      if (c === 3) {
+        const na = Number(a.score) || 0, nb = Number(b.score) || 0;
+        return asc ? na - nb : nb - na;
+      }
+      const va = cellStr(a, c).toLowerCase();
+      const vb = cellStr(b, c).toLowerCase();
+      const cmp = va.localeCompare(vb, undefined, { numeric: true, sensitivity: "base" });
+      return asc ? cmp : -cmp;
+    });
+  }
+  function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  function render() {
+    let data = filterRows();
+    data = sortRows(data);
+    let html = "";
+    if (data.length === 0) {
+      html = '<tr><td colspan="4" class="empty">No rows match the current filters.</td></tr>';
+    } else {
+      for (let i = 0; i < data.length; i++) {
+        const r = data[i];
+        html += "<tr>"
+          + '<td class="col-rule">' + esc(r.rule) + "</td>"
+          + '<td class="col-regex">' + esc(r.regex) + "</td>"
+          + '<td class="col-matched">' + esc(r.matched) + "</td>"
+          + '<td class="col-score num">' + esc(String(r.score)) + "</td>"
+          + "</tr>";
+      }
+    }
+    tbody.innerHTML = html;
+    visibleCount.textContent = "Showing " + data.length + " of " + ROWS.length + " match(es)";
+  }
+  function updateSortIndicators() {
+    for (let i = 0; i < 4; i++) {
+      const el = document.getElementById("s" + i);
+      if (sortCol === i) el.textContent = sortAsc ? " ▲" : " ▼";
+      else el.textContent = "";
+    }
+  }
+  document.querySelectorAll("thead tr:first-child th[data-col]").forEach(function (th) {
+    th.addEventListener("click", function () {
+      const c = parseInt(th.getAttribute("data-col"), 10);
+      if (sortCol === c) sortAsc = !sortAsc;
+      else { sortCol = c; sortAsc = c === 3 ? false : true; }
+      updateSortIndicators();
+      render();
+    });
+  });
+  globalSearch.addEventListener("input", render);
+  colFilters.forEach(function (inp) { inp.addEventListener("input", render); });
+  updateSortIndicators();
+  render();
+})();
+  </script>
+</body>
+</html>
+""".replace("__TITLE__", title_esc).replace("__GEN__", gen_esc).replace("__N__", str(len(rows))).replace(
+        "__DATA__", payload
+    )
+
+
+def write_javascript_extractor_matches_report_html(domain_label: str, domain_output: Path) -> Path | None:
+    """Write ``collected_data/javascript_extractor/matches_report.html`` for interactive review."""
+    rows = collect_javascript_extractor_report_rows(domain_output)
+    js_root = javascript_extractor_root(domain_output)
+    ensure_directory(js_root)
+    out = js_root / JAVASCRIPT_EXTRACTOR_REPORT_HTML
+    html = build_javascript_extractor_matches_report_html(domain_label, rows)
+    out.write_text(html, encoding="utf-8")
+    return out
 
 
 def javascript_extractor_domain_needs_work(
@@ -1057,7 +1268,7 @@ def trim_domain_using_summary_file(
     data["match_count"] = len(kept)
     data["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
     sp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_trim_stats_from_rows(extractor_root, domain_label, kept)
+    write_trim_stats_from_rows(domain_output / "extractor", domain_label, kept)
     _trim_progress(
         f"updated summary for {domain_label!r}: removed {removed_files:,} match file(s); {len(kept):,} row(s) left"
     )
@@ -1536,6 +1747,7 @@ def default_extractor_config() -> dict[str, Any]:
         "wordlist": "resources/wordlists/extractor_list.txt",
         "javascript_wordlist": "resources/wordlists/javascript_extractor_list.txt",
         "skip_javascript_extractor": False,
+        "verbose": False,
         "workers": 4,
         "force": False,
         "domain": None,
@@ -1577,6 +1789,13 @@ def normalize_workers(value: Any) -> int:
     return max(1, parsed)
 
 
+def _extractor_vprint(verbose: bool, message: str) -> None:
+    """Status line when ``--verbose`` is set (mirrored to extractor.log via tee)."""
+    if not verbose:
+        return
+    print(f"[extractor:v] {message}", flush=True)
+
+
 def run_extractor_scan(
     scan_root: Path,
     wordlist_path: Path,
@@ -1586,6 +1805,7 @@ def run_extractor_scan(
     workers: int = 1,
     javascript_wordlist_path: Path | None = None,
     skip_javascript_extractor: bool = False,
+    verbose: bool = False,
 ) -> int:
     scan_root = scan_root.resolve()
     state_path = scan_root / STATE_FILE_NAME
@@ -1595,6 +1815,10 @@ def run_extractor_scan(
         print("[extractor] No valid rules loaded; exiting.", flush=True)
         return 1
 
+    _extractor_vprint(
+        verbose,
+        f"loaded {len(rules)} Fozzy rule(s) from {wordlist_path}",
+    )
     pairs = discover_pairs(scan_root)
     domain_filter_text = str(domain_filter or "").strip().lower()
     if domain_filter_text:
@@ -1610,28 +1834,61 @@ def run_extractor_scan(
                 flush=True,
             )
             return 1
+        _extractor_vprint(verbose, f"domain filter {domain_filter_text!r} → {len(pairs)} tree(s)")
     if not pairs:
-        print(f"[extractor] No Fozzy domain trees under {scan_root}", flush=True)
+        print(
+            f"[extractor] No domain output trees under {scan_root} "
+            "(expected Fozzy results/extractor, or Nightmare ``collected_data/`` per site).",
+            flush=True,
+        )
         return 0
+
+    _extractor_vprint(verbose, f"discovered {len(pairs)} domain tree(s) under {scan_root}")
+    if verbose and pairs:
+        max_list = 25
+        for idx, (lbl, outp) in enumerate(pairs[:max_list], start=1):
+            _extractor_vprint(verbose, f"  {idx}. {lbl!r} → {outp}")
+        if len(pairs) > max_list:
+            _extractor_vprint(verbose, f"  … and {len(pairs) - max_list} more")
 
     processed = 0
     skipped = 0
     to_process: list[tuple[str, Path]] = []
+    fozzy_skip_v_shown = 0
+    fozzy_skip_v_cap = 30
     for domain_label, domain_output in pairs:
         key = domain_label
         if not force and not domain_results_dirty(domain_output, state, key):
             skipped += 1
+            if verbose and fozzy_skip_v_shown < fozzy_skip_v_cap:
+                rdir = domain_output / "results"
+                _extractor_vprint(
+                    verbose,
+                    f"Fozzy skip (unchanged): {domain_label!r} results_dir={rdir} exists={rdir.is_dir()}",
+                )
+                fozzy_skip_v_shown += 1
             continue
         to_process.append((domain_label, domain_output))
+    if verbose and skipped > fozzy_skip_v_shown:
+        _extractor_vprint(
+            verbose,
+            f"Fozzy skip: … and {skipped - fozzy_skip_v_shown} more unchanged domain(s) not listed",
+        )
 
     print(
         f"[extractor] Starting scan: domains_to_process={len(to_process)}, skipped_unchanged={skipped}, workers={workers}",
         flush=True,
     )
+    if to_process and verbose:
+        _extractor_vprint(
+            verbose,
+            f"Fozzy phase: processing {len(to_process)} domain(s) with workers={workers}",
+        )
 
     failures = 0
     if workers <= 1:
         for domain_label, domain_output in to_process:
+            _extractor_vprint(verbose, f"Fozzy run starting: {domain_label!r}")
             print(f"[extractor] {domain_label} … ({domain_output})", flush=True)
             n, summary_path = run_extractors_for_domain(domain_label, domain_output, rules)
             print(f"[extractor]   wrote {n} match file(s); {summary_path}", flush=True)
@@ -1644,6 +1901,10 @@ def run_extractor_scan(
                 }
             save_extractor_incremental_state(state_path, state)
             processed += 1
+            _extractor_vprint(
+                verbose,
+                f"Fozzy done: {domain_label!r} → {n} match file(s), state saved",
+            )
     else:
 
         def _run_one(domain_label: str, domain_output: Path) -> tuple[str, Path, int, Path]:
@@ -1656,6 +1917,8 @@ def run_extractor_scan(
                     executor.submit(_run_one, domain_label, domain_output): (domain_label, domain_output)
                     for domain_label, domain_output in to_process
                 }
+                n_total = len(future_map)
+                done_n = 0
                 for fut in as_completed(future_map):
                     domain_label, domain_output = future_map[fut]
                     try:
@@ -1663,7 +1926,13 @@ def run_extractor_scan(
                     except Exception as exc:
                         failures += 1
                         print(f"[extractor] {domain_label} worker error: {exc}", flush=True)
+                        _extractor_vprint(verbose, f"Fozzy worker error on {domain_label!r}: {exc}")
                         continue
+                    done_n += 1
+                    _extractor_vprint(
+                        verbose,
+                        f"Fozzy progress {done_n}/{n_total}: {done_domain!r} → {n} match file(s)",
+                    )
                     print(f"[extractor] {done_domain} … ({done_output})", flush=True)
                     print(f"[extractor]   wrote {n} match file(s); {summary_path}", flush=True)
                     results = done_output / "results"
@@ -1675,6 +1944,10 @@ def run_extractor_scan(
                         }
                     save_extractor_incremental_state(state_path, state)
                     processed += 1
+                    _extractor_vprint(
+                        verbose,
+                        f"incremental state updated for {done_domain!r}",
+                    )
         except KeyboardInterrupt:
             print("[extractor] Interrupt received; stopping worker pool with partial outputs.", flush=True)
             return 130
@@ -1692,27 +1965,51 @@ def run_extractor_scan(
 
     if skip_javascript_extractor:
         print("[extractor:js] skipped (--skip-javascript-extractor / config).", flush=True)
+        _extractor_vprint(verbose, "JavaScript pass disabled by flag/config")
     elif not jwp.is_file():
         print(f"[extractor:js] wordlist not found ({jwp}); skipping JavaScript pass.", flush=True)
+        _extractor_vprint(verbose, f"missing JS wordlist path: {jwp}")
     else:
         try:
             js_rules = load_extractor_rules(jwp)
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"[extractor:js] invalid wordlist ({jwp}): {exc}; skipping.", flush=True)
+            _extractor_vprint(verbose, f"JS wordlist parse error: {exc}")
         else:
             if not js_rules:
                 print("[extractor:js] no rules passed validation; skipping.", flush=True)
             else:
+                _extractor_vprint(
+                    verbose,
+                    f"JavaScript phase: {len(js_rules)} rule(s), wordlist fp from {jwp.name}",
+                )
                 js_fp = wordlist_fingerprint(jwp)
+                _extractor_vprint(verbose, f"JS incremental state: {js_state_path}")
                 js_state = load_javascript_extractor_state(js_state_path)
                 js_skipped = 0
                 js_processed = 0
+                js_skip_v_shown = 0
+                js_skip_v_cap = 30
                 for domain_label, domain_output in pairs:
                     if not javascript_extractor_domain_needs_work(
                         domain_label, domain_output, js_state, js_fp, force
                     ):
                         js_skipped += 1
+                        if verbose and js_skip_v_shown < js_skip_v_cap:
+                            scripts_root = collected_scripts_root(domain_output)
+                            if not scripts_root.is_dir():
+                                _extractor_vprint(
+                                    verbose,
+                                    f"JS skip: {domain_label!r} (no {scripts_root})",
+                                )
+                            else:
+                                _extractor_vprint(
+                                    verbose,
+                                    f"JS skip: {domain_label!r} (scripts up to date vs state/wordlist)",
+                                )
+                            js_skip_v_shown += 1
                         continue
+                    _extractor_vprint(verbose, f"JS run starting: {domain_label!r}")
                     print(f"[extractor:js] {domain_label} … ({domain_output})", flush=True)
                     n_js, js_summary = run_javascript_extractor_for_domain(
                         domain_label,
@@ -1729,6 +2026,15 @@ def run_extractor_scan(
                     print(
                         f"[extractor:js]   wrote {n_js} match(es) from re-scanned script(s); {summ}",
                         flush=True,
+                    )
+                    _extractor_vprint(
+                        verbose,
+                        f"JS done: {domain_label!r} → {n_js} new match(es); state written",
+                    )
+                if verbose and js_skipped > js_skip_v_shown:
+                    _extractor_vprint(
+                        verbose,
+                        f"JS skip: … and {js_skipped - js_skip_v_shown} more domain(s) not listed",
                     )
                 print(
                     f"[extractor:js] Done. domains_processed={js_processed}, skipped_unchanged={js_skipped}, "
@@ -1844,6 +2150,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "regex extraction. Skips trees that already have trim_stats.json."
         ),
     )
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="Print detailed progress (discovered trees, skips, per-phase status).",
+    )
     return p.parse_args(argv)
 
 
@@ -1874,6 +2187,9 @@ def main(argv: list[str] | None = None) -> int:
             "skip_javascript_extractor",
             False,
         )
+    )
+    verbose = bool(
+        merged_value(getattr(args, "verbose", None), effective_config, "verbose", False),
     )
 
     scan_root = Path(scan_root_raw).expanduser()
@@ -1920,7 +2236,7 @@ def main(argv: list[str] | None = None) -> int:
     install_extractor_log_tee(log_path)
     print(
         f"[extractor] config={config_path.resolve()} scan_root={scan_root} wordlist={wordlist} "
-        f"javascript_wordlist={javascript_wordlist} skip_js={skip_js} "
+        f"javascript_wordlist={javascript_wordlist} skip_js={skip_js} verbose={verbose} "
         f"workers={workers} force={force} domain={domain_filter}",
         flush=True,
     )
@@ -1933,6 +2249,7 @@ def main(argv: list[str] | None = None) -> int:
             workers=workers,
             javascript_wordlist_path=javascript_wordlist,
             skip_javascript_extractor=skip_js,
+            verbose=verbose,
         )
     except FileNotFoundError as exc:
         print(f"[extractor] {exc}", flush=True)

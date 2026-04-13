@@ -184,13 +184,13 @@
     "importance_score": 5
   },
   {
-    "name": "sql_related_strings",
-    "scope": "js_scripts",
-    "regex": "(\\s*([\\0\\b\\\'\\\"\\n\\r\\t\\%\\_\\\\]*\\s*(((select\\s*.+\\s*from\\s*.+)|(insert\\s*.+\\s*into\\s*.+)|(update\\s*.+\\s*set\\s*.+)|(delete\\s*.+\\s*from\\s*.+)|(drop\\s*.+)|(truncate\\s*.+)|(alter\\s*.+)|(exec\\s*.+)|(\\s*(all|any|not|and|between|in|like|or|some|contains|containsall|containskey)\\s*.+[\\=\\>\\<=\\!\\~]+.+)|(let\\s+.+[\\=]\\s*.*)|(begin\\s*.*\\s*end)|(\\s*[\\/\\*]+\\s*.*\\s*[\\*\\/]+)|(\\s*(\\-\\-)\\s*.*\\s+)|(\\s*(contains|containsall|containskey)\\s+.*)))(\\s*[\\;]\\s*)*)+)",
-    "description": "Detect embedded SQL-like statements or fragments in JavaScript.",
-    "output_filename": "sql_related_strings.txt",
-    "importance_score": 5
-  },
+  "name": "sql_related_strings",
+  "scope": "js_scripts",
+  "regex": "(\\s*([\\0\\b\\'\\\"\\n\\r\\t\\%\\_\\\\]*\\s*(((select\\s*.+\\s*from\\s*.+)|(insert\\s*.+\\s*into\\s*.+)|(update\\s*.+\\s*set\\s*.+)|(delete\\s*.+\\s*from\\s*.+)|(drop\\s*.+)|(truncate\\s*.+)|(alter\\s*.+)|(exec\\s*.+)|(\\s*(all|any|not|and|between|in|like|or|some|contains|containsall|containskey)\\s*.+(=|>|<=|!|~)+.+)|(let\\s+.+[=]\\s*.*)|(begin\\s*.*\\s*end)|(\\s*[\\/\\*]+\\s*.*\\s*[\\*\\/]+)|(\\s*(--)\\s*.*\\s+)|(\\s*(contains|containsall|containskey)\\s+.*)))(\\s*[;]\\s*)*)+)",
+  "description": "Detect embedded SQL-like statements or fragments in JavaScript.",
+  "output_filename": "sql_related_strings.txt",
+  "importance_score": 9
+},
   {
     "name": "nosql_related_strings",
     "scope": "js_scripts",

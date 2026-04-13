@@ -2,6 +2,8 @@
 """Domain crawler + AI-assisted sitemap analyzer.
 
 Runs entirely on your machine: by default all artifacts go under ./output/<domain>/.
+Each crawl also maintains ``output/<domain>/collected_data/summary.json``, a single JSON rollup of
+everything under ``collected_data/`` (forms, endpoints without raw base64 bodies, cookies, scripts, etc.).
 There is no integration with the central coordinator or any fleet API — that lives in
 coordinator.py (which simply subprocesses this script with a URL and --resume).
 
@@ -1711,6 +1713,13 @@ def extract_discovery_candidates(response: scrapy.http.Response) -> tuple[dict[s
 
 
 COLLECTED_DATA_DIRNAME = "collected_data"
+# Single JSON snapshot of everything under collected_data/ (see build_collected_data_rollup).
+COLLECTED_DATA_SUMMARY_FILENAME = "summary.json"
+COLLECTED_DATA_ROLLUP_MIN_INTERVAL_S = 12.0
+COLLECTED_DATA_ROLLUP_MAX_ENDPOINT_JSON_BYTES = 6 * 1024 * 1024
+COLLECTED_DATA_ROLLUP_MAX_SCRIPT_INLINE_BYTES = 256 * 1024
+COLLECTED_DATA_ROLLUP_MAX_SCRIPT_HEAD_CHARS = 8000
+COLLECTED_DATA_ROLLUP_MAX_JS_EXTRACTOR_SUMMARY_BYTES = 8 * 1024 * 1024
 SCRIPT_SRC_EXTENSIONS = frozenset(
     {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".coffee", ".dart"}
 )
@@ -1747,6 +1756,247 @@ def ensure_collected_data_layout(root: Path) -> dict[str, Path]:
     for path in sub.values():
         ensure_directory(path)
     return sub
+
+
+def _rollup_redact_encoded_blobs(obj: Any) -> Any:
+    """Drop huge base64 bodies from nested dicts for the aggregate summary file."""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            ks = str(k)
+            if ks == "body_base64" and isinstance(v, str):
+                out["body_base64_omitted"] = True
+                out["body_base64_length_chars"] = len(v)
+                continue
+            out[ks] = _rollup_redact_encoded_blobs(v)
+        return out
+    if isinstance(obj, list):
+        return [_rollup_redact_encoded_blobs(x) for x in obj]
+    return obj
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return rows
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            rows.append(rec)
+    return rows
+
+
+def _script_file_rollup(path: Path, collected_root: Path) -> dict[str, Any]:
+    rel = path.relative_to(collected_root).as_posix()
+    try:
+        st = path.stat()
+    except OSError:
+        return {"relative_path": rel, "error": "stat_failed"}
+    ent: dict[str, Any] = {
+        "relative_path": rel,
+        "size_bytes": int(st.st_size),
+        "modified_at_utc": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+    }
+    if st.st_size <= COLLECTED_DATA_ROLLUP_MAX_SCRIPT_INLINE_BYTES:
+        try:
+            ent["content"] = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            ent["read_error"] = str(exc)
+        return ent
+    if st.st_size <= 4 * 1024 * 1024:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            head = text[:COLLECTED_DATA_ROLLUP_MAX_SCRIPT_HEAD_CHARS]
+            ent["head"] = head
+            ent["head_truncated"] = len(text) > len(head)
+            ent["total_chars"] = len(text)
+        except OSError as exc:
+            ent["read_error"] = str(exc)
+    else:
+        ent["note"] = "large file; content omitted from summary (open sibling file)"
+    return ent
+
+
+def _artifact_pair_rollup(blob_path: Path, collected_root: Path) -> dict[str, Any]:
+    rel = blob_path.relative_to(collected_root).as_posix()
+    try:
+        st = blob_path.stat()
+    except OSError:
+        return {"relative_path": rel, "error": "stat_failed"}
+    meta_path = blob_path.with_suffix(".meta.json")
+    meta: dict[str, Any] | None = None
+    if meta_path.is_file():
+        meta = _load_json_object(meta_path)
+    return {
+        "relative_path": rel,
+        "size_bytes": int(st.st_size),
+        "meta_path": meta_path.relative_to(collected_root).as_posix() if meta_path.is_file() else None,
+        "meta": meta,
+    }
+
+
+def build_collected_data_rollup(collected_data_root: Path) -> dict[str, Any]:
+    """Single-structure view of all crawl-persisted files under ``collected_data`` (not full base64 bodies)."""
+    root = collected_data_root.resolve()
+    forms_out: list[dict[str, Any]] = []
+    forms_dir = root / "forms"
+    if forms_dir.is_dir():
+        for p in sorted(forms_dir.glob("*.json")):
+            data = _load_json_object(p)
+            if data is None:
+                continue
+            forms_out.append(
+                {
+                    "relative_path": p.relative_to(root).as_posix(),
+                    "record": data,
+                }
+            )
+
+    endpoints_out: list[dict[str, Any]] = []
+    ep_dir = root / "endpoints"
+    if ep_dir.is_dir():
+        for p in sorted(ep_dir.glob("*.json")):
+            rel = p.relative_to(root).as_posix()
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if sz > COLLECTED_DATA_ROLLUP_MAX_ENDPOINT_JSON_BYTES:
+                endpoints_out.append(
+                    {
+                        "relative_path": rel,
+                        "file_size_bytes": sz,
+                        "note": "endpoint JSON too large to embed; open file for full request/response bodies",
+                    }
+                )
+                continue
+            data = _load_json_object(p)
+            if data is None:
+                endpoints_out.append({"relative_path": rel, "error": "json_parse_failed"})
+                continue
+            endpoints_out.append(
+                {
+                    "relative_path": rel,
+                    "record": _rollup_redact_encoded_blobs(data),
+                }
+            )
+
+    cookies_out: dict[str, list[dict[str, Any]]] = {}
+    cookies_dir = root / "cookies"
+    if cookies_dir.is_dir():
+        for p in sorted(cookies_dir.glob("*.jsonl")):
+            cookies_out[p.name] = _read_jsonl_records(p)
+
+    js_endpoints_out: list[dict[str, Any]] = []
+    je_dir = root / "js_endpoints"
+    if je_dir.is_dir():
+        for p in sorted(je_dir.glob("*.json")):
+            data = _load_json_object(p)
+            if data is None:
+                continue
+            js_endpoints_out.append(
+                {
+                    "relative_path": p.relative_to(root).as_posix(),
+                    "record": data,
+                }
+            )
+
+    scripts_out: list[dict[str, Any]] = []
+    scripts_dir = root / "scripts"
+    if scripts_dir.is_dir():
+        for p in sorted(scripts_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            scripts_out.append(_script_file_rollup(p, root))
+
+    artifacts_out: list[dict[str, Any]] = []
+    art_dir = root / "artifacts"
+    if art_dir.is_dir():
+        for p in sorted(art_dir.iterdir()):
+            if not p.is_file():
+                continue
+            if p.name.endswith(".meta.json"):
+                continue
+            artifacts_out.append(_artifact_pair_rollup(p, root))
+
+    js_ext_root = root / "javascript_extractor"
+    js_ext_block: dict[str, Any] = {}
+    if js_ext_root.is_dir():
+        summ = js_ext_root / "summary.json"
+        trim_c = js_ext_root / "trim_stats.json"
+        if summ.is_file():
+            try:
+                ss = summ.stat().st_size
+            except OSError:
+                ss = 0
+            if ss and ss <= COLLECTED_DATA_ROLLUP_MAX_JS_EXTRACTOR_SUMMARY_BYTES:
+                data = _load_json_object(summ)
+                if data is not None:
+                    js_ext_block["summary"] = _rollup_redact_encoded_blobs(data)
+            else:
+                js_ext_block["summary_path"] = summ.relative_to(root).as_posix()
+                js_ext_block["summary_note"] = "summary.json too large or missing; see on disk"
+        if trim_c.is_file():
+            tdata = _load_json_object(trim_c)
+            if tdata is not None:
+                js_ext_block["trim_stats"] = tdata
+        mdir = js_ext_root / "matches"
+        if mdir.is_dir():
+            js_ext_block["match_json_files"] = sorted(
+                mp.relative_to(root).as_posix() for mp in mdir.glob("m_*.json")
+            )
+
+    counts = {
+        "forms": len(forms_out),
+        "endpoints": len(endpoints_out),
+        "cookie_jsonl_files": len(cookies_out),
+        "cookie_records_total": sum(len(v) for v in cookies_out.values()),
+        "js_endpoints": len(js_endpoints_out),
+        "scripts": len(scripts_out),
+        "artifacts": len(artifacts_out),
+    }
+
+    return {
+        "version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "collected_data_root": str(root),
+        "counts": counts,
+        "forms": forms_out,
+        "endpoints": endpoints_out,
+        "cookies": cookies_out,
+        "js_endpoints": js_endpoints_out,
+        "scripts": scripts_out,
+        "artifacts": artifacts_out,
+        "javascript_extractor": js_ext_block,
+    }
+
+
+def write_collected_data_rollup(collected_data_root: Path) -> Path:
+    """Write ``collected_data/summary.json`` with a full rollup of per-file crawl outputs."""
+    root = collected_data_root.resolve()
+    ensure_directory(root)
+    out_path = root / COLLECTED_DATA_SUMMARY_FILENAME
+    payload = build_collected_data_rollup(root)
+    save_json_file(out_path, payload)
+    return out_path
 
 
 def _slug_file_component(raw: str, fallback: str) -> str:
@@ -2088,6 +2338,23 @@ class DomainSpider(scrapy.Spider):
         self._collected = ensure_collected_data_layout(self.collected_data_root)
         self._max_script_asset_fetches = DEFAULT_MAX_SCRIPT_ASSET_FETCHES
         self._script_asset_fetch_count = 0
+        self._last_collected_rollup_at = 0.0
+
+    def _maybe_refresh_collected_data_rollup(self, *, force: bool = False) -> None:
+        """Refresh ``collected_data/summary.json`` (debounced during crawl; always on spider close)."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_collected_rollup_at > 0
+            and (now - self._last_collected_rollup_at) < COLLECTED_DATA_ROLLUP_MIN_INTERVAL_S
+        ):
+            return
+        self._last_collected_rollup_at = now
+        try:
+            out = write_collected_data_rollup(self.collected_data_root)
+            self.logger.debug("collected_data summary rollup: %s", out)
+        except Exception as exc:
+            self.logger.warning("collected_data summary rollup failed: %s", exc)
 
     def _build_crawl_request(self, url: str, *, wordlist_path_guess: bool = False) -> scrapy.Request:
         meta: dict[str, Any] = {"handle_httpstatus_all": True}
@@ -2368,6 +2635,7 @@ class DomainSpider(scrapy.Spider):
             extra={"parent_page_url": normalize_url(parent)},
         )
         if response.status >= 400:
+            self._maybe_refresh_collected_data_rollup()
             return
         self.state.scripts_fetched_urls.add(logical)
         body = response.body or b""
@@ -2382,6 +2650,7 @@ class DomainSpider(scrapy.Spider):
         text = body.decode("utf-8", errors="replace")
         discovered = extract_urls_from_javascript_for_discovery(text, logical)
         self._record_js_endpoint_file(parent, out_path.name, discovered)
+        self._maybe_refresh_collected_data_rollup()
         yield from self._yield_discoveries_from_script(
             parent, discovered, out_path.name, evidence_response=response
         )
@@ -2510,15 +2779,18 @@ class DomainSpider(scrapy.Spider):
 
         if response.status >= 400:
             self.logger.warning("Blocked or error crawl response at %s (HTTP %s)", current_url, response.status)
+            self._maybe_refresh_collected_data_rollup()
             self._save_session_state()
             return
         if soft_404_detected:
             self.logger.info("Soft-404 crawl response at %s (HTTP %s): %s", current_url, response.status, soft_404_reason)
+            self._maybe_refresh_collected_data_rollup()
             self._save_session_state()
             return
 
         if not is_markup_response(response):
             self._emit_verbose(f"Skipping link extraction for non-markup response at {current_url}")
+            self._maybe_refresh_collected_data_rollup()
             self._save_session_state()
             return
 
@@ -2636,6 +2908,7 @@ class DomainSpider(scrapy.Spider):
 
     def closed(self, reason: str) -> None:
         self._emit_nonverbose_progress_if_needed(force=True)
+        self._maybe_refresh_collected_data_rollup(force=True)
         self._save_session_state()
 
     def _save_session_state(self) -> None:

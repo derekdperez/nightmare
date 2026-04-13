@@ -3,6 +3,7 @@
   "wordlist": "resources/wordlists/extractor_list.txt",
   "javascript_wordlist": "resources/wordlists/javascript_extractor_list.txt",
   "skip_javascript_extractor": false,
+  "verbose": false,
   "workers": 4,
   "force": false,
   "domain": null,
