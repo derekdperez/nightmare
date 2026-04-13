@@ -23,6 +23,7 @@ AWS_IAM_INSTANCE_PROFILE=""
 AWS_REGION=""
 REPO_URL=""
 REPO_BRANCH="main"
+COMPOSE_CMD=""
 
 usage() {
   cat <<'USAGE'
@@ -116,6 +117,19 @@ require_cmd() {
   fi
 }
 
+resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD="docker compose"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD="docker-compose"
+    return 0
+  fi
+  COMPOSE_CMD=""
+  return 1
+}
+
 install_deps_if_missing() {
   local missing=()
   local needs_compose=0
@@ -164,8 +178,8 @@ install_deps_if_missing() {
     "${sudo_cmd[@]}" systemctl enable --now docker || true
   fi
 
-  if ! docker compose version >/dev/null 2>&1; then
-    echo "docker compose is still unavailable after package install. Install docker compose plugin manually." >&2
+  if ! resolve_compose_cmd; then
+    echo "docker compose is still unavailable after package install. Install docker compose plugin (or docker-compose) manually." >&2
     return 1
   fi
 }
@@ -265,6 +279,10 @@ install_deps_if_missing
 require_cmd docker
 require_cmd openssl
 require_cmd curl
+resolve_compose_cmd || {
+  echo "docker compose (or docker-compose) is required." >&2
+  exit 1
+}
 
 mkdir -p "$TLS_DIR"
 POSTGRES_DB="${POSTGRES_DB_DEFAULT}"
@@ -301,7 +319,7 @@ EOF
 chmod 600 "$WORKER_ENV_FILE"
 
 cd "$DEPLOY_DIR"
-docker compose -f docker-compose.central.yml --env-file .env up -d --build
+"${COMPOSE_CMD}" -f docker-compose.central.yml --env-file .env up -d --build
 
 echo "Central stack is running."
 echo "Generated files:"

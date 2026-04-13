@@ -46,6 +46,10 @@ This script:
 - installs missing Linux dependencies automatically on `yum`/`dnf` hosts (with `apt-get` fallback) for `docker`, `docker compose`, `curl`, and `openssl`,
 - rebuilds and starts the central stack.
 
+Bootstrap scripts support both Compose CLIs:
+- `docker compose` (plugin)
+- `docker-compose` (standalone fallback on older images)
+
 ### Fully automatic: central + 20 workers from central machine
 If AWS CLI is configured on central, run:
 

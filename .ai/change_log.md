@@ -254,3 +254,7 @@
   - deploy/bootstrap-central-auto.sh now installs dependencies via yum/dnf first and validates docker compose availability.
   - deploy/provision-workers-aws.sh cloud-init now installs packages via yum/dnf/apt detection instead of apt-only package list.
 - Why: support Amazon Linux/RHEL-style EC2 hosts where pt-get is unavailable.
+- Hardened bootstrap against Docker Compose version mismatches:
+  - deploy/bootstrap-central-auto.sh now resolves compose CLI as docker compose or docker-compose fallback.
+  - deploy/provision-workers-aws.sh cloud-init now uses the same fallback before starting worker stack.
+- Why: older AMIs often ship standalone docker-compose without compose plugin, causing version/command failures.
