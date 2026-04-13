@@ -11,6 +11,8 @@ Usage:
     python extractor.py --scan-root ./output --force
     python extractor.py lillylibrary.org
     python extractor.py --wordlist path/to/extractor_list.txt
+    python extractor.py --trim
+    python extractor.py --trim --trim-remove "noisy_rule,other_rule" --trim-yes
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import os
 import re
 import shutil
 import sys
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -232,6 +235,361 @@ def build_search_text_for_scope(entry: dict[str, Any], scope: str) -> dict[str, 
 def match_fingerprint(domain_label: str, result_file: str, rule_name: str, idx: int, matched: str) -> str:
     key = f"{domain_label}\0{result_file}\0{rule_name}\0{idx}\0{matched[:500]}"
     return hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _collect_extractor_match_json_paths(
+    scan_root: Path,
+    *,
+    domain_filter: str | None = None,
+) -> list[Path]:
+    out: list[Path] = []
+    domain_filter_text = str(domain_filter or "").strip().lower()
+    for domain_label, domain_output in discover_pairs(scan_root):
+        if domain_filter_text:
+            if (
+                str(domain_label).strip().lower() != domain_filter_text
+                and str(domain_output.name).strip().lower() != domain_filter_text
+            ):
+                continue
+        md = domain_output / "extractor" / "matches"
+        if not md.is_dir():
+            continue
+        try:
+            for p in md.iterdir():
+                if p.is_file() and p.suffix.lower() == ".json" and p.name.startswith("m_"):
+                    out.append(p)
+        except OSError:
+            continue
+    return out
+
+
+def _read_match_detail(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _count_rules_in_chunk(paths: list[Path]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for p in paths:
+        detail = _read_match_detail(p)
+        if not detail:
+            continue
+        fn = str(detail.get("filter_name", "") or "").strip()
+        if fn:
+            counts[fn] += 1
+    return dict(counts)
+
+
+def aggregate_rule_match_counts_from_disk(
+    scan_root: Path,
+    *,
+    domain_filter: str | None = None,
+    workers: int = 8,
+) -> dict[str, int]:
+    """Count extractor match files per ``filter_name`` (rule name) under ``scan_root``."""
+    files = _collect_extractor_match_json_paths(scan_root, domain_filter=domain_filter)
+    if not files:
+        return {}
+    workers = max(1, min(int(workers or 1), 32, len(files)))
+    chunk_size = max(1, (len(files) + workers - 1) // workers)
+    chunks = [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
+    merged: dict[str, int] = defaultdict(int)
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        for part in executor.map(_count_rules_in_chunk, chunks):
+            for k, v in part.items():
+                merged[k] += v
+    return dict(merged)
+
+
+def _delete_matches_chunk(paths: list[Path], rule_names: set[str]) -> int:
+    removed = 0
+    for p in paths:
+        detail = _read_match_detail(p)
+        if not detail:
+            continue
+        fn = str(detail.get("filter_name", "") or "").strip()
+        if fn not in rule_names:
+            continue
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def delete_extractor_matches_for_rules(
+    scan_root: Path,
+    rule_names: set[str],
+    *,
+    domain_filter: str | None = None,
+    workers: int = 8,
+) -> int:
+    """Remove on-disk ``m_*.json`` match records whose ``filter_name`` is in ``rule_names``."""
+    if not rule_names:
+        return 0
+    files = _collect_extractor_match_json_paths(scan_root, domain_filter=domain_filter)
+    if not files:
+        return 0
+    workers = max(1, min(int(workers or 1), 32, len(files)))
+    chunk_size = max(1, (len(files) + workers - 1) // workers)
+    chunks = [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
+    total = 0
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        futs = [executor.submit(_delete_matches_chunk, ch, rule_names) for ch in chunks]
+        for fut in as_completed(futs):
+            total += int(fut.result() or 0)
+    return total
+
+
+def detail_record_to_summary_row(detail: dict[str, Any]) -> dict[str, Any]:
+    matched = str(detail.get("matched_text", "") or "")
+    preview = matched.replace("\n", " ").strip()
+    if len(preview) > 160:
+        preview = preview[:157] + "..."
+    match_file = str(detail.get("match_file", "") or "").strip()
+    if not match_file:
+        match_file = ""
+    return {
+        "domain_label": str(detail.get("domain_label", "") or ""),
+        "url": str(detail.get("url", "") or ""),
+        "filter_name": str(detail.get("filter_name", "") or ""),
+        "importance_score": int(detail.get("importance_score", 0) or 0),
+        "scope": str(detail.get("scope", "") or ""),
+        "response_side": str(detail.get("response_side", "") or ""),
+        "match_preview": preview,
+        "result_file": str(detail.get("result_file", "") or ""),
+        "match_file": match_file,
+        "result_type": str(detail.get("result_type", "") or ""),
+    }
+
+
+def rebuild_extractor_summary_for_domain(domain_label: str, domain_output: Path) -> Path | None:
+    """Rebuild ``extractor/summary.json`` from remaining ``extractor/matches/m_*.json`` files."""
+    extractor_root = domain_output / "extractor"
+    matches_dir = extractor_root / "matches"
+    rows_out: list[dict[str, Any]] = []
+    if matches_dir.is_dir():
+        for path in sorted(matches_dir.glob("m_*.json")):
+            detail = _read_match_detail(path)
+            if not detail:
+                continue
+            row = detail_record_to_summary_row(detail)
+            row["match_file"] = str(path.resolve())
+            rows_out.append(row)
+    match_count = len(rows_out)
+    summary_path = extractor_root / "summary.json"
+    summary_payload = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "domain_label": domain_label,
+        "domain_output": str(domain_output.resolve()),
+        "match_count": match_count,
+        "rows": rows_out,
+    }
+    ensure_directory(extractor_root)
+    summary_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return summary_path
+
+
+def rebuild_all_extractor_summaries_after_trim(scan_root: Path, *, domain_filter: str | None = None) -> int:
+    n = 0
+    domain_filter_text = str(domain_filter or "").strip().lower()
+    for domain_label, domain_output in discover_pairs(scan_root):
+        if domain_filter_text:
+            if (
+                str(domain_label).strip().lower() != domain_filter_text
+                and str(domain_output.name).strip().lower() != domain_filter_text
+            ):
+                continue
+        ext = domain_output / "extractor"
+        if not ext.is_dir():
+            continue
+        rebuild_extractor_summary_for_domain(domain_label, domain_output)
+        n += 1
+    return n
+
+
+def load_wordlist_rule_names(wordlist_path: Path) -> set[str]:
+    if not wordlist_path.is_file():
+        return set()
+    try:
+        raw = wordlist_path.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    names: set[str] = set()
+    for item in data:
+        if isinstance(item, dict):
+            nm = str(item.get("name", "") or "").strip()
+            if nm:
+                names.add(nm)
+    return names
+
+
+def remove_rules_from_wordlist(wordlist_path: Path, names_to_remove: set[str], *, backup: bool = True) -> tuple[int, int]:
+    """Drop rules whose ``name`` is in ``names_to_remove``. Returns (removed_rule_count, remaining_rule_count)."""
+    if not names_to_remove:
+        return 0, 0
+    raw = wordlist_path.read_text(encoding="utf-8-sig")
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError(f"Wordlist must be a JSON array: {wordlist_path}")
+    if backup:
+        bak = wordlist_path.with_suffix(wordlist_path.suffix + ".trim.bak")
+        bak.write_text(raw, encoding="utf-8")
+    kept: list[Any] = []
+    removed = 0
+    for item in data:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        nm = str(item.get("name", "") or "").strip()
+        if nm in names_to_remove:
+            removed += 1
+            continue
+        kept.append(item)
+    tmp = wordlist_path.with_suffix(wordlist_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(kept, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(wordlist_path)
+    return removed, len([x for x in kept if isinstance(x, dict) and str(x.get("name", "")).strip()])
+
+
+def parse_trim_selection(line: str, ordered_rules: list[tuple[str, int]]) -> set[str]:
+    """Map user input (1-based indices or rule names) to rule names."""
+    names_out: set[str] = set()
+    parts = [p.strip() for p in line.replace(";", ",").split(",") if p.strip()]
+    if not parts:
+        return names_out
+    by_index = {str(i + 1): ordered_rules[i][0] for i in range(len(ordered_rules))}
+    known_names = {name for name, _ in ordered_rules}
+    for p in parts:
+        low = p.lower()
+        if p.isdigit() or (low.startswith("#") and low[1:].isdigit()):
+            key = low[1:] if low.startswith("#") else p
+            nm = by_index.get(key)
+            if nm:
+                names_out.add(nm)
+            continue
+        if p in known_names:
+            names_out.add(p)
+            continue
+        hits = [n for n in known_names if n.lower() == low]
+        if len(hits) == 1:
+            names_out.add(hits[0])
+    return names_out
+
+
+def parse_trim_remove_cli(spec: str) -> set[str]:
+    out: set[str] = set()
+    for part in spec.replace(";", ",").split(","):
+        t = part.strip()
+        if t:
+            out.add(t)
+    return out
+
+
+def run_trim_mode(
+    scan_root: Path,
+    wordlist_path: Path,
+    *,
+    domain_filter: str | None = None,
+    workers: int = 8,
+    trim_remove: str | None = None,
+    trim_yes: bool = False,
+    no_backup: bool = False,
+) -> int:
+    scan_root = scan_root.resolve()
+    counts = aggregate_rule_match_counts_from_disk(scan_root, domain_filter=domain_filter, workers=workers)
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    wl_names = load_wordlist_rule_names(wordlist_path)
+
+    print(f"[extractor:trim] scan_root={scan_root}", flush=True)
+    if domain_filter:
+        print(f"[extractor:trim] domain filter={domain_filter!r}", flush=True)
+    print(f"[extractor:trim] match files counted: {sum(counts.values())} across {len(counts)} rule name(s)", flush=True)
+    if not ordered and not trim_remove:
+        print("[extractor:trim] No extractor match files found; nothing to trim.", flush=True)
+        return 0
+
+    # Table: rank, matches, rule name
+    width = len(str(len(ordered))) if ordered else 1
+    for i, (name, n) in enumerate(ordered, start=1):
+        in_wl = "yes" if name in wl_names else "no"
+        print(f"[extractor:trim] {i:>{width}}  {n:>10}  {name!r}  (in wordlist: {in_wl})", flush=True)
+
+    remove_names: set[str] = set()
+    if trim_remove:
+        remove_names = parse_trim_remove_cli(trim_remove)
+        unknown = sorted(nm for nm in remove_names if nm not in counts and nm not in wl_names)
+        if unknown:
+            print(f"[extractor:trim] warning: not found in match counts or wordlist (will still try wordlist delete): {unknown}", flush=True)
+    else:
+        if not sys.stdin.isatty():
+            print(
+                "[extractor:trim] stdin is not a TTY; specify rules to remove with --trim-remove 'name1,name2' "
+                "or use --trim-yes with --trim-remove for non-interactive use.",
+                flush=True,
+            )
+            return 1
+        print(
+            "[extractor:trim] Enter rules to remove: comma-separated numbers (from the list above) and/or exact rule names.",
+            flush=True,
+        )
+        print("[extractor:trim] Empty line cancels.", flush=True)
+        try:
+            line = input("[extractor:trim] > ").strip()
+        except EOFError:
+            line = ""
+        if not line:
+            print("[extractor:trim] cancelled.", flush=True)
+            return 0
+        remove_names = parse_trim_selection(line, ordered)
+
+    if not remove_names:
+        print("[extractor:trim] No rules selected; nothing to do.", flush=True)
+        return 0
+
+    print(f"[extractor:trim] will remove {len(remove_names)} rule name(s) from wordlist and delete their match files:", flush=True)
+    for nm in sorted(remove_names):
+        print(f"  - {nm!r} ({counts.get(nm, 0)} match file(s) on disk)", flush=True)
+
+    if not trim_yes:
+        if not sys.stdin.isatty():
+            print("[extractor:trim] add --trim-yes to confirm when using --trim-remove non-interactively.", flush=True)
+            return 1
+        try:
+            ans = input("[extractor:trim] Proceed? [y/N]: ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in {"y", "yes"}:
+            print("[extractor:trim] aborted.", flush=True)
+            return 0
+
+    removed_rules, remaining_rules = remove_rules_from_wordlist(
+        wordlist_path, remove_names, backup=not no_backup
+    )
+    print(f"[extractor:trim] wordlist updated: removed {removed_rules} rule block(s); ~{remaining_rules} named rules remain.", flush=True)
+    if not no_backup:
+        print(f"[extractor:trim] wordlist backup: {wordlist_path.with_suffix(wordlist_path.suffix + '.trim.bak')}", flush=True)
+
+    deleted = delete_extractor_matches_for_rules(
+        scan_root, remove_names, domain_filter=domain_filter, workers=workers
+    )
+    print(f"[extractor:trim] deleted {deleted} match file(s).", flush=True)
+
+    rebuilt = rebuild_all_extractor_summaries_after_trim(scan_root, domain_filter=domain_filter)
+    print(f"[extractor:trim] rebuilt extractor summary.json for {rebuilt} domain tree(s).", flush=True)
+    print(
+        "[extractor:trim] done. Re-run `python extractor.py --force` if you want to re-scan Fozzy results with the new wordlist.",
+        flush=True,
+    )
+    return 0
 
 
 def run_extractors_for_domain(
@@ -559,6 +917,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Default: <scan-root>/extractor.log"
         ),
     )
+    p.add_argument(
+        "--trim",
+        action="store_true",
+        help=(
+            "List each rule's on-disk match file count (highest first), then remove chosen rules from the "
+            "wordlist, delete their match JSON files, and rebuild per-domain extractor/summary.json."
+        ),
+    )
+    p.add_argument(
+        "--trim-remove",
+        default=None,
+        metavar="NAMES",
+        help="With --trim: comma-separated rule names to remove without typing (use --trim-yes to confirm).",
+    )
+    p.add_argument(
+        "--trim-yes",
+        action="store_true",
+        help="With --trim --trim-remove: skip the final confirmation prompt.",
+    )
+    p.add_argument(
+        "--trim-no-backup",
+        action="store_true",
+        help="With --trim: do not write <wordlist>.trim.bak before saving the wordlist.",
+    )
     return p.parse_args(argv)
 
 
@@ -581,6 +963,19 @@ def main(argv: list[str] | None = None) -> int:
     wordlist = Path(wordlist_raw).expanduser()
     if not wordlist.is_absolute():
         wordlist = (EXTRACTOR_BASE / wordlist).resolve()
+
+    if bool(getattr(args, "trim", False)):
+        domain_filter_text = str(domain_filter).strip() if domain_filter is not None else ""
+        return run_trim_mode(
+            scan_root,
+            wordlist,
+            domain_filter=domain_filter_text or None,
+            workers=workers,
+            trim_remove=str(args.trim_remove).strip() if args.trim_remove else None,
+            trim_yes=bool(getattr(args, "trim_yes", False)),
+            no_backup=bool(getattr(args, "trim_no_backup", False)),
+        )
+
     if log_file_raw:
         log_path = Path(log_file_raw).expanduser()
         if not log_path.is_absolute():

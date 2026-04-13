@@ -1608,7 +1608,7 @@ def discover_fozzy_domain_output_pairs(master_root: Path) -> list[tuple[str, Pat
         if not child.is_dir() or child.name.startswith("."):
             continue
         results_sub = child / "results"
-        if results_sub.is_dir():
+        if results_sub.is_dir() or (child / "extractor" / "summary.json").is_file():
             pairs.append((child.name, child.resolve()))
     return pairs
 
@@ -1628,7 +1628,9 @@ def discover_fozzy_domain_output_pairs_nested(scan_root: Path) -> list[tuple[str
         for inner in sorted(fozzy_out.iterdir(), key=lambda p: p.name.lower()):
             if not inner.is_dir() or inner.name.startswith("."):
                 continue
-            if not (inner / "results").is_dir():
+            has_results = (inner / "results").is_dir()
+            has_extractor_summary = (inner / "extractor" / "summary.json").is_file()
+            if not has_results and not has_extractor_summary:
                 continue
             label = inner.name
             if label in used_labels:
@@ -2043,6 +2045,44 @@ def build_results_summary_payload(
     return anomaly_summary_payload
 
 
+def discover_extractor_summary_paths(domain_output: Path) -> list[Path]:
+    """Resolve ``extractor/summary.json`` for a Fozzy domain output tree (canonical + alternates).
+
+    Extractor output normally lives at ``<domain_output>/extractor/summary.json``. Some runs place
+    it under the registrable folder (``<registrable>/extractor/``) instead; nested ``**/extractor/``
+    is also checked so master aggregation still finds data.
+    """
+    candidates: list[Path] = []
+    direct = domain_output / "extractor" / "summary.json"
+    candidates.append(direct)
+
+    parent = domain_output.parent
+    if parent.name == "fozzy-output":
+        registrable_root = parent.parent
+        candidates.append(registrable_root / "extractor" / "summary.json")
+
+    try:
+        for p in domain_output.rglob("summary.json"):
+            if p.parent.name == "extractor" and p.is_file():
+                candidates.append(p)
+    except OSError:
+        pass
+
+    seen: set[str] = set()
+    out: list[Path] = []
+    for p in candidates:
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.is_file():
+            out.append(p)
+    return out
+
+
 def load_extractor_match_rows_for_master(
     _master_root: Path, pairs: list[tuple[str, Path]]
 ) -> tuple[list[dict[str, Any]], int, bool]:
@@ -2051,23 +2091,21 @@ def load_extractor_match_rows_for_master(
     total_rows = 0
     truncated = False
     for _domain_label, domain_output in pairs:
-        summary_path = domain_output / "extractor" / "summary.json"
-        if not summary_path.is_file():
-            continue
-        try:
-            data = read_json(summary_path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        for item in data.get("rows", []):
-            if not isinstance(item, dict):
+        for summary_path in discover_extractor_summary_paths(domain_output):
+            try:
+                data = read_json(summary_path)
+            except (OSError, json.JSONDecodeError):
                 continue
-            total_rows += 1
-            if len(rows) < MASTER_REPORT_EXTRACTOR_ROWS_MAX:
-                rows.append(dict(item))
-            else:
-                truncated = True
+            if not isinstance(data, dict):
+                continue
+            for item in data.get("rows", []):
+                if not isinstance(item, dict):
+                    continue
+                total_rows += 1
+                if len(rows) < MASTER_REPORT_EXTRACTOR_ROWS_MAX:
+                    rows.append(dict(item))
+                else:
+                    truncated = True
     rows.sort(
         key=lambda x: (
             str(x.get("domain_label", "")).lower(),
