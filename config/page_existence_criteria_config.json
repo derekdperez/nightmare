@@ -22,5 +22,7 @@
   "soft_404_body_regexes": [
     "page\\s+not\\s+found",
     "the\\s+page\\s+you\\s+are\\s+looking\\s+for\\s+does(?:n't|\\s+not)\\s+exist\\s+or\\s+has\\s+been\\s+moved"
-  ]
+  ],
+  "cloudflare_block_title_phrase": "attention required! | cloudflare",
+  "cloudflare_block_body_phrase": "sorry, you have been blocked"
 }

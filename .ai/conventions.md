@@ -59,3 +59,5 @@
   - Single image supports roles via `APP_ROLE` (`server` or `coordinator`).
   - Central deployment uses HTTP+HTTPS listeners and Postgres (`deploy/docker-compose.central.yml`); workers use `deploy/docker-compose.worker.yml`.
   - Secrets/tokens are environment-driven (`.env`), never hardcoded in source.
+- Page-existence convention: treat Cloudflare block pages as non-existent/invalid when both configured markers are present (`cloudflare_block_title_phrase` + `cloudflare_block_body_phrase`), regardless of HTTP status code class.
+- `probe_url_existence()` must apply soft-404/block detection in both successful response path and `HTTPError` path to avoid counting block pages as existing.

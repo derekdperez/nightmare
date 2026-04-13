@@ -214,3 +214,10 @@
   - `DEPLOYMENT.md` with operational runbook.
 - Updated dependencies with `psycopg[binary]` for Postgres support.
 - Why: enable horizontal VM scale-out with centralized locking/state, resumable failover, and shared artifact/session access across workers.
+
+- Restored/strengthened Cloudflare block detection in `nightmare.py` soft-404 logic:
+  - Added explicit Cloudflare invalid-page rule requiring BOTH title phrase (`attention required! | cloudflare`) and blocked-body phrase (`sorry, you have been blocked`).
+  - Rule is evaluated before status-specific soft-404 heuristics, so blocked pages with non-200 statuses are still classified non-existent/invalid.
+  - `probe_url_existence()` HTTPError path now also runs `detect_soft_not_found_response()` and marks `exists_confirmed=false` when blocked markers are present.
+- Updated page existence criteria schema/config with `cloudflare_block_title_phrase` and `cloudflare_block_body_phrase` keys.
+- Why: Cloudflare challenge/block pages were being miscounted as existing due to missing checks in HTTPError flow and overwritten title/body marker handling.
