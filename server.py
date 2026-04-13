@@ -5,6 +5,7 @@ Usage:
     python server.py
     python server.py --host 127.0.0.1 --port 8080 --output-root output
     python server.py --config server.json
+    python server.py --reset-coordinator --reset-confirm RESET_COORDINATOR_DATA --database-url ...
 
 The dashboard provides:
 - aggregate counts (domains discovered, completed/running/pending/failed),
@@ -39,6 +40,8 @@ try:
 except Exception:  # pragma: no cover - optional dependency at runtime
     psycopg = None
 
+from output_cleanup import clear_output_root_children
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = BASE_DIR / "output"
 DEFAULT_HOST = "127.0.0.1"
@@ -46,6 +49,7 @@ DEFAULT_PORT = 443
 DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "server.json"
 MAX_LOG_TAIL_BYTES = 64 * 1024
 DEFAULT_COORDINATOR_LEASE_SECONDS = 120
+RESET_COORDINATOR_CONFIRM = "RESET_COORDINATOR_DATA"
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -404,6 +408,14 @@ CREATE TABLE IF NOT EXISTS coordinator_artifacts (
   PRIMARY KEY(root_domain, artifact_type)
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_domain ON coordinator_artifacts(root_domain);
+
+CREATE TABLE IF NOT EXISTS coordinator_fleet_settings (
+  singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
+  output_clear_generation BIGINT NOT NULL DEFAULT 0,
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO coordinator_fleet_settings(singleton) VALUES (1)
+ON CONFLICT (singleton) DO NOTHING;
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -599,6 +611,65 @@ SET start_url = EXCLUDED.start_url,
                 )
             conn.commit()
         return True
+
+    def reset_coordinator_tables(self) -> dict[str, Any]:
+        """Truncate all coordinator tables (targets, sessions, stage tasks, artifacts)."""
+        truncate_sql = """
+TRUNCATE TABLE coordinator_targets, coordinator_sessions, coordinator_stage_tasks, coordinator_artifacts;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(truncate_sql)
+            conn.commit()
+        return {
+            "truncated_tables": [
+                "coordinator_targets",
+                "coordinator_sessions",
+                "coordinator_stage_tasks",
+                "coordinator_artifacts",
+            ],
+            "reset_at_utc": _iso_now(),
+        }
+
+    def get_fleet_settings(self) -> dict[str, Any]:
+        sql = """
+SELECT output_clear_generation, updated_at_utc
+FROM coordinator_fleet_settings
+WHERE singleton = 1;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return {"output_clear_generation": 0, "updated_at_utc": None}
+        gen, updated = row[0], row[1]
+        return {
+            "output_clear_generation": int(gen or 0),
+            "updated_at_utc": updated.isoformat() if updated else None,
+        }
+
+    def bump_output_clear_generation(self) -> dict[str, Any]:
+        sql = """
+UPDATE coordinator_fleet_settings
+SET output_clear_generation = output_clear_generation + 1,
+    updated_at_utc = NOW()
+WHERE singleton = 1
+RETURNING output_clear_generation, updated_at_utc;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+                if row is None:
+                    raise RuntimeError("coordinator_fleet_settings row missing (schema not initialized?)")
+            conn.commit()
+        gen, updated = row[0], row[1]
+        return {
+            "output_clear_generation": int(gen or 0),
+            "updated_at_utc": updated.isoformat() if updated else None,
+        }
 
     def status_summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
@@ -1123,6 +1194,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             self._write_json(self.coordinator_store.worker_statuses(stale_after_seconds=stale_after_seconds))
             return
+        if path == "/api/coord/fleet-settings":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            self._write_json(self.coordinator_store.get_fleet_settings())
+            return
         if path == "/api/coord/session":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
@@ -1336,6 +1416,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json({"ok": bool(ok), "size": len(content)})
             return
 
+        if path == "/api/coord/reset":
+            confirm = str(body.get("confirm", "") or "").strip()
+            if confirm != RESET_COORDINATOR_CONFIRM:
+                self._write_json(
+                    {
+                        "error": "invalid confirm",
+                        "expected_confirm": RESET_COORDINATOR_CONFIRM,
+                    },
+                    status=400,
+                )
+                return
+            clear_output = bool(body.get("clear_output", False))
+            signal_workers_clear_disk = bool(body.get("signal_workers_clear_disk", False))
+            result = self.coordinator_store.reset_coordinator_tables()
+            if clear_output:
+                result["output_clear"] = clear_output_root_children(self.output_root)
+            if signal_workers_clear_disk:
+                result["fleet_signal"] = self.coordinator_store.bump_output_clear_generation()
+            self._write_json({"ok": True, **result})
+            return
+
+        if path == "/api/coord/fleet-signal-clear-output":
+            self._write_json({"ok": True, **self.coordinator_store.bump_output_clear_generation()})
+            return
+
         self._write_json({"error": "not found"}, status=404)
 
     def _render_dashboard_html(self) -> str:
@@ -1462,6 +1567,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--database-url", default=None, help="Postgres DATABASE_URL for coordinator mode")
     p.add_argument("--coordinator-api-token", default=None, help="Bearer token required for /api/coord/* endpoints")
     p.add_argument(
+        "--reset-coordinator",
+        action="store_true",
+        help="Truncate coordinator Postgres tables and exit (requires --database-url and matching --reset-confirm)",
+    )
+    p.add_argument(
+        "--reset-confirm",
+        default="",
+        help=f"Must be {RESET_COORDINATOR_CONFIRM} when using --reset-coordinator",
+    )
+    p.add_argument(
+        "--clear-output",
+        action="store_true",
+        help="With --reset-coordinator, also remove direct children under the configured output root",
+    )
+    p.add_argument(
+        "--signal-workers-clear-disk",
+        action="store_true",
+        help="With --reset-coordinator, bump fleet output_clear_generation so workers clear their local output",
+    )
+    p.add_argument(
         "--output-root",
         default=None,
         help=f"Output root to summarize (default: {DEFAULT_OUTPUT_ROOT})",
@@ -1511,6 +1636,31 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("http_port must be in range 1..65535")
     if https_port and (https_port < 1 or https_port > 65535):
         raise ValueError("https_port must be in range 1..65535")
+
+    if args.reset_coordinator:
+        confirm = str(args.reset_confirm or "").strip()
+        if confirm != RESET_COORDINATOR_CONFIRM:
+            print(
+                f"[server] --reset-coordinator requires --reset-confirm {RESET_COORDINATOR_CONFIRM}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        if not database_url:
+            print(
+                "[server] --reset-coordinator requires database_url (config, DATABASE_URL, or --database-url)",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        store = CoordinatorStore(database_url)
+        result = store.reset_coordinator_tables()
+        if args.clear_output:
+            result["output_clear"] = clear_output_root_children(output_root)
+        if args.signal_workers_clear_disk:
+            result["fleet_signal"] = store.bump_output_clear_generation()
+        print(json.dumps(result, indent=2), flush=True)
+        return 0
 
     coordinator_store: CoordinatorStore | None = None
     if database_url:

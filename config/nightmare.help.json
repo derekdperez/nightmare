@@ -1,5 +1,5 @@
 ﻿{
-  "parser_description": "Crawl a domain, build a sitemap, infer likely API endpoints, and optionally ask OpenAI for additional URLs and analysis.",
+  "parser_description": "Crawl a domain locally (artifacts under output/), build a sitemap, infer likely API endpoints, and optionally ask OpenAI for additional URLs and analysis. By default this does not use any central coordinator — fleet mode uses coordinator.py separately.",
   "url_help": "Starting URL to crawl (http/https, or a bare hostname like example.com — https is assumed). Omit to run in batch mode using targets_file (see config) or --targets-file.",
   "config_help": "Path to JSON config file. Relative paths resolve under config/.",
   "max_pages_help": "Maximum number of pages to crawl before stopping.",
@@ -16,6 +16,7 @@
   "crawl_wordlist_help": "Path to a newline-delimited path wordlist used to seed spider requests (default: resources/wordlists/file_path_list.txt). Relative paths resolve from the repo root; bare filenames also search resources/wordlists/.",
   "verify_timeout_help": "Timeout in seconds for URL verification requests.",
   "verify_delay_help": "Delay in seconds between URL verification requests.",
+  "standalone_help": "Local single-URL mode: fresh crawl (unless --resume), INFO logs on the console, all data under output/ only. Does not contact a central coordinator.",
   "verify_urls_help": "Verify discovered URLs with follow-up requests after the crawl completes.",
   "crawl_delay_help": "Base crawl delay in seconds for Scrapy requests.",
   "max_delay_help": "Maximum adaptive crawl delay in seconds.",

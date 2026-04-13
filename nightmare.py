@@ -1,10 +1,21 @@
 ﻿#!/usr/bin/env python3
 """Domain crawler + AI-assisted sitemap analyzer.
 
-Usage:
-    python nightmare.py https://example.com --help
-    python nightmare.py --batch-workers 8
-      (no URL: read targets from targets_file in config or --targets-file)
+Runs entirely on your machine: by default all artifacts go under ./output/<domain>/.
+There is no integration with the central coordinator or any fleet API — that lives in
+coordinator.py (which simply subprocesses this script with a URL and --resume).
+
+Standalone local usage (same idea as a local CLI tool such as nmap):
+
+    python nightmare.py https://example.com --standalone
+    python nightmare.py https://example.com --config nightmare.standalone.json
+
+Optional external calls: target websites (the crawl), and OpenAI if you enable AI stages
+and set OPENAI_API_KEY (--no-ai disables that).
+
+Batch mode (no URL argument): parallel local subprocesses over a targets file:
+
+    python nightmare.py --batch-workers 4
 """
 
 from __future__ import annotations
@@ -4953,6 +4964,11 @@ def parse_args() -> argparse.Namespace:
         help=get_string_config_value(HELP_TEXTS, "verify_delay_help"),
     )
     parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help=get_string_config_value(HELP_TEXTS, "standalone_help"),
+    )
+    parser.add_argument(
         "--verify-urls",
         action="store_true",
         default=None,
@@ -5141,6 +5157,17 @@ def main() -> None:
             run_multi_target_orchestrator(args, config, config_path)
         emit_dev_timing_summary(None)
         return
+
+    if getattr(args, "standalone", False):
+        if not args.resume:
+            args.no_resume = True
+        if args.console_log_level is None:
+            args.console_log_level = "INFO"
+        print(
+            "[nightmare] standalone: crawl data and logs are written under output/<domain>/ only; "
+            "no coordinator APIs.",
+            flush=True,
+        )
 
     max_pages = int(merged_value(args.max_pages, config, "max_pages", 300))
     model = str(merged_value(args.model, config, "model", "gpt-5-mini"))
