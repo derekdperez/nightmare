@@ -353,6 +353,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--server-base-url", default=os.getenv("COORDINATOR_BASE_URL", env_from_file.get("COORDINATOR_BASE_URL", "")), help="Coordinator server base URL")
     p.add_argument("--api-token", default=os.getenv("COORDINATOR_API_TOKEN", env_from_file.get("COORDINATOR_API_TOKEN", "")), help="Coordinator API token")
     p.add_argument("--stale-after-seconds", type=int, default=180, help="Heartbeat freshness window for online/stale worker status")
+    p.add_argument("--skip-coordinator", action="store_true", help="Do not call coordinator HTTP APIs (use when this host cannot reach COORDINATOR_BASE_URL)")
     p.add_argument("--skip-ssm", action="store_true", help="Skip AWS SSM per-VM docker status checks")
     p.add_argument("--aws-region", default=os.getenv("AWS_REGION", env_from_file.get("AWS_REGION", "us-east-1")), help="AWS region for SSM checks")
     p.add_argument("--ssm-target-key", default="tag:Name", help="SSM target key")
@@ -368,18 +369,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.action not in {"status", "rollout"}:
         raise ValueError(f"unsupported action: {args.action}")
 
-    base_url = str(args.server_base_url or "").strip().rstrip("/")
-    if not base_url:
-        raise ValueError("server base URL is required (use --server-base-url or COORDINATOR_BASE_URL)")
+    if args.skip_coordinator:
+        if args.action == "status" and args.skip_ssm:
+            raise ValueError(
+                "status with --skip-coordinator does nothing when --skip-ssm is also set "
+                "(omit one of them)"
+            )
+        print("[coordinator] skipped (--skip-coordinator)", flush=True)
+    else:
+        base_url = str(args.server_base_url or "").strip().rstrip("/")
+        if not base_url:
+            raise ValueError("server base URL is required (use --server-base-url or COORDINATOR_BASE_URL)")
 
-    token = str(args.api_token or "").strip()
-    workers_payload = _http_get_json(
-        base_url=base_url,
-        path="/api/coord/workers",
-        token=token,
-        query={"stale_after_seconds": max(15, int(args.stale_after_seconds or 180))},
-    )
-    _print_coordinator_worker_status(workers_payload)
+        token = str(args.api_token or "").strip()
+        workers_payload = _http_get_json(
+            base_url=base_url,
+            path="/api/coord/workers",
+            token=token,
+            query={"stale_after_seconds": max(15, int(args.stale_after_seconds or 180))},
+        )
+        _print_coordinator_worker_status(workers_payload)
 
     if args.action == "status" and not args.skip_ssm:
         _run_ssm_worker_status(
