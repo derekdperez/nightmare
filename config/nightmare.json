@@ -8,6 +8,7 @@
     "sitemap_output": null,
     "url_inventory_output": null,
     "evidence_dir": null,
+    "page_existence_criteria_config": "page_existence_criteria_config.json",
     "crawl_wordlist": "resources/wordlists/file_path_list.txt",
     "verify_timeout": 12.0,
     "verify_delay": 0.25,

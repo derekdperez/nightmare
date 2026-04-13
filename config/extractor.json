@@ -1,0 +1,8 @@
+{
+  "scan_root": "output",
+  "wordlist": "resources/wordlists/extractor_list.txt",
+  "workers": 4,
+  "force": false,
+  "domain": null,
+  "log_file": null
+}

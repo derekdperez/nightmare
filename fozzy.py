@@ -4414,15 +4414,7 @@ def run_fozzy_for_parameters(
     if cfg["dry_run"]:
         run_summary = planned_summary
 
-    previous_sigint_handler: Any = None
-    sigint_ignored = False
-    try:
-        previous_sigint_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        sigint_ignored = True
-    except Exception:
-        previous_sigint_handler = None
-        sigint_ignored = False
+    print("Finalizing artifacts (permutations, inventory, summaries)...", flush=True)
 
     permutations_txt_path = output_dir / f"{root_domain}.fozzy.permutations.txt"
     permutations_txt_path.write_text("\n".join(permutations_lines).strip() + ("\n" if permutations_lines else ""), encoding="utf-8")
@@ -4472,6 +4464,7 @@ def run_fozzy_for_parameters(
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    print("Writing per-domain results summary...", flush=True)
     anomaly_summary_path, anomaly_summary_html_path = write_results_summary(
         root_domain=root_domain,
         parameters_path=parameters_path,
@@ -4482,6 +4475,10 @@ def run_fozzy_for_parameters(
     )
 
     try:
+        print(
+            "Generating master results summary across output tree (can take longer on large datasets)...",
+            flush=True,
+        )
         repo_root = nightmare_output_root_from_parameters(parameters_path)
         if repo_root is not None:
             master_json, master_html, n_dom = write_master_results_summary(repo_root, prefer_nested=None)
@@ -4495,14 +4492,15 @@ def run_fozzy_for_parameters(
                 master_json, master_html, n_dom = write_master_results_summary(master_parent, prefer_nested=None)
                 print(f"Master results summary JSON: {master_json}")
                 print(f"Master results summary HTML: {master_html} ({n_dom} domain output tree(s))")
+    except KeyboardInterrupt:
+        interrupted = True
+        interrupted_group = interrupted_group or "finalize_master_summary"
+        print(
+            "Interrupt received during master-results finalization; skipping master report and finishing with partial outputs.",
+            flush=True,
+        )
     except OSError as exc:
         print(f"Warning: could not write master results summary: {exc}", flush=True)
-
-    if sigint_ignored:
-        try:
-            signal.signal(signal.SIGINT, previous_sigint_handler)
-        except Exception:
-            pass
     print("")
     print(f"Permutations list: {permutations_txt_path}")
     print(f"Baseline URL list: {baseline_urls_txt_path}")
@@ -4530,7 +4528,7 @@ def run_fozzy_for_parameters(
     return {"interrupted": interrupted, "cancelled_by_user": cancelled_by_user}
 
 
-def run_incremental_domains(args: argparse.Namespace) -> None:
+def run_incremental_domains(args: argparse.Namespace) -> dict[str, bool]:
     scan_root = resolve_scan_root_for_incremental(str(args.scan_root))
     if not scan_root.is_dir():
         raise FileNotFoundError(f"Incremental scan root not found or not a directory: {scan_root}")
@@ -4542,7 +4540,7 @@ def run_incremental_domains(args: argparse.Namespace) -> None:
         master_json, master_html, n_dom = write_master_results_summary(scan_root, prefer_nested=None)
         print(f"Master results summary JSON: {master_json}")
         print(f"Master results summary HTML: {master_html} ({n_dom} domain output tree(s))")
-        return
+        return {"interrupted": False}
 
     to_run: list[tuple[Path, Path]] = []
     if args.incremental_force:
@@ -4566,7 +4564,7 @@ def run_incremental_domains(args: argparse.Namespace) -> None:
         master_json, master_html, n_dom = write_master_results_summary(scan_root, prefer_nested=None)
         print(f"Master results summary JSON: {master_json}")
         print(f"Master results summary HTML: {master_html} ({n_dom} domain output tree(s))")
-        return
+        return {"interrupted": False}
 
     cfg = build_effective_fozzy_config(args)
     domain_workers = max(1, int(cfg.get("incremental_domain_workers", cfg.get("max_background_workers", 1))))
@@ -4671,6 +4669,7 @@ def run_incremental_domains(args: argparse.Namespace) -> None:
     master_json, master_html, n_dom = write_master_results_summary(scan_root, prefer_nested=None)
     print(f"\nMaster results summary JSON: {master_json}")
     print(f"Master results summary HTML: {master_html} ({n_dom} domain output tree(s))")
+    return {"interrupted": interrupted}
 
 
 def main() -> None:
@@ -4697,9 +4696,13 @@ def main() -> None:
         print(f"Master results summary HTML: {master_html}")
         return
     if not args.parameters_file:
-        run_incremental_domains(args)
+        incremental_result = run_incremental_domains(args)
+        if bool(incremental_result.get("interrupted")):
+            raise SystemExit(130)
         return
-    run_fozzy_for_parameters(Path(args.parameters_file).resolve(), args)
+    single_result = run_fozzy_for_parameters(Path(args.parameters_file).resolve(), args)
+    if bool(single_result.get("interrupted")) or bool(single_result.get("cancelled_by_user")):
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

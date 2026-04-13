@@ -48,13 +48,14 @@ except Exception:  # pragma: no cover - optional dependency fallback
     _TLD_EXTRACT = None
 
 
-NOT_FOUND_STATUSES = {404, 410}
-SOFT_404_SMALL_BODY_MAX_BYTES = 16 * 1024
-SOFT_404_TITLE_PATTERN = re.compile(
+DEFAULT_NOT_FOUND_STATUSES = {404, 410}
+DEFAULT_SOFT_404_SMALL_BODY_MAX_BYTES = 16 * 1024
+DEFAULT_SOFT_404_HEAD_SCAN_MAX_BYTES = 4096
+DEFAULT_SOFT_404_BODY_SCAN_MAX_BYTES = 16 * 1024
+DEFAULT_SOFT_404_TITLE_PATTERNS = [
     r"<title[^>]*>[^<]*(?:404|not found|page not found|does not exist|cannot be found|no such)[^<]*</title>",
-    flags=re.IGNORECASE,
-)
-SOFT_404_PHRASES = (
+]
+DEFAULT_SOFT_404_PHRASES = [
     "page not found",
     "does not exist",
     "cannot be found",
@@ -63,7 +64,8 @@ SOFT_404_PHRASES = (
     "the page you requested could not be found",
     "the requested url was not found",
     "this page is unavailable",
-)
+    "the page you are looking for doesn't exist or has been moved",
+]
 BASE_DIR = Path(__file__).resolve().parent
 FILE_PATH_WORDLIST_PATH = BASE_DIR / "resources" / "wordlists" / "file_path_list.txt"
 FILE_PATH_WORDLIST_DISCOVERED_FROM = "resources/wordlists/file_path_list.txt"
@@ -82,6 +84,9 @@ PROMPT_TEMPLATES: dict[str, Any] = {}
 HTML_TEMPLATES: dict[str, str] = {}
 _STRING_RESOURCES_LOADED = False
 _NONINTERACTIVE_STDIN_HANDLE: Any = None
+PAGE_EXISTENCE_CRITERIA_CONFIG_PATH = CONFIG_DIR / "page_existence_criteria_config.json"
+PAGE_EXISTENCE_CRITERIA: dict[str, Any] = {}
+_PAGE_EXISTENCE_CRITERIA_LOADED = False
 OPENAI_PROMPT_BUDGET_STEPS = [180000, 120000, 80000, 50000, 30000]
 DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS = 90.0
 DEFAULT_EVIDENCE_BODY_MAX_BYTES = 4096
@@ -306,23 +311,48 @@ def detect_soft_not_found_response(
     response_body: bytes | bytearray | None,
 ) -> tuple[bool, str | None]:
     """Heuristic detection for soft-404 pages that return HTTP 200."""
+    ensure_page_existence_criteria_loaded()
+    criteria = PAGE_EXISTENCE_CRITERIA or default_page_existence_criteria()
+    if not bool(criteria.get("enabled", True)):
+        return False, None
     if status_code != 200:
         return False, None
     if not response_body:
         return False, None
 
     body_bytes = bytes(response_body)
-    head_text = body_bytes[:4096].decode("utf-8", errors="replace")
-    body_text = body_bytes[:16384].decode("utf-8", errors="replace")
+    head_scan_max_bytes = int(criteria.get("soft_404_head_scan_max_bytes", DEFAULT_SOFT_404_HEAD_SCAN_MAX_BYTES))
+    body_scan_max_bytes = int(criteria.get("soft_404_body_scan_max_bytes", DEFAULT_SOFT_404_BODY_SCAN_MAX_BYTES))
+    small_body_max_bytes = int(
+        criteria.get("soft_404_small_body_max_bytes", DEFAULT_SOFT_404_SMALL_BODY_MAX_BYTES)
+    )
+    title_patterns = criteria.get("soft_404_title_patterns", DEFAULT_SOFT_404_TITLE_PATTERNS)
+    body_phrases = criteria.get("soft_404_body_phrases", DEFAULT_SOFT_404_PHRASES)
+    body_regexes = criteria.get("soft_404_body_regexes", [])
+
+    head_text = body_bytes[:head_scan_max_bytes].decode("utf-8", errors="replace")
+    body_text = body_bytes[:body_scan_max_bytes].decode("utf-8", errors="replace")
     body_lower = body_text.lower()
     compact = re.sub(r"\s+", " ", body_lower)
 
-    if SOFT_404_TITLE_PATTERN.search(head_text):
-        return True, "soft-404 marker in HTML title"
+    for pattern in title_patterns:
+        try:
+            if re.search(str(pattern), head_text, flags=re.IGNORECASE):
+                return True, f"soft-404 marker in HTML title matched regex '{pattern}'"
+        except re.error:
+            continue
 
-    for phrase in SOFT_404_PHRASES:
-        if phrase in compact and len(body_bytes) <= SOFT_404_SMALL_BODY_MAX_BYTES:
+    for phrase in body_phrases:
+        phrase_text = str(phrase).strip().lower()
+        if phrase_text and phrase_text in compact and len(body_bytes) <= small_body_max_bytes:
             return True, f"soft-404 phrase '{phrase}' in small 200 response ({len(body_bytes)} bytes)"
+
+    for pattern in body_regexes:
+        try:
+            if re.search(str(pattern), compact, flags=re.IGNORECASE) and len(body_bytes) <= small_body_max_bytes:
+                return True, f"soft-404 body regex '{pattern}' in small 200 response ({len(body_bytes)} bytes)"
+        except re.error:
+            continue
 
     return False, None
 
@@ -332,6 +362,14 @@ def is_effective_existing_record(record: UrlInventoryRecord | None) -> bool:
         return False
     if bool(getattr(record, "soft_404_detected", False)):
         return False
+    not_found_statuses = configured_not_found_statuses()
+    for raw_status in (getattr(record, "crawl_status_code", None), getattr(record, "existence_status_code", None)):
+        try:
+            code = int(raw_status) if raw_status is not None else None
+        except (TypeError, ValueError):
+            code = None
+        if code is not None and code in not_found_statuses:
+            return False
     crawl_note = str(getattr(record, "crawl_note", "") or "").lower()
     existence_note = str(getattr(record, "existence_check_note", "") or "").lower()
     if "soft-404" in crawl_note or "soft-404" in existence_note:
@@ -773,6 +811,110 @@ def apply_extension_config(config: dict[str, Any]) -> None:
         "ai_excluded_url_extensions",
     )
     _EXTENSION_CONFIG_LOADED = True
+
+
+def default_page_existence_criteria() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "not_found_statuses": sorted(DEFAULT_NOT_FOUND_STATUSES),
+        "soft_404_small_body_max_bytes": DEFAULT_SOFT_404_SMALL_BODY_MAX_BYTES,
+        "soft_404_head_scan_max_bytes": DEFAULT_SOFT_404_HEAD_SCAN_MAX_BYTES,
+        "soft_404_body_scan_max_bytes": DEFAULT_SOFT_404_BODY_SCAN_MAX_BYTES,
+        "soft_404_title_patterns": list(DEFAULT_SOFT_404_TITLE_PATTERNS),
+        "soft_404_body_phrases": list(DEFAULT_SOFT_404_PHRASES),
+        "soft_404_body_regexes": [],
+    }
+
+
+def _sanitize_page_existence_criteria(raw: dict[str, Any]) -> dict[str, Any]:
+    defaults = default_page_existence_criteria()
+    merged = {**defaults, **(raw or {})}
+
+    merged["enabled"] = bool(merged.get("enabled", True))
+
+    statuses = merged.get("not_found_statuses", defaults["not_found_statuses"])
+    if not isinstance(statuses, list):
+        statuses = defaults["not_found_statuses"]
+    normalized_statuses: set[int] = set()
+    for value in statuses:
+        try:
+            code = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= code <= 599:
+            normalized_statuses.add(code)
+    merged["not_found_statuses"] = sorted(normalized_statuses or DEFAULT_NOT_FOUND_STATUSES)
+
+    def _as_positive_int(value: Any, fallback: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(1, parsed)
+
+    merged["soft_404_small_body_max_bytes"] = _as_positive_int(
+        merged.get("soft_404_small_body_max_bytes"),
+        DEFAULT_SOFT_404_SMALL_BODY_MAX_BYTES,
+    )
+    merged["soft_404_head_scan_max_bytes"] = _as_positive_int(
+        merged.get("soft_404_head_scan_max_bytes"),
+        DEFAULT_SOFT_404_HEAD_SCAN_MAX_BYTES,
+    )
+    merged["soft_404_body_scan_max_bytes"] = _as_positive_int(
+        merged.get("soft_404_body_scan_max_bytes"),
+        DEFAULT_SOFT_404_BODY_SCAN_MAX_BYTES,
+    )
+
+    def _as_string_list(value: Any, fallback: list[str]) -> list[str]:
+        if not isinstance(value, list):
+            value = fallback
+        out = [str(item).strip() for item in value if str(item).strip()]
+        return out if out else list(fallback)
+
+    merged["soft_404_title_patterns"] = _as_string_list(
+        merged.get("soft_404_title_patterns"),
+        DEFAULT_SOFT_404_TITLE_PATTERNS,
+    )
+    merged["soft_404_body_phrases"] = _as_string_list(
+        merged.get("soft_404_body_phrases"),
+        DEFAULT_SOFT_404_PHRASES,
+    )
+    merged["soft_404_body_regexes"] = _as_string_list(
+        merged.get("soft_404_body_regexes"),
+        [],
+    )
+    return merged
+
+
+def apply_page_existence_criteria_config(config: dict[str, Any]) -> None:
+    global PAGE_EXISTENCE_CRITERIA, _PAGE_EXISTENCE_CRITERIA_LOADED
+    PAGE_EXISTENCE_CRITERIA = _sanitize_page_existence_criteria(config)
+    _PAGE_EXISTENCE_CRITERIA_LOADED = True
+
+
+def ensure_page_existence_criteria_loaded() -> None:
+    global _PAGE_EXISTENCE_CRITERIA_LOADED
+    if _PAGE_EXISTENCE_CRITERIA_LOADED:
+        return
+    raw = read_json_file(PAGE_EXISTENCE_CRITERIA_CONFIG_PATH) if PAGE_EXISTENCE_CRITERIA_CONFIG_PATH.exists() else {}
+    apply_page_existence_criteria_config(raw)
+
+
+def configured_not_found_statuses() -> set[int]:
+    ensure_page_existence_criteria_loaded()
+    criteria = PAGE_EXISTENCE_CRITERIA or default_page_existence_criteria()
+    statuses = criteria.get("not_found_statuses", sorted(DEFAULT_NOT_FOUND_STATUSES))
+    if not isinstance(statuses, list):
+        return set(DEFAULT_NOT_FOUND_STATUSES)
+    out: set[int] = set()
+    for value in statuses:
+        try:
+            code = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= code <= 599:
+            out.add(code)
+    return out or set(DEFAULT_NOT_FOUND_STATUSES)
 
 
 def ensure_extension_config_loaded() -> None:
@@ -1862,7 +2004,7 @@ def derive_exists_for_requested_url(record: UrlInventoryRecord) -> bool:
             status = None
         if status is None:
             continue
-        return status not in NOT_FOUND_STATUSES
+        return status not in configured_not_found_statuses()
 
     return False
 
@@ -3469,7 +3611,7 @@ def probe_url_existence(
                     # HEAD 200 is not sufficient for existence; validate body content with GET.
                     continue
                 soft_404_detected, soft_404_reason = detect_soft_not_found_response(status_code, response_body)
-                exists_confirmed = status_code not in NOT_FOUND_STATUSES
+                exists_confirmed = status_code not in configured_not_found_statuses()
                 if soft_404_detected:
                     exists_confirmed = False
                 return {
@@ -3497,9 +3639,9 @@ def probe_url_existence(
             if method == "HEAD" and status_code in {405, 501}:
                 continue
 
-            exists_confirmed = status_code not in NOT_FOUND_STATUSES
+            exists_confirmed = status_code not in configured_not_found_statuses()
             note = "Received HTTP error status during probe"
-            if status_code in NOT_FOUND_STATUSES:
+            if status_code in configured_not_found_statuses():
                 note = "URL returned explicit not-found status"
 
             return {
@@ -3592,7 +3734,7 @@ def write_wordlist_guessed_paths_index(site_output_dir: Path, state: CrawlState)
         is_hit = (
             visited
             and code_i is not None
-            and code_i not in NOT_FOUND_STATUSES
+            and code_i not in configured_not_found_statuses()
             and not bool(rec and rec.soft_404_detected)
         )
         if is_hit:
@@ -4705,6 +4847,19 @@ def main() -> None:
     config_path = resolve_config_path(args.config)
     config = read_json_file(config_path)
     apply_extension_config(config)
+    page_existence_criteria_path_raw = optional_string(
+        merged_value(
+            None,
+            config,
+            "page_existence_criteria_config",
+            PAGE_EXISTENCE_CRITERIA_CONFIG_PATH.name,
+        )
+    )
+    page_existence_criteria_path = resolve_config_path(
+        page_existence_criteria_path_raw or PAGE_EXISTENCE_CRITERIA_CONFIG_PATH.name
+    )
+    page_existence_criteria_config = read_json_file(page_existence_criteria_path)
+    apply_page_existence_criteria_config(page_existence_criteria_config)
 
     if bool(getattr(args, "status", False)):
         print_quick_status_report(args, config)
@@ -4885,6 +5040,7 @@ def main() -> None:
     )
     progress = ProgressReporter(verbose=verbose, logger=app_logger)
     progress.info(f"Using configuration file: {config_path.resolve()}")
+    progress.info(f"Using page existence criteria file: {page_existence_criteria_path.resolve()}")
 
     client: OpenAI | None = None
     if not no_ai:

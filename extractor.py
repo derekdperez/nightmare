@@ -9,6 +9,7 @@ the master report does. When a domain's ``results/`` tree has newer files than r
 Usage:
     python extractor.py
     python extractor.py --scan-root ./output --force
+    python extractor.py lillylibrary.org
     python extractor.py --wordlist path/to/extractor_list.txt
 """
 
@@ -22,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,7 @@ from typing import Any
 EXTRACTOR_BASE = Path(__file__).resolve().parent
 DEFAULT_WORDLIST = EXTRACTOR_BASE / "resources" / "wordlists" / "extractor_list.txt"
 DEFAULT_SCAN_ROOT = EXTRACTOR_BASE / "output"
+DEFAULT_CONFIG_PATH = EXTRACTOR_BASE / "config" / "extractor.json"
 STATE_FILE_NAME = ".extractor_incremental_state.json"
 MAX_MATCHES_PER_RULE_PER_RESULT_FILE = 300
 
@@ -356,11 +359,58 @@ def discover_pairs(scan_root: Path) -> list[tuple[str, Path]]:
     return discover_fozzy_domain_output_pairs(scan_root)
 
 
+def default_extractor_config() -> dict[str, Any]:
+    return {
+        "scan_root": "output",
+        "wordlist": "resources/wordlists/extractor_list.txt",
+        "workers": 4,
+        "force": False,
+        "domain": None,
+        "log_file": None,
+    }
+
+
+def read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    parsed = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Extractor config file must contain a JSON object: {path}")
+    return parsed
+
+
+def resolve_config_path(path_value: str) -> Path:
+    p = Path(str(path_value or "").strip() or "extractor.json")
+    if p.is_absolute():
+        return p
+    if p.parts and p.parts[0].lower() == "config":
+        return EXTRACTOR_BASE / p
+    return EXTRACTOR_BASE / "config" / p
+
+
+def merged_value(cli_value: Any, config: dict[str, Any], key: str, default: Any) -> Any:
+    if cli_value is not None:
+        return cli_value
+    if key in config:
+        return config[key]
+    return default
+
+
+def normalize_workers(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 4
+    return max(1, parsed)
+
+
 def run_extractor_scan(
     scan_root: Path,
     wordlist_path: Path,
     *,
     force: bool = False,
+    domain_filter: str | None = None,
+    workers: int = 1,
 ) -> int:
     scan_root = scan_root.resolve()
     state_path = scan_root / STATE_FILE_NAME
@@ -371,29 +421,92 @@ def run_extractor_scan(
         return 1
 
     pairs = discover_pairs(scan_root)
+    domain_filter_text = str(domain_filter or "").strip().lower()
+    if domain_filter_text:
+        pairs = [
+            (domain_label, domain_output)
+            for domain_label, domain_output in pairs
+            if str(domain_label).strip().lower() == domain_filter_text
+            or str(domain_output.name).strip().lower() == domain_filter_text
+        ]
+        if not pairs:
+            print(
+                f"[extractor] No matching domain output found for domain filter: {domain_filter_text}",
+                flush=True,
+            )
+            return 1
     if not pairs:
         print(f"[extractor] No Fozzy domain trees under {scan_root}", flush=True)
         return 0
 
     processed = 0
     skipped = 0
+    to_process: list[tuple[str, Path]] = []
     for domain_label, domain_output in pairs:
         key = domain_label
         if not force and not domain_results_dirty(domain_output, state, key):
             skipped += 1
             continue
-        print(f"[extractor] {domain_label} … ({domain_output})", flush=True)
-        n, summary_path = run_extractors_for_domain(domain_label, domain_output, rules)
-        print(f"[extractor]   wrote {n} match file(s); {summary_path}", flush=True)
-        results = domain_output / "results"
-        if results.is_dir():
-            if "domains" not in state or not isinstance(state["domains"], dict):
-                state["domains"] = {}
-            state["domains"][key] = {
-                "results_max_mtime_ns": folder_tree_max_mtime_ns(results),
-            }
-        save_extractor_incremental_state(state_path, state)
-        processed += 1
+        to_process.append((domain_label, domain_output))
+
+    print(
+        f"[extractor] Starting scan: domains_to_process={len(to_process)}, skipped_unchanged={skipped}, workers={workers}",
+        flush=True,
+    )
+
+    if workers <= 1:
+        for domain_label, domain_output in to_process:
+            print(f"[extractor] {domain_label} … ({domain_output})", flush=True)
+            n, summary_path = run_extractors_for_domain(domain_label, domain_output, rules)
+            print(f"[extractor]   wrote {n} match file(s); {summary_path}", flush=True)
+            results = domain_output / "results"
+            if results.is_dir():
+                if "domains" not in state or not isinstance(state["domains"], dict):
+                    state["domains"] = {}
+                state["domains"][domain_label] = {
+                    "results_max_mtime_ns": folder_tree_max_mtime_ns(results),
+                }
+            save_extractor_incremental_state(state_path, state)
+            processed += 1
+    else:
+        failures = 0
+
+        def _run_one(domain_label: str, domain_output: Path) -> tuple[str, Path, int, Path]:
+            n, summary_path = run_extractors_for_domain(domain_label, domain_output, rules)
+            return domain_label, domain_output, n, summary_path
+
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_map = {
+                    executor.submit(_run_one, domain_label, domain_output): (domain_label, domain_output)
+                    for domain_label, domain_output in to_process
+                }
+                for fut in as_completed(future_map):
+                    domain_label, domain_output = future_map[fut]
+                    try:
+                        done_domain, done_output, n, summary_path = fut.result()
+                    except Exception as exc:
+                        failures += 1
+                        print(f"[extractor] {domain_label} worker error: {exc}", flush=True)
+                        continue
+                    print(f"[extractor] {done_domain} … ({done_output})", flush=True)
+                    print(f"[extractor]   wrote {n} match file(s); {summary_path}", flush=True)
+                    results = done_output / "results"
+                    if results.is_dir():
+                        if "domains" not in state or not isinstance(state["domains"], dict):
+                            state["domains"] = {}
+                        state["domains"][done_domain] = {
+                            "results_max_mtime_ns": folder_tree_max_mtime_ns(results),
+                        }
+                    save_extractor_incremental_state(state_path, state)
+                    processed += 1
+        except KeyboardInterrupt:
+            print("[extractor] Interrupt received; stopping worker pool with partial outputs.", flush=True)
+            return 130
+
+        if failures > 0:
+            print(f"[extractor] Completed with worker failures={failures}", flush=True)
+            return 1
 
     print(
         f"[extractor] Done. Domains processed={processed}, skipped (unchanged)={skipped}, "
@@ -406,18 +519,36 @@ def run_extractor_scan(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Regex extractor over Fozzy result JSON (incremental by domain).")
     p.add_argument(
+        "domain",
+        nargs="?",
+        default=None,
+        help="Optional domain label to process only one domain output tree (for example lillylibrary.org).",
+    )
+    p.add_argument(
+        "--config",
+        default="extractor.json",
+        help="Extractor config file path (default: config/extractor.json). Relative paths resolve under config/.",
+    )
+    p.add_argument(
         "--scan-root",
-        default=str(DEFAULT_SCAN_ROOT),
+        default=None,
         help=f"Root to scan for Fozzy outputs (default: {DEFAULT_SCAN_ROOT})",
     )
     p.add_argument(
         "--wordlist",
-        default=str(DEFAULT_WORDLIST),
+        default=None,
         help=f"JSON array of extractor rules (default: {DEFAULT_WORDLIST})",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel extractor domain workers.",
     )
     p.add_argument(
         "--force",
         action="store_true",
+        default=None,
         help="Re-run extractors for every domain regardless of incremental state.",
     )
     p.add_argument(
@@ -433,13 +564,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    scan_root = Path(args.scan_root).expanduser()
+    config_path = resolve_config_path(str(args.config))
+    file_config = read_json_file(config_path)
+    effective_config = {**default_extractor_config(), **file_config}
+
+    scan_root_raw = str(merged_value(args.scan_root, effective_config, "scan_root", str(DEFAULT_SCAN_ROOT)))
+    wordlist_raw = str(merged_value(args.wordlist, effective_config, "wordlist", str(DEFAULT_WORDLIST)))
+    workers = normalize_workers(merged_value(args.workers, effective_config, "workers", 4))
+    force = bool(merged_value(args.force, effective_config, "force", False))
+    domain_filter = merged_value(args.domain, effective_config, "domain", None)
+    log_file_raw = str(merged_value(args.log_file, effective_config, "log_file", "") or "").strip()
+
+    scan_root = Path(scan_root_raw).expanduser()
     if not scan_root.is_absolute():
         scan_root = (EXTRACTOR_BASE / scan_root).resolve()
-    wordlist = Path(args.wordlist).expanduser()
+    wordlist = Path(wordlist_raw).expanduser()
     if not wordlist.is_absolute():
         wordlist = (EXTRACTOR_BASE / wordlist).resolve()
-    log_file_raw = str(args.log_file or "").strip()
     if log_file_raw:
         log_path = Path(log_file_raw).expanduser()
         if not log_path.is_absolute():
@@ -449,8 +590,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log_path = (scan_root / "extractor.log").resolve()
     install_extractor_log_tee(log_path)
+    print(
+        f"[extractor] config={config_path.resolve()} scan_root={scan_root} wordlist={wordlist} "
+        f"workers={workers} force={force} domain={domain_filter}",
+        flush=True,
+    )
     try:
-        return run_extractor_scan(scan_root, wordlist, force=bool(args.force))
+        return run_extractor_scan(
+            scan_root,
+            wordlist,
+            force=force,
+            domain_filter=str(domain_filter).strip() if domain_filter is not None else None,
+            workers=workers,
+        )
     except FileNotFoundError as exc:
         print(f"[extractor] {exc}", flush=True)
         return 1

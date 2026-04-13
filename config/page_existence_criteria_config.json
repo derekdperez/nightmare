@@ -1,0 +1,26 @@
+{
+  "enabled": true,
+  "not_found_statuses": [404, 410],
+  "soft_404_small_body_max_bytes": 24576,
+  "soft_404_head_scan_max_bytes": 8192,
+  "soft_404_body_scan_max_bytes": 24576,
+  "soft_404_title_patterns": [
+    "<title[^>]*>[^<]*(?:404|not found|page not found|does not exist|cannot be found|no such)[^<]*</title>"
+  ],
+  "soft_404_body_phrases": [
+    "page not found",
+    "does not exist",
+    "cannot be found",
+    "no such page",
+    "not found",
+    "the page you requested could not be found",
+    "the requested url was not found",
+    "this page is unavailable",
+    "the page you are looking for doesn't exist or has been moved",
+    "the page you are looking for does not exist or has been moved"
+  ],
+  "soft_404_body_regexes": [
+    "page\\s+not\\s+found",
+    "the\\s+page\\s+you\\s+are\\s+looking\\s+for\\s+does(?:n't|\\s+not)\\s+exist\\s+or\\s+has\\s+been\\s+moved"
+  ]
+}

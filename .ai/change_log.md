@@ -2,6 +2,31 @@
 
 ## 2026-04-12
 
+- Added extractor domain-target + worker-config support:
+  - `extractor.py` now accepts optional positional `domain` to run extractors for a specific domain output tree.
+  - Added parallel processing with configurable worker count (`--workers`), including config-driven default.
+  - Added extractor config file loading via `--config` with new default config file `config/extractor.json`.
+  - New `config/extractor.json` includes `"workers": 4` default.
+- Why: allow focused extractor runs by domain and improve throughput across domains with configurable concurrency.
+
+- Improved post-fuzz finalization behavior in `fozzy.py` to prevent apparent hangs:
+  - Added explicit progress lines for finalization stages (artifact write, per-domain summary, master summary generation).
+  - Removed temporary `SIGINT` ignore during finalization so `Ctrl+C` remains responsive.
+  - Added interrupt handling around master summary generation to skip that step and finish with partial outputs if user interrupts.
+- Why: runs could appear stalled after group-level "execution finished" logs, and interrupts were not honored during finalization.
+
+- Added configurable page-existence criteria for Nightmare:
+  - New config file: `config/page_existence_criteria_config.json`.
+  - `config/nightmare.json` now includes `page_existence_criteria_config` to select criteria file.
+  - `nightmare.py` now loads/sanitizes this criteria and applies it in soft-404 detection and not-found status handling.
+  - Effective output filtering (`*_url_inventory.json` entries and related downstream artifacts) now excludes URLs with configured not-found status codes, not only soft-404 markers.
+- Why: pages like `/.htpasswd` or `/add` may return small branded 200 "Page Not Found" responses and should be treated as non-existent using configurable detection logic.
+
+- Improved Fozzy Ctrl+C shutdown semantics:
+  - `run_incremental_domains()` now returns interruption status.
+  - `main()` now exits with code `130` after graceful cleanup when interrupted in either incremental or single-domain run paths.
+- Why: interrupts were often handled internally with partial-output finalization but process exit status still appeared successful (`0`), which made cancellation handling less predictable.
+
 - Fixed Fozzy single-domain report loading when opened as local files:
   - `render_anomaly_summary_html()` now embeds a single-domain fallback payload directly in the generated HTML.
   - Browser JS now skips fetch/XHR disk reads when the page protocol is `file:` and uses embedded payload data for table bootstrap.
