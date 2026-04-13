@@ -2,6 +2,25 @@
 
 ## 2026-04-12
 
+- Fixed server-side origin/report fetch issues:
+  - `server.py` now adds `Access-Control-Allow-Origin: *` (and related allow headers/methods) on responses plus `OPTIONS` handling.
+  - Added output-root static fallback routing for non-API paths so report-relative fetches (for example `/all_domains.results_summary.json`) resolve when `/` serves the all-domains report.
+- Why: generated report pages were failing to load companion JSON/log data in browser due origin/fetch path failures.
+
+- Updated `server.py` default serving + configurability:
+  - Added server config file `config/server.json` with default `host`, `port`, and `output_root`.
+  - Added `--config` support in `server.py`; CLI values still override config.
+  - Changed route `/` to serve `all_domains.results_summary.html` by default when available.
+  - Added `/dashboard` route for the live monitoring overview UI.
+- Why: operators wanted configurable hosting port and immediate landing on the all-domain HTML report.
+
+- Added live dashboard web server (`server.py`) for runtime visibility and report serving:
+  - New stdlib threaded HTTP server with auto-refresh dashboard at `/`.
+  - Exposes `/api/summary` JSON containing aggregate + per-domain status from output artifacts.
+  - Serves generated reports/artifacts via `/files/<repo-relative-path>` with path-safety checks.
+  - Dashboard links to Nightmare/Fozzy reports and shows per-domain latest log tail snippets.
+- Why: provide a single place to watch ongoing activity and open generated HTML reports while scans/fuzzing are running.
+
 - Added extractor domain-target + worker-config support:
   - `extractor.py` now accepts optional positional `domain` to run extractors for a specific domain output tree.
   - Added parallel processing with configurable worker count (`--workers`), including config-driven default.

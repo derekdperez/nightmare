@@ -4,6 +4,7 @@
 Usage:
     python server.py
     python server.py --host 127.0.0.1 --port 8080 --output-root output
+    python server.py --config server.json
 
 The dashboard provides:
 - aggregate counts (domains discovered, completed/running/pending/failed),
@@ -32,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = BASE_DIR / "output"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "server.json"
 MAX_LOG_TAIL_BYTES = 64 * 1024
 
 
@@ -45,6 +47,39 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _resolve_config_path(raw_path: str | None) -> Path:
+    value = str(raw_path or "").strip() or "server.json"
+    p = Path(value).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    if p.parts and p.parts[0].lower() == "config":
+        return (BASE_DIR / p).resolve()
+    return (BASE_DIR / "config" / p).resolve()
+
+
+def _default_server_config() -> dict[str, Any]:
+    return {
+        "host": DEFAULT_HOST,
+        "port": DEFAULT_PORT,
+        "output_root": "output",
+    }
+
+
+def _merged_value(cli_value: Any, cfg: dict[str, Any], key: str, default: Any) -> Any:
+    if cli_value is not None:
+        return cli_value
+    if key in cfg:
+        return cfg[key]
+    return default
+
+
+def _find_all_domains_report_html(output_root: Path) -> Path | None:
+    candidate = output_root / "all_domains.results_summary.html"
+    if candidate.is_file():
+        return candidate
+    return None
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -276,6 +311,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -285,6 +323,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -304,9 +345,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -314,6 +366,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if path == "/":
+            all_domains_html = _find_all_domains_report_html(self.output_root)
+            if all_domains_html is not None:
+                self._serve_static_file(all_domains_html)
+            else:
+                self._write_text(self._render_dashboard_html(), content_type="text/html; charset=utf-8")
+            return
+        if path == "/dashboard":
             self._write_text(self._render_dashboard_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/api/summary":
@@ -336,6 +395,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._serve_static_file(resolved)
             return
+        # Allow report-adjacent relative fetches from '/' served report pages, e.g.
+        # /all_domains.results_summary.json loaded by all_domains.results_summary.html.
+        if path not in {"/favicon.ico"} and not path.startswith("/api/"):
+            rel = unquote(path.lstrip("/"))
+            resolved = _normalize_and_validate_relative_path(self.output_root, rel)
+            if resolved is not None and resolved.is_file():
+                self._serve_static_file(resolved)
+                return
         self._write_text("Not found", status=404)
 
     def _render_dashboard_html(self) -> str:
@@ -448,11 +515,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Nightmare/Fozzy report web dashboard server.")
-    p.add_argument("--host", default=DEFAULT_HOST, help=f"Bind host (default: {DEFAULT_HOST})")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Bind port (default: {DEFAULT_PORT})")
+    p.add_argument(
+        "--config",
+        default="server.json",
+        help="Server config path (default: config/server.json). Relative paths resolve under config/.",
+    )
+    p.add_argument("--host", default=None, help=f"Bind host (default: {DEFAULT_HOST})")
+    p.add_argument("--port", type=int, default=None, help=f"Bind port (default: {DEFAULT_PORT})")
     p.add_argument(
         "--output-root",
-        default=str(DEFAULT_OUTPUT_ROOT),
+        default=None,
         help=f"Output root to summarize (default: {DEFAULT_OUTPUT_ROOT})",
     )
     return p.parse_args(argv)
@@ -460,11 +532,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    output_root = Path(args.output_root).expanduser()
+    config_path = _resolve_config_path(args.config)
+    file_cfg = _read_json_dict(config_path)
+    merged_cfg = {**_default_server_config(), **file_cfg}
+
+    output_root_raw = str(_merged_value(args.output_root, merged_cfg, "output_root", "output"))
+    output_root = Path(output_root_raw).expanduser()
     if not output_root.is_absolute():
         output_root = (BASE_DIR / output_root).resolve()
-    host = str(args.host or DEFAULT_HOST).strip() or DEFAULT_HOST
-    port = int(args.port or DEFAULT_PORT)
+    host = str(_merged_value(args.host, merged_cfg, "host", DEFAULT_HOST) or DEFAULT_HOST).strip() or DEFAULT_HOST
+    port = int(_merged_value(args.port, merged_cfg, "port", DEFAULT_PORT) or DEFAULT_PORT)
     if port < 1 or port > 65535:
         raise ValueError("port must be in range 1..65535")
 
@@ -473,8 +550,15 @@ def main(argv: list[str] | None = None) -> int:
     httpd.output_root = output_root  # type: ignore[attr-defined]
 
     print(f"[server] starting dashboard on http://{host}:{port}", flush=True)
+    print(f"[server] config={config_path}", flush=True)
     print(f"[server] app_root={BASE_DIR}", flush=True)
     print(f"[server] output_root={output_root}", flush=True)
+    all_domains_html = _find_all_domains_report_html(output_root)
+    if all_domains_html is not None:
+        print(f"[server] default route / serving all-domains report: {all_domains_html}", flush=True)
+    else:
+        print("[server] default route / serving dashboard (all_domains.results_summary.html not found)", flush=True)
+    print(f"[server] dashboard route: http://{host}:{port}/dashboard", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

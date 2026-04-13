@@ -25,3 +25,9 @@
 - Do not ignore `SIGINT` during Fozzy finalization; keep `Ctrl+C` responsive while writing summaries/master report and treat finalization-stage interrupts as partial-output completion.
 - Nightmare page-existence detection is configuration-driven via `config/page_existence_criteria_config.json` (or `page_existence_criteria_config` in `config/nightmare.json`): controls not-found status codes plus soft-404 title/body phrase and regex heuristics with body-size thresholds.
 - `extractor.py` supports optional single-domain execution via positional `domain` argument (or `domain` in `config/extractor.json`) and configurable parallel domain processing via `workers` (CLI `--workers` or config; default `4`).
+- `server.py` is a stdlib-only dashboard server for live monitoring/report serving:
+  - `GET /` renders an auto-refreshing HTML overview.
+  - `GET /api/summary` returns JSON status built from `output/` artifacts.
+  - `GET /files/<repo-relative-path>` serves generated reports/artifacts safely within repo root.
+- `server.py` runtime settings are config-first via `config/server.json` (`host`, `port`, `output_root`) with CLI overrides; route `/` should serve `output/all_domains.results_summary.html` by default when present, while `/dashboard` serves the live monitoring UI.
+- `server.py` should send permissive CORS headers for browser-loaded report fetches and must serve report-adjacent files (for example `all_domains.results_summary.json`) from `output_root` so relative fetch/XHR in generated HTML reports succeeds when `/` serves a report file.
