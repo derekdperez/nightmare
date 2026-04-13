@@ -46,9 +46,9 @@ def _http_get_json(base_url: str, path: str, token: str = "", query: dict[str, A
             raw = rsp.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} GET {suffix}: {body[:400]}") from exc
+        raise RuntimeError(f"HTTP {exc.code} GET {url}: {body[:400]}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Network error GET {suffix}: {exc}") from exc
+        raise RuntimeError(f"Network error GET {url}: {exc}") from exc
     try:
         parsed = json.loads(raw or "{}")
     except Exception:
