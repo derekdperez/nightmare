@@ -1,5 +1,10 @@
 {
   "host": "127.0.0.1",
-  "port": 8000,
+  "http_port": 80,
+  "https_port": 443,
+  "cert_file": "",
+  "key_file": "",
+  "database_url": "",
+  "coordinator_api_token": "",
   "output_root": "output"
 }

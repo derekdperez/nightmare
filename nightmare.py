@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import gzip
 import hashlib
 import html
@@ -28,6 +29,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +107,17 @@ _URL_ATTRIBUTE_XPATH = (
 )
 EVIDENCE_FILE_EXTENSION = ".json.gz"
 EVIDENCE_GZIP_COMPRESSLEVEL = 9
+DEV_ENV_NAMES = {"dev", "development", "local", "test"}
+DEV_TIMING_TOP_N_DEFAULT = 20
+_DEV_TIMING_ENABLED = False
+_DEV_TIMING_LOG_EACH_CALL = False
+_DEV_TIMING_LOCK = threading.Lock()
+_DEV_TIMING_STATS: dict[str, dict[str, float | int]] = {}
+_DEV_TIMING_CALLS: list[dict[str, Any]] = []
+SESSION_STATE_BACKEND_URL: str = ""
+SESSION_STATE_BACKEND_TIMEOUT_SECONDS: float = 5.0
+SESSION_STATE_BACKEND_TOKEN: str = ""
+_SESSION_STATE_REMOTE_ERROR_LOGGED = False
 
 
 def get_root_domain(hostname: str) -> str:
@@ -775,6 +788,190 @@ def merged_value(cli_value: Any, config: dict[str, Any], key: str, default: Any)
     if key in config:
         return config[key]
     return default
+
+
+def _is_development_environment(config: dict[str, Any]) -> bool:
+    config_env = str(config.get("environment", "") or "").strip().lower()
+    env_env = str(
+        os.getenv("NIGHTMARE_ENV")
+        or os.getenv("APP_ENV")
+        or os.getenv("ENVIRONMENT")
+        or ""
+    ).strip().lower()
+    effective = env_env or config_env
+    return effective in DEV_ENV_NAMES
+
+
+def _is_truthy_env_flag(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in {"1", "true", "yes", "on", "y"}
+
+
+def configure_dev_timing(config: dict[str, Any]) -> bool:
+    global _DEV_TIMING_ENABLED, _DEV_TIMING_LOG_EACH_CALL, _DEV_TIMING_STATS, _DEV_TIMING_CALLS
+    dev_env = _is_development_environment(config)
+    configured = config.get("dev_timing_logging")
+    enabled = dev_env if configured is None else bool(configured)
+    env_override = os.getenv("NIGHTMARE_DEV_TIMING")
+    if env_override is not None:
+        enabled = _is_truthy_env_flag(env_override)
+    each_call = bool(config.get("dev_timing_log_each_call", False))
+    env_each_call = os.getenv("NIGHTMARE_DEV_TIMING_EACH_CALL")
+    if env_each_call is not None:
+        each_call = _is_truthy_env_flag(env_each_call)
+    _DEV_TIMING_ENABLED = bool(enabled)
+    _DEV_TIMING_LOG_EACH_CALL = bool(each_call and _DEV_TIMING_ENABLED)
+    with _DEV_TIMING_LOCK:
+        _DEV_TIMING_STATS = {}
+        _DEV_TIMING_CALLS = []
+    return _DEV_TIMING_ENABLED
+
+
+def _emit_dev_perf_line(message: str, progress: "ProgressReporter | None" = None) -> None:
+    if progress is not None:
+        progress.info(message)
+        return
+    logger = logging.getLogger("nightmare")
+    if logger.handlers:
+        logger.info(message)
+    else:
+        print(message, flush=True)
+
+
+def _record_dev_timing(name: str, elapsed_seconds: float) -> None:
+    if not _DEV_TIMING_ENABLED:
+        return
+    elapsed = max(0.0, float(elapsed_seconds))
+    with _DEV_TIMING_LOCK:
+        stats = _DEV_TIMING_STATS.get(name)
+        if stats is None:
+            stats = {"count": 0, "total_s": 0.0, "max_s": 0.0}
+            _DEV_TIMING_STATS[name] = stats
+        stats["count"] = int(stats["count"]) + 1
+        stats["total_s"] = float(stats["total_s"]) + elapsed
+        stats["max_s"] = max(float(stats["max_s"]), elapsed)
+        _DEV_TIMING_CALLS.append(
+            {
+                "name": name,
+                "elapsed_s": elapsed,
+            }
+        )
+
+
+@contextmanager
+def dev_timed_call(name: str, progress: "ProgressReporter | None" = None):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - started
+        _record_dev_timing(name, elapsed)
+        if _DEV_TIMING_ENABLED and _DEV_TIMING_LOG_EACH_CALL:
+            _emit_dev_perf_line(f"[dev-perf] {name}: {elapsed:.3f}s", progress)
+
+
+def emit_dev_timing_summary(progress: "ProgressReporter | None" = None, *, top_n: int = DEV_TIMING_TOP_N_DEFAULT) -> None:
+    if not _DEV_TIMING_ENABLED:
+        return
+    with _DEV_TIMING_LOCK:
+        stats_items = [(name, dict(values)) for name, values in _DEV_TIMING_STATS.items()]
+        call_items = list(_DEV_TIMING_CALLS)
+    if not stats_items:
+        _emit_dev_perf_line("[dev-perf] no timed calls were recorded.", progress)
+        return
+    total_calls = sum(int(item[1].get("count", 0) or 0) for item in stats_items)
+    total_time = sum(float(item[1].get("total_s", 0.0) or 0.0) for item in stats_items)
+    _emit_dev_perf_line(
+        f"[dev-perf] captured {total_calls} timed calls across {len(stats_items)} methods; cumulative={total_time:.3f}s",
+        progress,
+    )
+    limit = max(1, int(top_n))
+    by_total = sorted(stats_items, key=lambda item: float(item[1].get("total_s", 0.0) or 0.0), reverse=True)[:limit]
+    for name, values in by_total:
+        count = int(values.get("count", 0) or 0)
+        total_s = float(values.get("total_s", 0.0) or 0.0)
+        max_s = float(values.get("max_s", 0.0) or 0.0)
+        avg_s = (total_s / count) if count else 0.0
+        _emit_dev_perf_line(
+            f"[dev-perf] method={name} calls={count} total={total_s:.3f}s avg={avg_s:.3f}s max={max_s:.3f}s",
+            progress,
+        )
+    slowest_calls = sorted(call_items, key=lambda row: float(row.get("elapsed_s", 0.0) or 0.0), reverse=True)[:limit]
+    for row in slowest_calls:
+        _emit_dev_perf_line(
+            f"[dev-perf] slow-call method={row.get('name')} elapsed={float(row.get('elapsed_s', 0.0) or 0.0):.3f}s",
+            progress,
+        )
+
+
+def _safe_int_from_any(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _compute_worker_affinity_mask(cpu_count: int, desired_cores: int | None) -> int:
+    total = max(1, int(cpu_count))
+    if desired_cores is None:
+        worker_cores = max(1, total // 2)
+        if total > 1:
+            worker_cores = min(worker_cores, total - 1)
+    else:
+        worker_cores = max(1, min(int(desired_cores), total))
+    mask = 0
+    for idx in range(worker_cores):
+        mask |= (1 << idx)
+    return mask if mask > 0 else 1
+
+
+def _apply_windows_affinity_mask(mask: int) -> bool:
+    if os.name != "nt":
+        return False
+    if mask <= 0:
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        return False
+    get_current_process = getattr(kernel32, "GetCurrentProcess", None)
+    set_affinity = getattr(kernel32, "SetProcessAffinityMask", None)
+    if get_current_process is None or set_affinity is None:
+        return False
+    try:
+        current = get_current_process()
+        ok = bool(set_affinity(current, ctypes.c_size_t(int(mask))))
+    except Exception:
+        return False
+    return ok
+
+
+def apply_worker_priority_hints_from_env() -> None:
+    """Apply worker niceness/affinity hints when running as a spawned batch worker."""
+    if os.name == "nt":
+        mask_raw = os.getenv("NIGHTMARE_WORKER_AFFINITY_MASK")
+        if mask_raw:
+            try:
+                mask = int(mask_raw, 0)
+            except ValueError:
+                mask = 0
+            if mask > 0:
+                _apply_windows_affinity_mask(mask)
+        return
+
+    nice_raw = os.getenv("NIGHTMARE_WORKER_NICE")
+    if not nice_raw:
+        return
+    try:
+        nice_delta = max(0, _safe_int_from_any(nice_raw, 10))
+    except Exception:
+        nice_delta = 10
+    if nice_delta <= 0:
+        return
+    try:
+        os.nice(nice_delta)
+    except OSError:
+        return
 
 
 def optional_string(value: Any) -> str | None:
@@ -4260,6 +4457,11 @@ def run_multi_target_orchestrator(
     worker_count = int(merged_value(args.batch_workers, config, "batch_workers", 8))
     if worker_count < 1:
         raise ValueError("batch_workers must be at least 1")
+    batch_worker_nice = _safe_int_from_any(merged_value(None, config, "batch_worker_nice", 10), 10)
+    affinity_cores_raw = merged_value(None, config, "batch_worker_affinity_cores", None)
+    affinity_cores = None if affinity_cores_raw in (None, "") else _safe_int_from_any(affinity_cores_raw, 0)
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    worker_affinity_mask = _compute_worker_affinity_mask(cpu_count, affinity_cores)
 
     state_dir_raw = merged_value(args.batch_state_dir, config, "batch_state_dir", None)
     if state_dir_raw:
@@ -4273,20 +4475,24 @@ def run_multi_target_orchestrator(
     lock_dir = state_dir / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
 
-    target_rows = load_target_file_entries(targets_path)
+    with dev_timed_call("batch.load_target_file_entries"):
+        target_rows = load_target_file_entries(targets_path)
     existing_state: dict[str, Any] | None = None
     if state_path.is_file():
         try:
             existing_state = read_json_file(state_path)
         except Exception:
             existing_state = None
-    state = reconcile_batch_state(existing_state, targets_path, target_rows)
-    recover_stale_running_entries(state)
+    with dev_timed_call("batch.reconcile_batch_state"):
+        state = reconcile_batch_state(existing_state, targets_path, target_rows)
+    with dev_timed_call("batch.recover_stale_running_entries"):
+        recover_stale_running_entries(state)
     for entry in state["entries"]:
         if isinstance(entry, dict) and entry.get("status") == "pending":
             prepare_target_entry_fields(entry)
     state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-    _atomic_write_json(state_path, state)
+    with dev_timed_call("batch.persist_initial_state"):
+        _atomic_write_json(state_path, state)
 
     script_path = Path(__file__).resolve()
     child_suffix = filter_argv_for_batch_child(sys.argv[1:])
@@ -4300,11 +4506,23 @@ def run_multi_target_orchestrator(
         f"workers={worker_count}, state={state_path}",
         flush=True,
     )
+    if os.name == "nt":
+        print(
+            f"[batch] worker scheduling: windows affinity mask=0x{worker_affinity_mask:x} "
+            f"(cpu_count={cpu_count}, configured_cores={affinity_cores})",
+            flush=True,
+        )
+    else:
+        print(
+            f"[batch] worker scheduling: unix nice increment={max(0, batch_worker_nice)}",
+            flush=True,
+        )
 
     def persist() -> None:
         state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
         try:
-            _atomic_write_json(state_path, state)
+            with dev_timed_call("batch.persist_state"):
+                _atomic_write_json(state_path, state)
         except OSError as exc:
             print(
                 f"[batch] warning: state persist failed for {state_path}: {exc}. Continuing...",
@@ -4358,11 +4576,18 @@ def run_multi_target_orchestrator(
                 entry["error"] = None
                 persist()
                 print(f"[batch] spawn: {domain} pid-pending cmd={start_url!r}", flush=True)
+                child_env = os.environ.copy()
+                if os.name == "nt":
+                    child_env["NIGHTMARE_WORKER_AFFINITY_MASK"] = str(worker_affinity_mask)
+                else:
+                    child_env["NIGHTMARE_WORKER_NICE"] = str(max(0, batch_worker_nice))
+                spawn_started = time.perf_counter()
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(BASE_DIR),
-                    env=os.environ.copy(),
+                    env=child_env,
                 )
+                _record_dev_timing("batch.worker_spawn", time.perf_counter() - spawn_started)
                 entry["worker_pid"] = proc.pid
                 write_domain_lock_pid(lock_path, proc.pid)
                 active[str(entry["entry_id"])] = (proc, lock_path, entry)
@@ -4388,6 +4613,15 @@ def run_multi_target_orchestrator(
                     entry["status"] = "failed"
                     entry["error"] = f"subprocess exited with code {code}"
                     worst_exit = 1
+                try:
+                    started_iso = str(entry.get("started_at_utc") or "").strip()
+                    completed_iso = str(entry.get("completed_at_utc") or "").strip()
+                    if started_iso and completed_iso:
+                        started_dt = datetime.fromisoformat(started_iso.replace("Z", "+00:00"))
+                        completed_dt = datetime.fromisoformat(completed_iso.replace("Z", "+00:00"))
+                        _record_dev_timing("batch.worker_runtime", (completed_dt - started_dt).total_seconds())
+                except Exception:
+                    pass
                 print(
                     f"[batch] finished: {entry.get('root_domain')} exit={code} url={entry.get('start_url')!r}",
                     flush=True,
@@ -4404,6 +4638,7 @@ def run_multi_target_orchestrator(
             summary_counts[str(entry.get("status", "unknown"))] += 1
     print(f"[batch] done. State file: {state_path}", flush=True)
     print(f"[batch] summary: {dict(summary_counts)}", flush=True)
+    emit_dev_timing_summary(None)
     if worst_exit != 0:
         force_process_exit(1)
 
@@ -4825,6 +5060,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     restore_default_interrupt_handlers()
+    apply_worker_priority_hints_from_env()
     if sys.platform == "win32":
         from scrapy.utils.reactor import set_asyncio_event_loop_policy
 
@@ -4846,6 +5082,7 @@ def main() -> None:
 
     config_path = resolve_config_path(args.config)
     config = read_json_file(config_path)
+    dev_timing_enabled = configure_dev_timing(config)
     apply_extension_config(config)
     page_existence_criteria_path_raw = optional_string(
         merged_value(
@@ -4862,12 +5099,16 @@ def main() -> None:
     apply_page_existence_criteria_config(page_existence_criteria_config)
 
     if bool(getattr(args, "status", False)):
-        print_quick_status_report(args, config)
+        with dev_timed_call("main.print_quick_status_report"):
+            print_quick_status_report(args, config)
+        emit_dev_timing_summary(None)
         return
 
     url_arg = optional_string(args.url)
     if not url_arg:
-        run_multi_target_orchestrator(args, config, config_path)
+        with dev_timed_call("main.run_multi_target_orchestrator"):
+            run_multi_target_orchestrator(args, config, config_path)
+        emit_dev_timing_summary(None)
         return
 
     max_pages = int(merged_value(args.max_pages, config, "max_pages", 300))
@@ -5041,6 +5282,8 @@ def main() -> None:
     progress = ProgressReporter(verbose=verbose, logger=app_logger)
     progress.info(f"Using configuration file: {config_path.resolve()}")
     progress.info(f"Using page existence criteria file: {page_existence_criteria_path.resolve()}")
+    if dev_timing_enabled:
+        progress.info("[dev-perf] development timing enabled")
 
     client: OpenAI | None = None
     if not no_ai:
@@ -5091,22 +5334,23 @@ def main() -> None:
 
     progress.info(f"Starting crawl for {args.url}")
     try:
-        root_domain, state = crawl_domain(
-            start_url=args.url,
-            max_pages=max_pages,
-            crawl_delay=crawl_delay,
-            max_delay=max_delay,
-            backoff_factor=backoff_factor,
-            recovery_factor=recovery_factor,
-            evidence_dir=str(evidence_dir_path),
-            session_state_path=str(session_state_path),
-            resume=resume,
-            scrapy_log_level=scrapy_log_level_name,
-            scrapy_log_file=str(scrapy_log_file_path),
-            crawl_wordlist_path=crawl_wordlist_path,
-            verbose=verbose,
-            progress=progress,
-        )
+        with dev_timed_call("main.crawl_domain", progress):
+            root_domain, state = crawl_domain(
+                start_url=args.url,
+                max_pages=max_pages,
+                crawl_delay=crawl_delay,
+                max_delay=max_delay,
+                backoff_factor=backoff_factor,
+                recovery_factor=recovery_factor,
+                evidence_dir=str(evidence_dir_path),
+                session_state_path=str(session_state_path),
+                resume=resume,
+                scrapy_log_level=scrapy_log_level_name,
+                scrapy_log_file=str(scrapy_log_file_path),
+                crawl_wordlist_path=crawl_wordlist_path,
+                verbose=verbose,
+                progress=progress,
+            )
     except KeyboardInterrupt:
         interrupted = True
         interrupt_stage = "crawl"
@@ -5133,17 +5377,24 @@ def main() -> None:
                 f"Seed crawl diagnostic for {normalize_url(args.url)}: "
                 f"status={seed_record.crawl_status_code}, note={seed_record.crawl_note}"
             )
-    sitemap = build_sitemap(args.url, state)
-    write_json(sitemap_output_path, sitemap)
+    with dev_timed_call("main.build_sitemap", progress):
+        sitemap = build_sitemap(args.url, state)
+    with dev_timed_call("main.write_sitemap_json", progress):
+        write_json(sitemap_output_path, sitemap)
     progress.info(f"Wrote sitemap to {sitemap_output_path.resolve()}")
-    condensed_sitemap = build_condensed_sitemap(root_domain=root_domain, sitemap=sitemap)
-    write_json(condensed_sitemap_output_path, condensed_sitemap)
+    with dev_timed_call("main.build_condensed_sitemap", progress):
+        condensed_sitemap = build_condensed_sitemap(root_domain=root_domain, sitemap=sitemap)
+    with dev_timed_call("main.write_condensed_sitemap_json", progress):
+        write_json(condensed_sitemap_output_path, condensed_sitemap)
     progress.info(f"Wrote condensed sitemap to {condensed_sitemap_output_path.resolve()}")
 
     discovered_urls = sorted(state.discovered_urls)
-    endpoint_schema_payload = build_endpoint_schema_payload(discovered_urls)
-    ai_data_text = render_endpoint_schema_text(endpoint_schema_payload)
-    ai_data_output_path.write_text(ai_data_text, encoding="utf-8")
+    with dev_timed_call("main.build_endpoint_schema_payload", progress):
+        endpoint_schema_payload = build_endpoint_schema_payload(discovered_urls)
+    with dev_timed_call("main.render_endpoint_schema_text", progress):
+        ai_data_text = render_endpoint_schema_text(endpoint_schema_payload)
+    with dev_timed_call("main.write_ai_data_text", progress):
+        ai_data_output_path.write_text(ai_data_text, encoding="utf-8")
     progress.info(f"Wrote AI endpoint schema data to {ai_data_output_path.resolve()}")
     additional_urls: list[str] = []
     additional_prompt = ""
@@ -5154,16 +5405,17 @@ def main() -> None:
     if should_run_ai_stage(client, interrupted, interrupt_stage):
         progress.info(f"Requesting AI-suggested additional URLs from existing sitemap ({len(discovered_urls)} URLs)")
         try:
-            additional_urls, additional_prompt, additional_output = ask_openai_for_additional_urls(
-                client=client,
-                model=model,
-                root_domain=root_domain,
-                sitemap=sitemap,
-                endpoint_schema_payload=endpoint_schema_payload,
-                progress=progress,
-                request_timeout_seconds=openai_timeout,
-                truncated_for_ai=truncated_for_ai,
-            )
+            with dev_timed_call("main.ask_openai_for_additional_urls", progress):
+                additional_urls, additional_prompt, additional_output = ask_openai_for_additional_urls(
+                    client=client,
+                    model=model,
+                    root_domain=root_domain,
+                    sitemap=sitemap,
+                    endpoint_schema_payload=endpoint_schema_payload,
+                    progress=progress,
+                    request_timeout_seconds=openai_timeout,
+                    truncated_for_ai=truncated_for_ai,
+                )
             progress.info(f"OpenAI suggested {len(additional_urls)} additional URLs")
         except KeyboardInterrupt:
             interrupted = True
@@ -5181,17 +5433,18 @@ def main() -> None:
     if should_run_ai_stage(client, interrupted, interrupt_stage):
         progress.info("Requesting AI-guided next HTTP requests to try")
         try:
-            ai_probe_requests, probe_prompt, probe_output = ask_openai_for_probe_requests(
-                client=client,
-                model=model,
-                root_domain=root_domain,
-                endpoint_schema_payload=endpoint_schema_payload,
-                progress=progress,
-                request_timeout_seconds=openai_timeout,
-                max_requests=ai_probe_max_requests,
-                per_host_max_requests=ai_probe_per_host_max,
-                truncated_for_ai=truncated_for_ai,
-            )
+            with dev_timed_call("main.ask_openai_for_probe_requests", progress):
+                ai_probe_requests, probe_prompt, probe_output = ask_openai_for_probe_requests(
+                    client=client,
+                    model=model,
+                    root_domain=root_domain,
+                    endpoint_schema_payload=endpoint_schema_payload,
+                    progress=progress,
+                    request_timeout_seconds=openai_timeout,
+                    max_requests=ai_probe_max_requests,
+                    per_host_max_requests=ai_probe_per_host_max,
+                    truncated_for_ai=truncated_for_ai,
+                )
             ai_probe_requests = prioritize_probe_requests(
                 ai_probe_requests,
                 max_total=ai_probe_max_requests,
@@ -5224,12 +5477,13 @@ def main() -> None:
                         f"Executing AI probe {index}/{len(ai_probe_requests)}: {probe_method} {probe_url}"
                     )
                     try:
-                        probe_result = execute_ai_probe_request(
-                            url=probe_url,
-                            method=probe_method,
-                            timeout_seconds=verify_timeout,
-                            request_throttle=ai_probe_throttle,
-                        )
+                        with dev_timed_call("main.execute_ai_probe_request", progress):
+                            probe_result = execute_ai_probe_request(
+                                url=probe_url,
+                                method=probe_method,
+                                timeout_seconds=verify_timeout,
+                                request_throttle=ai_probe_throttle,
+                            )
                     except KeyboardInterrupt:
                         interrupted = True
                         interrupt_stage = "ai_probe_execution"
@@ -5326,11 +5580,12 @@ def main() -> None:
         for index, url in enumerate(combined_urls, start=1):
             progress.info(f"Verifying URL {index}/{len(combined_urls)}: {url}")
             try:
-                probe_result = probe_url_existence(
-                    url=url,
-                    timeout_seconds=verify_timeout,
-                    request_throttle=verify_throttle,
-                )
+                with dev_timed_call("main.probe_url_existence", progress):
+                    probe_result = probe_url_existence(
+                        url=url,
+                        timeout_seconds=verify_timeout,
+                        request_throttle=verify_throttle,
+                    )
             except KeyboardInterrupt:
                 interrupted = True
                 interrupt_stage = "verify_urls"
@@ -5378,13 +5633,18 @@ def main() -> None:
         else:
             progress.info("URL verification skipped (enable with --verify-urls)")
 
-    inventory = build_url_inventory(root_domain=root_domain, state=state)
-    write_json(inventory_output_path, inventory)
+    with dev_timed_call("main.build_url_inventory", progress):
+        inventory = build_url_inventory(root_domain=root_domain, state=state)
+    with dev_timed_call("main.write_url_inventory", progress):
+        write_json(inventory_output_path, inventory)
     progress.info(f"Wrote URL inventory to {inventory_output_path.resolve()}")
-    requests_inventory = build_requests_inventory(root_domain=root_domain, state=state)
-    write_json(requests_output_path, requests_inventory)
+    with dev_timed_call("main.build_requests_inventory", progress):
+        requests_inventory = build_requests_inventory(root_domain=root_domain, state=state)
+    with dev_timed_call("main.write_requests_inventory", progress):
+        write_json(requests_output_path, requests_inventory)
     progress.info(f"Wrote requests inventory to {requests_output_path.resolve()}")
-    source_of_truth_payload = build_source_of_truth_payload(root_domain=root_domain, state=state)
+    with dev_timed_call("main.build_source_of_truth_payload", progress):
+        source_of_truth_payload = build_source_of_truth_payload(root_domain=root_domain, state=state)
     legacy_source_of_truth_output_path = source_of_truth_output_path.with_suffix(".jsonn")
     if source_of_truth_output_path.exists():
         existing_source_of_truth = read_json_file(source_of_truth_output_path)
@@ -5392,20 +5652,25 @@ def main() -> None:
         existing_source_of_truth = read_json_file(legacy_source_of_truth_output_path)
     else:
         existing_source_of_truth = {}
-    merged_source_of_truth = merge_source_of_truth_payload(existing_source_of_truth, source_of_truth_payload)
-    source_of_truth_output_path.write_text(
-        json.dumps(to_json_compatible(merged_source_of_truth), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    parameters_payload = build_parameter_inventory_payload(merged_source_of_truth)
-    parameters_output_path.write_text(
-        json.dumps(to_json_compatible(parameters_payload), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    parameters_text_output_path.write_text(
-        render_parameter_placeholders_text(merged_source_of_truth),
-        encoding="utf-8",
-    )
+    with dev_timed_call("main.merge_source_of_truth_payload", progress):
+        merged_source_of_truth = merge_source_of_truth_payload(existing_source_of_truth, source_of_truth_payload)
+    with dev_timed_call("main.write_source_of_truth_json", progress):
+        source_of_truth_output_path.write_text(
+            json.dumps(to_json_compatible(merged_source_of_truth), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    with dev_timed_call("main.build_parameter_inventory_payload", progress):
+        parameters_payload = build_parameter_inventory_payload(merged_source_of_truth)
+    with dev_timed_call("main.write_parameters_json", progress):
+        parameters_output_path.write_text(
+            json.dumps(to_json_compatible(parameters_payload), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    with dev_timed_call("main.write_parameters_text", progress):
+        parameters_text_output_path.write_text(
+            render_parameter_placeholders_text(merged_source_of_truth),
+            encoding="utf-8",
+        )
     progress.info(f"Wrote source-of-truth file to {source_of_truth_output_path.resolve()}")
     progress.info(f"Wrote parameters JSON to {parameters_output_path.resolve()}")
     progress.info(f"Wrote parameters text to {parameters_text_output_path.resolve()}")
@@ -5415,19 +5680,20 @@ def main() -> None:
         if not html_report_enabled:
             progress.info("Requesting final AI site analysis")
             try:
-                analysis = ask_openai_for_site_analysis(
-                    client=client,
-                    model=model,
-                    root_domain=root_domain,
-                    original_urls=combined_urls,
-                    suggested_urls=additional_urls,
-                    sitemap=sitemap,
-                    endpoint_schema_payload=endpoint_schema_payload,
-                    ai_probe_results=ai_probe_results,
-                    progress=progress,
-                    request_timeout_seconds=openai_timeout,
-                    truncated_for_ai=truncated_for_ai,
-                )
+                with dev_timed_call("main.ask_openai_for_site_analysis", progress):
+                    analysis = ask_openai_for_site_analysis(
+                        client=client,
+                        model=model,
+                        root_domain=root_domain,
+                        original_urls=combined_urls,
+                        suggested_urls=additional_urls,
+                        sitemap=sitemap,
+                        endpoint_schema_payload=endpoint_schema_payload,
+                        ai_probe_results=ai_probe_results,
+                        progress=progress,
+                        request_timeout_seconds=openai_timeout,
+                        truncated_for_ai=truncated_for_ai,
+                    )
                 progress.info("Final AI site analysis received")
             except KeyboardInterrupt:
                 interrupted = True
@@ -5452,54 +5718,59 @@ def main() -> None:
                 progress.info("Generating standard HTML report after interrupt")
             else:
                 progress.info("Generating standard HTML report (--no-ai mode)")
-            html_report_content = generate_standard_html_report(
-                root_domain=root_domain,
-                sitemap=sitemap,
-                unique_urls=unique_urls,
-                api_endpoints=api_endpoints,
-                url_metadata=url_metadata,
-            )
+            with dev_timed_call("main.generate_standard_html_report", progress):
+                html_report_content = generate_standard_html_report(
+                    root_domain=root_domain,
+                    sitemap=sitemap,
+                    unique_urls=unique_urls,
+                    api_endpoints=api_endpoints,
+                    url_metadata=url_metadata,
+                )
         else:
             progress.info("Requesting AI-generated HTML report")
             try:
-                html_report_content = ask_openai_for_html_report(
-                    client=client,
-                    model=model,
-                    root_domain=root_domain,
-                    sitemap=sitemap,
-                    endpoint_schema_payload=endpoint_schema_payload,
-                    unique_urls=unique_urls,
-                    api_endpoints=api_endpoints,
-                    ai_probe_results=ai_probe_results,
-                    progress=progress,
-                    request_timeout_seconds=openai_timeout,
-                    truncated_for_ai=truncated_for_ai,
-                )
+                with dev_timed_call("main.ask_openai_for_html_report", progress):
+                    html_report_content = ask_openai_for_html_report(
+                        client=client,
+                        model=model,
+                        root_domain=root_domain,
+                        sitemap=sitemap,
+                        endpoint_schema_payload=endpoint_schema_payload,
+                        unique_urls=unique_urls,
+                        api_endpoints=api_endpoints,
+                        ai_probe_results=ai_probe_results,
+                        progress=progress,
+                        request_timeout_seconds=openai_timeout,
+                        truncated_for_ai=truncated_for_ai,
+                    )
             except KeyboardInterrupt:
                 interrupted = True
                 interrupt_stage = "ai_html_report"
                 progress.info("Interrupt received during AI HTML report; falling back to standard report")
-                html_report_content = generate_standard_html_report(
-                    root_domain=root_domain,
-                    sitemap=sitemap,
-                    unique_urls=unique_urls,
-                    api_endpoints=api_endpoints,
-                    url_metadata=url_metadata,
-                )
+                with dev_timed_call("main.generate_standard_html_report", progress):
+                    html_report_content = generate_standard_html_report(
+                        root_domain=root_domain,
+                        sitemap=sitemap,
+                        unique_urls=unique_urls,
+                        api_endpoints=api_endpoints,
+                        url_metadata=url_metadata,
+                    )
             except Exception as ai_report_error:
                 progress.info(
                     f"AI HTML report generation failed; falling back to standard report: {ai_report_error}"
                 )
-                html_report_content = generate_standard_html_report(
-                    root_domain=root_domain,
-                    sitemap=sitemap,
-                    unique_urls=unique_urls,
-                    api_endpoints=api_endpoints,
-                    url_metadata=url_metadata,
-                )
+                with dev_timed_call("main.generate_standard_html_report", progress):
+                    html_report_content = generate_standard_html_report(
+                        root_domain=root_domain,
+                        sitemap=sitemap,
+                        unique_urls=unique_urls,
+                        api_endpoints=api_endpoints,
+                        url_metadata=url_metadata,
+                    )
 
         report_path = html_report_output_path
-        report_path.write_text(html_report_content, encoding="utf-8")
+        with dev_timed_call("main.write_html_report", progress):
+            report_path.write_text(html_report_content, encoding="utf-8")
         report_link = report_path.resolve().as_uri()
         progress.info(f"HTML report written to {report_path.resolve()}")
 
@@ -5516,13 +5787,15 @@ def main() -> None:
             html_report_content = extract_html_document(analysis)
         else:
             progress.info("Rendering AI site analysis as styled HTML report")
-            html_report_content = render_text_report_as_html(
-                report_text=analysis,
-                title=f"Nightmare AI Analysis: {root_domain}",
-                subtitle="Rendered from final AI site analysis output",
-            )
+            with dev_timed_call("main.render_text_report_as_html", progress):
+                html_report_content = render_text_report_as_html(
+                    report_text=analysis,
+                    title=f"Nightmare AI Analysis: {root_domain}",
+                    subtitle="Rendered from final AI site analysis output",
+                )
         report_path = html_report_output_path
-        report_path.write_text(html_report_content, encoding="utf-8")
+        with dev_timed_call("main.write_html_report", progress):
+            report_path.write_text(html_report_content, encoding="utf-8")
         report_link = report_path.resolve().as_uri()
         progress.info(f"HTML analysis report written to {report_path.resolve()}")
 
@@ -5574,6 +5847,8 @@ def main() -> None:
 
     if not verify_urls:
         print("URL verification skipped (--verify-urls not enabled)")
+
+    emit_dev_timing_summary(progress)
 
     if interrupted:
         progress.info(f"Run interrupted by user during stage: {interrupt_stage or 'unknown'}")

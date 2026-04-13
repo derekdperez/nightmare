@@ -16,25 +16,34 @@ The dashboard provides:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import mimetypes
 import os
 import re
+import ssl
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+try:
+    import psycopg
+except Exception:  # pragma: no cover - optional dependency at runtime
+    psycopg = None
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = BASE_DIR / "output"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8000
+DEFAULT_PORT = 443
 DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "server.json"
 MAX_LOG_TAIL_BYTES = 64 * 1024
+DEFAULT_COORDINATOR_LEASE_SECONDS = 120
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -64,6 +73,8 @@ def _default_server_config() -> dict[str, Any]:
         "host": DEFAULT_HOST,
         "port": DEFAULT_PORT,
         "output_root": "output",
+        "database_url": "",
+        "coordinator_api_token": "",
     }
 
 
@@ -91,6 +102,43 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _get_root_domain(hostname: str) -> str:
+    hostname = (hostname or "").lower().strip(".")
+    if not hostname:
+        return ""
+    parts = hostname.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return hostname
+
+
+def _normalize_target_url(raw: str) -> tuple[str, str]:
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("empty target")
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        text = f"https://{text.lstrip('/')}"
+        parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("target must be a valid http/https URL or hostname")
+    root_domain = _get_root_domain(parsed.hostname)
+    if not root_domain:
+        raise ValueError("could not derive root domain")
+    normalized_path = parsed.path or "/"
+    normalized = parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        path=normalized_path,
+        fragment="",
+    )
+    return normalized.geturl(), root_domain
+
+
+def _make_target_entry_id(line_no: int, raw: str) -> str:
+    return hashlib.sha1(f"{line_no}:{raw}".encode("utf-8")).hexdigest()[:16]
 
 
 def _collect_master_reports(output_root: Path) -> list[dict[str, Any]]:
@@ -280,6 +328,261 @@ def collect_dashboard_data(output_root: Path) -> dict[str, Any]:
     }
 
 
+class CoordinatorStore:
+    def __init__(self, database_url: str):
+        if psycopg is None:
+            raise RuntimeError("psycopg is required for postgres coordinator mode")
+        self.database_url = str(database_url or "").strip()
+        if not self.database_url:
+            raise ValueError("database_url is required for coordinator mode")
+        self._ensure_schema()
+
+    def _connect(self):
+        return psycopg.connect(self.database_url, autocommit=False)
+
+    def _ensure_schema(self) -> None:
+        ddl = """
+CREATE TABLE IF NOT EXISTS coordinator_targets (
+  entry_id TEXT PRIMARY KEY,
+  line_number INTEGER NOT NULL,
+  raw TEXT NOT NULL,
+  start_url TEXT NOT NULL,
+  root_domain TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  exit_code INTEGER,
+  worker_id TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  started_at_utc TIMESTAMPTZ,
+  completed_at_utc TIMESTAMPTZ,
+  heartbeat_at_utc TIMESTAMPTZ,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_coordinator_targets_status ON coordinator_targets(status);
+CREATE INDEX IF NOT EXISTS idx_coordinator_targets_lease ON coordinator_targets(lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS coordinator_sessions (
+  root_domain TEXT PRIMARY KEY,
+  start_url TEXT NOT NULL,
+  max_pages INTEGER,
+  saved_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  payload JSONB NOT NULL
+);
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+
+    def register_targets(self, targets: list[str]) -> dict[str, Any]:
+        inserted = 0
+        skipped = 0
+        rows: list[tuple[str, int, str, str, str]] = []
+        for line_no, raw in enumerate(targets, start=1):
+            text = str(raw or "").strip()
+            if not text or text.startswith("#"):
+                continue
+            try:
+                start_url, root_domain = _normalize_target_url(text)
+            except Exception:
+                skipped += 1
+                continue
+            rows.append((_make_target_entry_id(line_no, text), line_no, text, start_url, root_domain))
+        if not rows:
+            return {"inserted": 0, "skipped": skipped}
+        upsert_sql = """
+INSERT INTO coordinator_targets(entry_id, line_number, raw, start_url, root_domain, status, updated_at_utc)
+VALUES (%s, %s, %s, %s, %s, 'pending', NOW())
+ON CONFLICT (entry_id) DO UPDATE
+SET line_number = EXCLUDED.line_number,
+    raw = EXCLUDED.raw,
+    start_url = EXCLUDED.start_url,
+    root_domain = EXCLUDED.root_domain,
+    updated_at_utc = NOW();
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(upsert_sql, rows)
+            conn.commit()
+        inserted = len(rows)
+        return {"inserted": inserted, "skipped": skipped}
+
+    def claim_target(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        worker = str(worker_id or "").strip()
+        if not worker:
+            raise ValueError("worker_id is required")
+        lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
+        sql = """
+WITH candidate AS (
+    SELECT entry_id
+    FROM coordinator_targets
+    WHERE status = 'pending'
+       OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
+    ORDER BY line_number ASC, created_at_utc ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+UPDATE coordinator_targets t
+SET status = 'running',
+    worker_id = %s,
+    lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
+    started_at_utc = COALESCE(t.started_at_utc, NOW()),
+    heartbeat_at_utc = NOW(),
+    completed_at_utc = NULL,
+    updated_at_utc = NOW(),
+    attempt_count = t.attempt_count + 1,
+    error = NULL
+FROM candidate
+WHERE t.entry_id = candidate.entry_id
+RETURNING t.entry_id, t.line_number, t.raw, t.start_url, t.root_domain, t.attempt_count, t.status, t.worker_id, t.lease_expires_at;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (worker, lease))
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        return {
+            "entry_id": row[0],
+            "line": int(row[1]),
+            "raw": row[2],
+            "start_url": row[3],
+            "root_domain": row[4],
+            "attempt_count": int(row[5] or 0),
+            "status": row[6],
+            "worker_id": row[7],
+            "lease_expires_at": row[8].isoformat() if row[8] else None,
+        }
+
+    def heartbeat(self, entry_id: str, worker_id: str, lease_seconds: int) -> bool:
+        lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
+        sql = """
+UPDATE coordinator_targets
+SET heartbeat_at_utc = NOW(),
+    lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
+    updated_at_utc = NOW()
+WHERE entry_id = %s
+  AND worker_id = %s
+  AND status = 'running';
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (lease, str(entry_id), str(worker_id)))
+                updated = int(cur.rowcount or 0)
+            conn.commit()
+        return updated > 0
+
+    def finish(self, entry_id: str, worker_id: str, *, exit_code: int, error: str = "") -> bool:
+        ok = int(exit_code) == 0
+        status = "completed" if ok else "failed"
+        sql = """
+UPDATE coordinator_targets
+SET status = %s,
+    exit_code = %s,
+    error = %s,
+    completed_at_utc = NOW(),
+    lease_expires_at = NULL,
+    heartbeat_at_utc = NOW(),
+    updated_at_utc = NOW()
+WHERE entry_id = %s
+  AND worker_id = %s;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (status, int(exit_code), str(error or "")[:2000], str(entry_id), str(worker_id)))
+                updated = int(cur.rowcount or 0)
+            conn.commit()
+        return updated > 0
+
+    def load_session(self, root_domain: str) -> dict[str, Any] | None:
+        sql = """
+SELECT root_domain, start_url, max_pages, saved_at_utc, payload
+FROM coordinator_sessions
+WHERE root_domain = %s;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (str(root_domain).strip().lower(),))
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        payload = row[4] if isinstance(row[4], dict) else {}
+        return {
+            "root_domain": row[0],
+            "start_url": row[1],
+            "max_pages": row[2],
+            "saved_at_utc": row[3].isoformat() if row[3] else None,
+            "state": payload.get("state", {}),
+            "frontier": payload.get("frontier", []),
+            "payload": payload,
+        }
+
+    def save_session(
+        self,
+        *,
+        root_domain: str,
+        start_url: str,
+        max_pages: int,
+        payload: dict[str, Any],
+        saved_at_utc: str | None = None,
+    ) -> bool:
+        rd = str(root_domain or "").strip().lower()
+        if not rd:
+            return False
+        su = str(start_url or "").strip()
+        if not su:
+            return False
+        saved_dt = None
+        if saved_at_utc:
+            try:
+                saved_dt = datetime.fromisoformat(str(saved_at_utc).replace("Z", "+00:00"))
+            except Exception:
+                saved_dt = None
+        sql = """
+INSERT INTO coordinator_sessions(root_domain, start_url, max_pages, saved_at_utc, payload)
+VALUES (%s, %s, %s, COALESCE(%s, NOW()), %s::jsonb)
+ON CONFLICT (root_domain) DO UPDATE
+SET start_url = EXCLUDED.start_url,
+    max_pages = EXCLUDED.max_pages,
+    saved_at_utc = EXCLUDED.saved_at_utc,
+    payload = EXCLUDED.payload;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    (
+                        rd,
+                        su,
+                        int(max_pages) if max_pages is not None else None,
+                        saved_dt,
+                        json.dumps(payload, ensure_ascii=False),
+                    ),
+                )
+            conn.commit()
+        return True
+
+    def status_summary(self) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, COUNT(*) FROM coordinator_targets GROUP BY status;"
+                )
+                rows = cur.fetchall()
+            conn.commit()
+        for status, count in rows:
+            counts[str(status)] = int(count or 0)
+        return {
+            "counts": counts,
+            "generated_at_utc": _iso_now(),
+        }
+
+
 def _normalize_and_validate_relative_path(root: Path, raw_relative: str) -> Path | None:
     cleaned = str(raw_relative or "").strip().replace("\\", "/")
     cleaned = cleaned.lstrip("/")
@@ -301,6 +604,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     @property
     def output_root(self) -> Path:
         return self.server.output_root  # type: ignore[attr-defined]
+
+    @property
+    def coordinator_store(self) -> CoordinatorStore | None:
+        return getattr(self.server, "coordinator_store", None)  # type: ignore[attr-defined]
+
+    @property
+    def coordinator_token(self) -> str:
+        return str(getattr(self.server, "coordinator_token", "") or "")  # type: ignore[attr-defined]
 
     def log_message(self, format: str, *args: Any) -> None:
         # Keep server output concise.
@@ -352,6 +663,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _read_json_body(self) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except Exception:
+            length = 0
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _is_coordinator_authorized(self) -> bool:
+        token = self.coordinator_token.strip()
+        if not token:
+            return True
+        authz = str(self.headers.get("Authorization", "") or "").strip()
+        x_token = str(self.headers.get("X-Coordinator-Token", "") or "").strip()
+        if authz.lower().startswith("bearer "):
+            candidate = authz[7:].strip()
+            if candidate == token:
+                return True
+        return x_token == token
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -387,6 +724,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json({"path": str(resolved), "tail": _read_tail_text(resolved)})
             return
+        if path == "/api/coord/state":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            self._write_json(self.coordinator_store.status_summary())
+            return
+        if path == "/api/coord/session":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            payload = self.coordinator_store.load_session(root_domain)
+            if payload is None:
+                self._write_json({"found": False, "root_domain": root_domain})
+                return
+            self._write_json({"found": True, "session": payload})
+            return
         if path.startswith("/files/"):
             rel = unquote(path[len("/files/"):])
             resolved = _normalize_and_validate_relative_path(self.app_root, rel)
@@ -404,6 +767,77 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._serve_static_file(resolved)
                 return
         self._write_text("Not found", status=404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path
+        body = self._read_json_body()
+
+        if not path.startswith("/api/coord/"):
+            self._write_json({"error": "not found"}, status=404)
+            return
+        if self.coordinator_store is None:
+            self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+            return
+        if not self._is_coordinator_authorized():
+            self._write_json({"error": "unauthorized"}, status=401)
+            return
+
+        if path == "/api/coord/register-targets":
+            targets_payload = body.get("targets", [])
+            targets: list[str] = []
+            if isinstance(targets_payload, list):
+                targets = [str(item) for item in targets_payload if str(item or "").strip()]
+            elif isinstance(targets_payload, str):
+                targets = [line for line in str(targets_payload).splitlines() if line.strip()]
+            result = self.coordinator_store.register_targets(targets)
+            self._write_json({"ok": True, **result})
+            return
+
+        if path == "/api/coord/claim":
+            worker_id = str(body.get("worker_id", "") or "").strip()
+            lease_seconds = _safe_int(body.get("lease_seconds", DEFAULT_COORDINATOR_LEASE_SECONDS), DEFAULT_COORDINATOR_LEASE_SECONDS)
+            item = self.coordinator_store.claim_target(worker_id, lease_seconds)
+            self._write_json({"ok": True, "entry": item})
+            return
+
+        if path == "/api/coord/heartbeat":
+            entry_id = str(body.get("entry_id", "") or "").strip()
+            worker_id = str(body.get("worker_id", "") or "").strip()
+            lease_seconds = _safe_int(body.get("lease_seconds", DEFAULT_COORDINATOR_LEASE_SECONDS), DEFAULT_COORDINATOR_LEASE_SECONDS)
+            ok = self.coordinator_store.heartbeat(entry_id, worker_id, lease_seconds)
+            self._write_json({"ok": ok})
+            return
+
+        if path == "/api/coord/complete":
+            entry_id = str(body.get("entry_id", "") or "").strip()
+            worker_id = str(body.get("worker_id", "") or "").strip()
+            exit_code = _safe_int(body.get("exit_code", 0), 0)
+            error = str(body.get("error", "") or "")
+            ok = self.coordinator_store.finish(entry_id, worker_id, exit_code=exit_code, error=error)
+            self._write_json({"ok": ok})
+            return
+
+        if path == "/api/coord/session":
+            session_payload = body.get("session", body)
+            if not isinstance(session_payload, dict):
+                self._write_json({"error": "session payload must be an object"}, status=400)
+                return
+            root_domain = str(session_payload.get("root_domain", "") or "").strip().lower()
+            start_url = str(session_payload.get("start_url", "") or "").strip()
+            max_pages = _safe_int(session_payload.get("max_pages", 0), 0)
+            saved_at_utc = str(session_payload.get("saved_at_utc", "") or "").strip() or None
+            ok = self.coordinator_store.save_session(
+                root_domain=root_domain,
+                start_url=start_url,
+                max_pages=max_pages,
+                payload=session_payload,
+                saved_at_utc=saved_at_utc,
+            )
+            self._write_json({"ok": bool(ok)})
+            return
+
+        self._write_json({"error": "not found"}, status=404)
 
     def _render_dashboard_html(self) -> str:
         return """<!doctype html>
@@ -522,6 +956,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--host", default=None, help=f"Bind host (default: {DEFAULT_HOST})")
     p.add_argument("--port", type=int, default=None, help=f"Bind port (default: {DEFAULT_PORT})")
+    p.add_argument("--http-port", type=int, default=None, help="HTTP bind port (default: 80)")
+    p.add_argument("--https-port", type=int, default=None, help="HTTPS bind port (default: 443)")
+    p.add_argument("--cert-file", default=None, help="TLS certificate file for HTTPS listener")
+    p.add_argument("--key-file", default=None, help="TLS private key file for HTTPS listener")
+    p.add_argument("--database-url", default=None, help="Postgres DATABASE_URL for coordinator mode")
+    p.add_argument("--coordinator-api-token", default=None, help="Bearer token required for /api/coord/* endpoints")
     p.add_argument(
         "--output-root",
         default=None,
@@ -541,30 +981,106 @@ def main(argv: list[str] | None = None) -> int:
     if not output_root.is_absolute():
         output_root = (BASE_DIR / output_root).resolve()
     host = str(_merged_value(args.host, merged_cfg, "host", DEFAULT_HOST) or DEFAULT_HOST).strip() or DEFAULT_HOST
-    port = int(_merged_value(args.port, merged_cfg, "port", DEFAULT_PORT) or DEFAULT_PORT)
-    if port < 1 or port > 65535:
-        raise ValueError("port must be in range 1..65535")
+    legacy_port = int(_merged_value(args.port, merged_cfg, "port", DEFAULT_PORT) or DEFAULT_PORT)
+    http_port = int(_merged_value(args.http_port, merged_cfg, "http_port", 80) or 80)
+    https_port = int(_merged_value(args.https_port, merged_cfg, "https_port", 443) or 443)
+    cert_file_raw = str(_merged_value(args.cert_file, merged_cfg, "cert_file", "") or "").strip()
+    key_file_raw = str(_merged_value(args.key_file, merged_cfg, "key_file", "") or "").strip()
+    database_url = str(
+        _merged_value(
+            args.database_url,
+            merged_cfg,
+            "database_url",
+            os.getenv("DATABASE_URL", ""),
+        )
+        or ""
+    ).strip()
+    coordinator_token = str(
+        _merged_value(
+            args.coordinator_api_token,
+            merged_cfg,
+            "coordinator_api_token",
+            os.getenv("COORDINATOR_API_TOKEN", ""),
+        )
+        or ""
+    ).strip()
 
-    httpd = ThreadingHTTPServer((host, port), DashboardHandler)
-    httpd.app_root = BASE_DIR  # type: ignore[attr-defined]
-    httpd.output_root = output_root  # type: ignore[attr-defined]
+    if args.http_port is None and args.https_port is None and args.port is not None:
+        http_port = legacy_port
+        https_port = 0
+    if http_port and (http_port < 1 or http_port > 65535):
+        raise ValueError("http_port must be in range 1..65535")
+    if https_port and (https_port < 1 or https_port > 65535):
+        raise ValueError("https_port must be in range 1..65535")
 
-    print(f"[server] starting dashboard on http://{host}:{port}", flush=True)
+    coordinator_store: CoordinatorStore | None = None
+    if database_url:
+        coordinator_store = CoordinatorStore(database_url)
+
+    def _prepare_server(port_value: int) -> ThreadingHTTPServer:
+        srv = ThreadingHTTPServer((host, port_value), DashboardHandler)
+        srv.app_root = BASE_DIR  # type: ignore[attr-defined]
+        srv.output_root = output_root  # type: ignore[attr-defined]
+        srv.coordinator_store = coordinator_store  # type: ignore[attr-defined]
+        srv.coordinator_token = coordinator_token  # type: ignore[attr-defined]
+        return srv
+
+    servers: list[tuple[str, ThreadingHTTPServer]] = []
+    if http_port:
+        servers.append(("http", _prepare_server(http_port)))
+    if https_port:
+        cert_file = Path(cert_file_raw).expanduser().resolve() if cert_file_raw else None
+        key_file = Path(key_file_raw).expanduser().resolve() if key_file_raw else None
+        if cert_file is None or key_file is None or not cert_file.is_file() or not key_file.is_file():
+            print(
+                "[server] https listener disabled: provide valid cert_file/key_file for port 443",
+                flush=True,
+            )
+        else:
+            https_server = _prepare_server(https_port)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+            https_server.socket = context.wrap_socket(https_server.socket, server_side=True)
+            servers.append(("https", https_server))
+
+    if not servers:
+        raise RuntimeError("No active listeners configured. Enable http_port and/or https_port with valid TLS files.")
+
+    print("[server] starting dashboard/coordinator server", flush=True)
     print(f"[server] config={config_path}", flush=True)
     print(f"[server] app_root={BASE_DIR}", flush=True)
     print(f"[server] output_root={output_root}", flush=True)
+    if coordinator_store is not None:
+        print("[server] coordinator mode enabled (Postgres backend)", flush=True)
+    else:
+        print("[server] coordinator mode disabled (database_url not set)", flush=True)
     all_domains_html = _find_all_domains_report_html(output_root)
     if all_domains_html is not None:
         print(f"[server] default route / serving all-domains report: {all_domains_html}", flush=True)
     else:
         print("[server] default route / serving dashboard (all_domains.results_summary.html not found)", flush=True)
-    print(f"[server] dashboard route: http://{host}:{port}/dashboard", flush=True)
+    for scheme, srv in servers:
+        bound = srv.server_address[1]
+        print(f"[server] {scheme} listening on {scheme}://{host}:{bound}", flush=True)
+    print(f"[server] dashboard route: http://{host}:{http_port or legacy_port}/dashboard", flush=True)
+
+    threads: list[threading.Thread] = []
+    for _scheme, srv in servers:
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        threads.append(t)
     try:
-        httpd.serve_forever()
+        while True:
+            time.sleep(1.0)
     except KeyboardInterrupt:
         print("\n[server] interrupt received, shutting down.", flush=True)
     finally:
-        httpd.server_close()
+        for _scheme, srv in servers:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+            srv.server_close()
     return 0
 
 

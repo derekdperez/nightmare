@@ -34,3 +34,11 @@
 - Master report payload convention: when generating `all_domains.results_summary.json`, serialize discrepancies in compact form (trimmed body previews/diff text) to keep browser-side load/parse/render practical.
 - Report UI resilience convention: if master summary JSON cannot be loaded at page bootstrap, replace `Loading...` placeholders in master inventory/extractor tables with explicit error rows/notes.
 - Summary artifact write convention: write report JSON/HTML via atomic temp-file replacement to avoid leaving truncated or zero-byte files after partial write failures.
+- `nightmare.py` batch worker scheduling is OS-specific and config-driven:
+  - Windows workers use a reduced affinity mask (default: subset of CPUs; override with `batch_worker_affinity_cores`).
+  - macOS/Linux workers apply positive niceness (`batch_worker_nice`, default `10`).
+  - Priority hints are passed by orchestrator env vars and applied by child worker at startup.
+- Development-only performance instrumentation convention in `nightmare.py`:
+  - Enable by setting `environment` to `dev/development/local/test` or `dev_timing_logging=true`.
+  - Timed sections are wrapped with `dev_timed_call(...)`; summary emitted via `emit_dev_timing_summary(...)` and logged as `[dev-perf]` lines.
+  - `dev_timing_log_each_call=true` optionally logs each timed call; otherwise only aggregate/slowest summaries are logged.

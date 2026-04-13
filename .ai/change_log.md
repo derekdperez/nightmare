@@ -175,3 +175,11 @@
 - Hardened report writes against corruption:
   - Added `_atomic_write_text(...)` and switched master/single-domain summary JSON+HTML writes to atomic temp-file replacement.
 - Why: interrupted or failed writes (for example, low disk conditions) should not leave zero-byte summary artifacts that break report loading.
+
+- Improved worker scheduling and profiling in `nightmare.py` for high-concurrency runs:
+  - Batch workers now receive OS-specific priority hints.
+    - Windows: each worker process gets a reduced CPU affinity mask (default: subset of available cores; configurable via `batch_worker_affinity_cores`).
+    - macOS/Linux: each worker process applies `os.nice(+10)` by default (configurable via `batch_worker_nice`).
+  - Added dev-only timing instrumentation with per-method aggregates and slowest-call output (`[dev-perf]`) for key pipeline methods (crawl, AI calls, probe calls, artifact writes, batch orchestration stages).
+  - Added config keys: `environment`, `dev_timing_logging`, `dev_timing_log_each_call`, `batch_worker_nice`, `batch_worker_affinity_cores`.
+- Why: lower worker scheduling priority prevents worker saturation from starving interactive/system workloads, and dev-only timing data makes performance hotspots visible for targeted optimization.

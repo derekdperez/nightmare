@@ -32,6 +32,11 @@
     "targets_file": "targets.txt",
     "batch_workers": 4,
     "batch_state_dir": null,
+    "batch_worker_nice": 10,
+    "batch_worker_affinity_cores": null,
+    "environment": "production",
+    "dev_timing_logging": false,
+    "dev_timing_log_each_call": false,
     "static_asset_extensions": [
         ".7z",
         ".avi",
