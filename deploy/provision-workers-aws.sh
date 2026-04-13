@@ -57,6 +57,21 @@ load_key_from_env_file() {
   awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=")+1); exit}' "$env_file"
 }
 
+load_key_from_env_files() {
+  local key="$1"
+  shift
+  local f
+  for f in "$@"; do
+    local value
+    value="$(load_key_from_env_file "$key" "$f")"
+    if [[ -n "$value" ]]; then
+      echo "$value"
+      return 0
+    fi
+  done
+  return 0
+}
+
 ensure_aws_credentials() {
   if aws sts get-caller-identity "${region_args[@]}" >/dev/null 2>&1; then
     return 0
@@ -151,21 +166,27 @@ if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
 fi
 
 CENTRAL_ENV_FILE="${DEPLOY_DIR}/.env"
+WORKER_ENV_FILE="${DEPLOY_DIR}/worker.env.generated"
 if [[ -z "$COORDINATOR_BASE_URL" ]]; then
-  COORDINATOR_BASE_URL="$(load_key_from_env_file "COORDINATOR_BASE_URL" "$CENTRAL_ENV_FILE")"
+  COORDINATOR_BASE_URL="$(load_key_from_env_files "COORDINATOR_BASE_URL" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
 fi
 if [[ -z "$API_TOKEN" ]]; then
-  API_TOKEN="$(load_key_from_env_file "COORDINATOR_API_TOKEN" "$CENTRAL_ENV_FILE")"
+  API_TOKEN="$(load_key_from_env_files "COORDINATOR_API_TOKEN" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
 fi
 if [[ -z "$REGION" ]]; then
-  REGION="$(load_key_from_env_file "AWS_REGION" "$CENTRAL_ENV_FILE")"
+  REGION="$(load_key_from_env_files "AWS_REGION" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -n "$COORDINATOR_BASE_URL" && -n "$API_TOKEN" ]]; then
+  echo "Using coordinator settings from local env files."
 fi
 
 for required in AMI_ID SUBNET_ID SECURITY_GROUP_IDS REPO_URL COORDINATOR_BASE_URL API_TOKEN; do
   if [[ -z "${!required}" ]]; then
     echo "Missing required option for provisioning: --$(echo "$required" | tr 'A-Z_' 'a-z-')" >&2
     if [[ "$required" == "COORDINATOR_BASE_URL" || "$required" == "API_TOKEN" ]]; then
-      echo "Tip: run this script from repo root after central bootstrap so deploy/.env is available." >&2
+      echo "Tip: expected one of these files with keys:" >&2
+      echo "  - ${CENTRAL_ENV_FILE}" >&2
+      echo "  - ${WORKER_ENV_FILE}" >&2
     fi
     exit 2
   fi
