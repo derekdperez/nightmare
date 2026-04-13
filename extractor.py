@@ -572,6 +572,7 @@ def write_javascript_extractor_matches_report_html(domain_label: str, domain_out
     out = js_root / JAVASCRIPT_EXTRACTOR_REPORT_HTML
     html = build_javascript_extractor_matches_report_html(domain_label, rows)
     out.write_text(html, encoding="utf-8")
+    print(f"[extractor:js] HTML report ({len(rows)} row(s)): {out}", flush=True)
     return out
 
 
