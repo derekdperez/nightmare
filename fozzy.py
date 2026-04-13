@@ -52,6 +52,7 @@ _FOZZY_LOCK_ERRORS: tuple[type[BaseException], ...] = (RuntimeError, ValueError,
 RESPONSE_TIME_DISCREPANCY_MULTIPLIER = 3.0
 MASTER_REPORT_BODY_PREVIEW_MAX_CHARS = 240
 MASTER_REPORT_DIFF_TEXT_MAX_LINES = 60
+MASTER_REPORT_EXTRACTOR_ROWS_MAX = 10000
 
 
 def _fozzy_safe_release(label: str, release_fn: Callable[[], None]) -> None:
@@ -2031,6 +2032,11 @@ def build_results_summary_payload(
     ext_rows = extras.get("extractor_matches")
     if isinstance(ext_rows, list):
         anomaly_summary_payload["extractor_matches"] = ext_rows
+    if extras.get("extractor_matches_truncated"):
+        anomaly_summary_payload["extractor_matches_truncated"] = True
+    ext_total = extras.get("extractor_matches_total")
+    if isinstance(ext_total, int):
+        anomaly_summary_payload["extractor_matches_total"] = max(0, ext_total)
     log_files = extras.get("log_files")
     if isinstance(log_files, list):
         anomaly_summary_payload["log_files"] = log_files
@@ -2039,9 +2045,11 @@ def build_results_summary_payload(
 
 def load_extractor_match_rows_for_master(
     _master_root: Path, pairs: list[tuple[str, Path]]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int, bool]:
     """Load per-domain ``extractor/summary.json`` rows for the master HTML table."""
     rows: list[dict[str, Any]] = []
+    total_rows = 0
+    truncated = False
     for _domain_label, domain_output in pairs:
         summary_path = domain_output / "extractor" / "summary.json"
         if not summary_path.is_file():
@@ -2053,8 +2061,13 @@ def load_extractor_match_rows_for_master(
         if not isinstance(data, dict):
             continue
         for item in data.get("rows", []):
-            if isinstance(item, dict):
+            if not isinstance(item, dict):
+                continue
+            total_rows += 1
+            if len(rows) < MASTER_REPORT_EXTRACTOR_ROWS_MAX:
                 rows.append(dict(item))
+            else:
+                truncated = True
     rows.sort(
         key=lambda x: (
             str(x.get("domain_label", "")).lower(),
@@ -2063,7 +2076,7 @@ def load_extractor_match_rows_for_master(
             str(x.get("match_file", "")).lower(),
         )
     )
-    return rows
+    return rows, total_rows, truncated
 
 
 def _relative_path_text(path: Path, root: Path) -> str:
@@ -2163,7 +2176,9 @@ def write_master_results_summary(
     )
     folder_files = list_results_files_for_master(pairs)
     domain_inv_rows, per_route_rows, per_route_truncated = build_master_domain_inventory_tables(pairs)
-    extractor_match_rows = load_extractor_match_rows_for_master(master_root, pairs)
+    extractor_match_rows, extractor_match_total, extractor_matches_truncated = load_extractor_match_rows_for_master(
+        master_root, pairs
+    )
     log_files = discover_log_files_for_master(master_root, pairs)
     payload = build_results_summary_payload(
         root_domain="all_domains",
@@ -2182,6 +2197,8 @@ def write_master_results_summary(
             "master_per_route_inventory": per_route_rows,
             "master_per_route_inventory_truncated": per_route_truncated,
             "extractor_matches": extractor_match_rows,
+            "extractor_matches_total": extractor_match_total,
+            "extractor_matches_truncated": extractor_matches_truncated,
             "log_files": log_files,
         },
     )
@@ -3233,6 +3250,8 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         const masterInvRows = Array.isArray(loadedPayload.master_domain_inventory) ? loadedPayload.master_domain_inventory : [];
         const routeRows = Array.isArray(loadedPayload.master_per_route_inventory) ? loadedPayload.master_per_route_inventory : [];
         const extractorRows = Array.isArray(loadedPayload.extractor_matches) ? loadedPayload.extractor_matches : [];
+        const extractorRowsTotal = Number(loadedPayload.extractor_matches_total || 0) || extractorRows.length;
+        const extractorRowsTruncated = !!loadedPayload.extractor_matches_truncated;
 
         const domainTable = document.getElementById("masterDomainInventoryTable");
         if (domainTable) {{
@@ -3267,8 +3286,13 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
           if (tbody) tbody.innerHTML = renderExtractorRows(extractorRows);
           const exNote = document.getElementById("extractorInventoryNote");
           if (exNote) {{
-            exNote.textContent =
-              `${{extractorRows.length}} row(s) from per-domain extractor/summary.json artifacts. Each match is also stored under extractor/matches/.`;
+            if (extractorRowsTruncated && extractorRowsTotal > extractorRows.length) {{
+              exNote.textContent =
+                `${{extractorRows.length}} of ${{extractorRowsTotal}} row(s) shown (truncated for report size). Inspect per-domain extractor/summary.json for full data.`;
+            }} else {{
+              exNote.textContent =
+                `${{extractorRows.length}} row(s) from per-domain extractor/summary.json artifacts. Each match is also stored under extractor/matches/.`;
+            }}
           }}
         }}
       }}
@@ -3288,7 +3312,7 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         const extractorTable = document.getElementById("extractorMatchesTable");
         if (extractorTable) {{
           const tbody = extractorTable.querySelector("tbody");
-          if (tbody) tbody.innerHTML = `<tr><td colspan="4">${{escapeHtml(msg)}}</td></tr>`;
+          if (tbody) tbody.innerHTML = `<tr><td colspan="9">${{escapeHtml(msg)}}</td></tr>`;
         }}
         const dNote = document.getElementById("masterDomainInventoryNote");
         if (dNote) dNote.textContent = msg;
