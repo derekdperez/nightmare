@@ -179,3 +179,38 @@ Response includes:
 - `last_heartbeat_at_utc` + `seconds_since_heartbeat`,
 - active/running lease counts for targets and stage tasks,
 - active stage names for currently-running stage work.
+
+### One-command operator check (`client.py`)
+From repo root on the central machine:
+
+```bash
+python client.py status
+```
+
+Default behavior:
+- pulls coordinator worker fleet status from `/api/coord/workers`,
+- runs AWS SSM command fanout against `tag:Name=nightmare-worker*` and prints each VM's worker container state.
+
+Useful options:
+- Skip SSM and only query central coordinator: `python client.py status --skip-ssm`
+- Override worker target selector: `python client.py status --ssm-target-key tag:Name --ssm-target-values 'nightmare-worker*'`
+- Override coordinator auth/url explicitly: `python client.py status --server-base-url https://<central-host> --api-token <COORDINATOR_API_TOKEN>`
+
+### One-command worker rollout/restart (`client.py`)
+From repo root on the central machine:
+
+```bash
+python client.py rollout
+```
+
+Default rollout behavior on each targeted worker VM:
+- `git fetch --all --prune`
+- `git checkout main`
+- `git pull --ff-only origin main`
+- `docker compose -f docker-compose.worker.yml --env-file .env up -d --build`
+- `docker compose ... ps --format json` (returned in rollout summary)
+
+Useful options:
+- Branch override: `python client.py rollout --branch main`
+- Worker repo path override: `python client.py rollout --repo-dir /opt/nightmare`
+- Target override: `python client.py rollout --ssm-target-key tag:Name --ssm-target-values 'nightmare-worker*'`

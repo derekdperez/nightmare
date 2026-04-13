@@ -277,3 +277,29 @@
   - ozzy.py now caps master payload extractor rows at MASTER_REPORT_EXTRACTOR_ROWS_MAX (10,000), while tracking extractor_matches_total and extractor_matches_truncated.
   - Master report UI now shows explicit truncation note when full extractor dataset is larger than rendered payload.
 - Why: very large per-domain extractor summaries could make master summary payload too large to load/render, causing extractor table to appear stuck/empty.
+
+- Added central worker fleet status endpoint to coordinator server:
+  - `server.py` now exposes `GET /api/coord/workers` (token-protected like other `/api/coord/*` endpoints).
+  - Endpoint aggregates `coordinator_targets` and `coordinator_stage_tasks` by `worker_id`, returning:
+    - worker heartbeat recency (`last_heartbeat_at_utc`, `seconds_since_heartbeat`)
+    - online/stale classification using configurable `stale_after_seconds`
+    - running/active lease counts and active stage names.
+- Why: operators needed a single API to verify all worker VM process identities and health from the central machine.
+
+- Added `client.py` operator CLI for one-command status checks from central:
+  - `python client.py status` now performs:
+    - coordinator worker status query (`/api/coord/workers`)
+    - optional AWS SSM fanout command to each worker VM to report `docker compose ... worker ... ps` container state.
+  - Supports environment-first configuration from `deploy/.env` and flags for region/target override (`--aws-region`, `--ssm-target-*`) plus `--skip-ssm`.
+- Why: remove repetitive manual AWS/SSM/curl command sequences and provide a fast, consistent operational status check entrypoint.
+
+- Added centralized worker rollout command in `client.py`:
+  - New action: `python client.py rollout`.
+  - Uses AWS SSM fanout to run on each targeted worker VM:
+    - `git fetch --all --prune`
+    - `git checkout <branch>`
+    - `git pull --ff-only origin <branch>`
+    - `docker compose ... up -d --build` for worker stack restart
+    - `docker compose ... ps --format json` for post-restart status output.
+  - Added rollout flags: `--branch`, `--repo-dir`, `--ssm-target-key`, `--ssm-target-values`.
+- Why: operators needed a single central command to update worker VM code and restart processing across the fleet.

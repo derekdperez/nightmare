@@ -47,6 +47,8 @@
 - Coordinator API convention: when `database_url` is configured, `/api/coord/*` endpoints are active and may be protected by `coordinator_api_token` (Bearer or `X-Coordinator-Token`).
 - Postgres is the source of truth for centralized coordinator state (targets/leases/session checkpoints) when coordinator mode is enabled.
 - Worker-fleet status convention: central server exposes `GET /api/coord/workers` (token-protected) to return per-worker heartbeat recency, active lease counts, running stage names, and aggregate online/stale counts; `stale_after_seconds` query param tunes online/stale threshold.
+- Operator CLI convention: `client.py status` is the preferred central-machine quick check; defaults should resolve coordinator credentials from `deploy/.env`, print coordinator worker status first, then optionally print per-VM worker container state via AWS SSM.
+- Fleet rollout convention: `client.py rollout` is the preferred central-machine way to instruct worker VMs to update code and restart worker processing via AWS SSM fanout, with configurable `--branch`, `--repo-dir`, and SSM target selector flags.
 - Distributed coordinator architecture convention:
   - Central `server.py` owns Postgres-backed truth for target queue, stage queue, session checkpoints, and replicated artifacts.
   - Worker VMs must claim work via lease-based APIs and maintain heartbeats; lock ownership is `(entry_id, worker_id)` for targets and `(root_domain, stage, worker_id)` for stages.

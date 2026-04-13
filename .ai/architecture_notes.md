@@ -23,3 +23,6 @@
 - Central coordinator observability boundary:
   - `server.py` now computes worker-fleet status in Postgres (`coordinator_targets` + `coordinator_stage_tasks`) and exposes it through `/api/coord/workers`.
   - Worker liveness is inferred from last heartbeat timestamp relative to a configurable stale threshold (`stale_after_seconds`).
+- Operator control/visibility entrypoint:
+  - `client.py` acts as a central-machine CLI facade for status checks, combining coordinator worker heartbeat view and optional AWS SSM fanout checks for worker container process state on each VM.
+  - `client.py` now also performs centralized worker rollout (`rollout` action): remote git update + compose restart on targeted worker VMs through one SSM command.
