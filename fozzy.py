@@ -2321,6 +2321,7 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
         if detail_rows_html
         else f"<tr><td colspan='{table_col_count}'>No discrepancies</td></tr>"
     )
+    master_log_files = payload.get("log_files")
     response_data_json = json.dumps(response_records, ensure_ascii=False).replace("</", "<\\/")
     summary_json_filename_js = json.dumps(summary_json_filename, ensure_ascii=False).replace("</", "<\\/")
     master_log_files_js = json.dumps(
@@ -2438,7 +2439,6 @@ def render_anomaly_summary_html(payload: dict[str, Any]) -> str:
       enableResizableColumns("extractorMatchesTable");
 """
 
-    master_log_files = payload.get("log_files")
     if str(payload.get("summary_scope", "")) == "master" and isinstance(master_log_files, list):
         log_viewer_section_html = """
   <section class="inventory-section">

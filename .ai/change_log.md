@@ -88,3 +88,8 @@
   - Moved backslash-bearing JSON escaping (`.replace("</", "<\\/")`) out of inline f-string expressions and into precomputed variables.
   - Template now interpolates `summary_json_filename_js` and `master_log_files_js` constants.
 - Why: Python raised `SyntaxError: f-string expression part cannot include a backslash` at startup on `python3 fozzy.py`.
+
+- Fixed `UnboundLocalError` in `render_anomaly_summary_html` when generating single-domain summaries:
+  - Initialized `master_log_files = payload.get("log_files")` before building JSON-escaped JS constants.
+  - Removed later duplicate assignment and reused the initialized variable for master-only log viewer section checks.
+- Why: child domain workers crashed during `write_results_summary()` with `local variable 'master_log_files' referenced before assignment`, causing incremental domain failures.
