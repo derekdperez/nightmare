@@ -10,6 +10,19 @@
             "console": "integratedTerminal",
             "envFile": "${workspaceFolder}/deploy/.env",
             "env": {
+                "COORDINATOR_BASE_URL": "http://localhost"
+            },
+            "preLaunchTask": "setup-and-register"
+        },
+        {
+            "name": "Debug Coordinator (HTTPS localhost)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/coordinator.py",
+            "args": ["--config", "${workspaceFolder}/config/coordinator.json"],
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/deploy/.env",
+            "env": {
                 "COORDINATOR_BASE_URL": "https://localhost"
             },
             "preLaunchTask": "setup-and-register"
