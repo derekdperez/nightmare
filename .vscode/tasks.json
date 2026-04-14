@@ -6,8 +6,7 @@
             "type": "shell",
             "command": "bash",
             "args": [
-                "-c",
-                "bash deploy/run-local.sh && echo 'Waiting for database to be ready...' && sleep 30 && API_TOKEN=$(grep COORDINATOR_API_TOKEN deploy/.env | cut -d'=' -f2) && python3 register_targets.py --server-base-url https://localhost --api-token \"$API_TOKEN\" --targets-file targets.txt"
+                "deploy/setup-debug.sh"
             ],
             "group": "build",
             "presentation": {

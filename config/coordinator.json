@@ -1,6 +1,6 @@
 {
   "database_url": "",
-  "server_base_url": "https://coordinator.example.com",
+  "server_base_url": "",
   "api_token": "",
   "output_root": "output",
   "lease_seconds": 180,

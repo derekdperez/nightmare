@@ -10,7 +10,8 @@
             "console": "integratedTerminal",
             "envFile": "${workspaceFolder}/deploy/.env",
             "env": {
-                "COORDINATOR_BASE_URL": "https://localhost"
+                "COORDINATOR_BASE_URL": "https://localhost",
+                "COORDINATOR_API_TOKEN": ""
             },
             "preLaunchTask": "setup-and-register"
         }
