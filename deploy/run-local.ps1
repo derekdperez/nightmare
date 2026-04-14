@@ -38,6 +38,24 @@ if (-not (Test-CommandExists 'docker')) {
     throw "docker was not found in PATH. Install Docker Desktop and ensure 'docker' is available from PowerShell."
 }
 
+function Test-DockerDaemonAvailable {
+    $null = & docker info 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+if (-not (Test-DockerDaemonAvailable)) {
+    throw @"
+Docker CLI was found, but the Docker daemon is not reachable.
+
+Windows fix:
+  1) Start Docker Desktop and wait until it reports 'Engine running'
+  2) Re-run: .\deploy\run-local.ps1
+
+If Docker Desktop is already open, restart it and verify:
+  docker info
+"@
+}
+
 # Generate random values
 $PostgresPassword    = Get-RandomHex -ByteCount 32   # 64 hex chars
 $CoordinatorApiToken = Get-RandomHex -ByteCount 64   # 128 hex chars
