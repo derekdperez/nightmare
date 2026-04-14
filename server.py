@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import glob
 import html
 import json
 import mimetypes
@@ -427,6 +428,18 @@ CREATE TABLE IF NOT EXISTS coordinator_fleet_settings (
 );
 INSERT INTO coordinator_fleet_settings(singleton) VALUES (1)
 ON CONFLICT (singleton) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS coordinator_worker_commands (
+  id BIGSERIAL PRIMARY KEY,
+  worker_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_worker_commands_worker_created
+  ON coordinator_worker_commands(worker_id, created_at_utc DESC);
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -800,6 +813,114 @@ ORDER BY worker_id ASC;
             },
             "workers": workers,
         }
+
+    def worker_control_snapshot(self, *, stale_after_seconds: int = DEFAULT_COORDINATOR_LEASE_SECONDS) -> dict[str, Any]:
+        stale_after = max(15, int(stale_after_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
+        sql = """
+WITH target_agg AS (
+    SELECT
+      worker_id,
+      MAX(heartbeat_at_utc) AS last_target_heartbeat,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+      COUNT(*) FILTER (WHERE status IN ('running', 'completed')) AS urls_scanned_session,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN COALESCE(start_url, root_domain) ELSE NULL END), NULL) AS current_targets
+    FROM coordinator_targets
+    WHERE worker_id IS NOT NULL AND worker_id <> ''
+    GROUP BY worker_id
+),
+stage_agg AS (
+    SELECT
+      worker_id,
+      MAX(heartbeat_at_utc) AS last_stage_heartbeat,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_stage_tasks
+    FROM coordinator_stage_tasks
+    WHERE worker_id IS NOT NULL AND worker_id <> ''
+    GROUP BY worker_id
+),
+commands AS (
+    SELECT worker_id, COUNT(*) FILTER (WHERE status = 'queued') AS queued_commands
+    FROM coordinator_worker_commands
+    GROUP BY worker_id
+)
+SELECT
+  COALESCE(t.worker_id, s.worker_id, c.worker_id) AS worker_id,
+  CASE
+    WHEN t.last_target_heartbeat IS NULL THEN s.last_stage_heartbeat
+    WHEN s.last_stage_heartbeat IS NULL THEN t.last_target_heartbeat
+    ELSE GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat)
+  END AS last_heartbeat_at_utc,
+  COALESCE(t.running_targets, 0) AS running_targets,
+  COALESCE(s.running_stage_tasks, 0) AS running_stage_tasks,
+  COALESCE(t.urls_scanned_session, 0) AS urls_scanned_session,
+  COALESCE(t.current_targets, ARRAY[]::text[]) AS current_targets,
+  COALESCE(c.queued_commands, 0) AS queued_commands
+FROM target_agg t
+FULL OUTER JOIN stage_agg s ON s.worker_id = t.worker_id
+FULL OUTER JOIN commands c ON c.worker_id = COALESCE(t.worker_id, s.worker_id)
+ORDER BY worker_id ASC;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+            conn.commit()
+        now_utc = datetime.now(timezone.utc)
+        workers: list[dict[str, Any]] = []
+        online_count = 0
+        for row in rows:
+            worker_id = str(row[0] or "").strip()
+            if not worker_id:
+                continue
+            last_heartbeat = row[1]
+            seconds_since: int | None = None
+            last_heartbeat_iso: str | None = None
+            if last_heartbeat is not None:
+                last_heartbeat_iso = last_heartbeat.isoformat()
+                seconds_since = max(0, int((now_utc - last_heartbeat).total_seconds()))
+            is_online = seconds_since is not None and seconds_since <= stale_after
+            if is_online:
+                online_count += 1
+            current_targets_raw = row[5] if isinstance(row[5], list) else []
+            workers.append(
+                {
+                    "worker_id": worker_id,
+                    "status": "online" if is_online else "stale",
+                    "last_heartbeat_at_utc": last_heartbeat_iso,
+                    "seconds_since_heartbeat": seconds_since,
+                    "running_targets": int(row[2] or 0),
+                    "running_stage_tasks": int(row[3] or 0),
+                    "urls_scanned_session": int(row[4] or 0),
+                    "current_targets": [str(item) for item in current_targets_raw if str(item or "").strip()],
+                    "queued_commands": int(row[6] or 0),
+                }
+            )
+        total = len(workers)
+        return {
+            "generated_at_utc": now_utc.isoformat(),
+            "stale_after_seconds": stale_after,
+            "counts": {
+                "total_workers": total,
+                "online_workers": online_count,
+                "stale_workers": max(0, total - online_count),
+            },
+            "workers": workers,
+        }
+
+    def queue_worker_command(self, worker_id: str, command: str, payload: dict[str, Any] | None = None) -> bool:
+        wid = str(worker_id or "").strip()
+        cmd = str(command or "").strip().lower()
+        if not wid or not cmd:
+            return False
+        safe_payload = payload if isinstance(payload, dict) else {}
+        sql = """
+INSERT INTO coordinator_worker_commands(worker_id, command, payload, status, updated_at_utc)
+VALUES (%s, %s, %s::jsonb, 'queued', NOW());
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (wid, cmd, json.dumps(safe_payload)))
+            conn.commit()
+        return True
 
     def enqueue_stage(self, root_domain: str, stage: str) -> bool:
         rd = str(root_domain or "").strip().lower()
@@ -1255,6 +1376,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/dashboard":
             self._write_text(self._render_dashboard_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/workers":
+            self._write_text(self._render_workers_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root)
             self._write_json(payload)
@@ -1288,6 +1412,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 DEFAULT_COORDINATOR_LEASE_SECONDS,
             )
             self._write_json(self.coordinator_store.worker_statuses(stale_after_seconds=stale_after_seconds))
+            return
+        if path == "/api/coord/worker-control":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            stale_after_seconds = _safe_int(
+                (query.get("stale_after_seconds") or [DEFAULT_COORDINATOR_LEASE_SECONDS])[0],
+                DEFAULT_COORDINATOR_LEASE_SECONDS,
+            )
+            snapshot = self.coordinator_store.worker_control_snapshot(stale_after_seconds=stale_after_seconds)
+            for worker in snapshot.get("workers", []):
+                worker_id = str(worker.get("worker_id", "") or "").strip()
+                worker["logs"] = self._discover_worker_log_links(worker_id)
+                worker["config"] = self._resolve_worker_config_rel(worker_id)
+            self._write_json(snapshot)
+            return
+        if path == "/api/coord/worker-config":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            worker_id = str((query.get("worker_id") or [""])[0] or "").strip()
+            config_path = self._resolve_worker_config_path(worker_id)
+            if config_path is None:
+                self._write_json({"error": "worker config path not available"}, status=404)
+                return
+            if not config_path.exists():
+                self._write_json(
+                    {
+                        "found": False,
+                        "worker_id": worker_id,
+                        "config_path_rel": _to_repo_relative_path(config_path),
+                        "content": "",
+                    }
+                )
+                return
+            self._write_json(
+                {
+                    "found": True,
+                    "worker_id": worker_id,
+                    "config_path_rel": _to_repo_relative_path(config_path),
+                    "content": config_path.read_text(encoding="utf-8"),
+                }
+            )
             return
         if path == "/api/coord/fleet-settings":
             if self.coordinator_store is None:
@@ -1536,11 +1709,97 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json({"ok": True, **result})
             return
 
+        if path == "/api/coord/workers/command":
+            command = str(body.get("command", "") or "").strip().lower()
+            worker_ids_raw = body.get("worker_ids", [])
+            if not isinstance(worker_ids_raw, list):
+                self._write_json({"error": "worker_ids must be an array"}, status=400)
+                return
+            worker_ids = [str(item or "").strip() for item in worker_ids_raw if str(item or "").strip()]
+            if command not in {"start", "pause", "stop"}:
+                self._write_json({"error": "command must be one of: start, pause, stop"}, status=400)
+                return
+            if not worker_ids:
+                self._write_json({"error": "at least one worker_id is required"}, status=400)
+                return
+            queued = 0
+            for worker_id in worker_ids:
+                if self.coordinator_store.queue_worker_command(worker_id, command, payload={"source": "worker-control-ui"}):
+                    queued += 1
+            self._write_json({"ok": True, "queued": queued, "command": command, "worker_ids": worker_ids})
+            return
+
+        if path == "/api/coord/worker-config":
+            worker_id = str(body.get("worker_id", "") or "").strip()
+            content = str(body.get("content", "") or "")
+            config_path = self._resolve_worker_config_path(worker_id)
+            if config_path is None:
+                self._write_json({"error": "worker config path not available"}, status=404)
+                return
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(content, encoding="utf-8")
+            self._write_json(
+                {
+                    "ok": True,
+                    "worker_id": worker_id,
+                    "config_path_rel": _to_repo_relative_path(config_path),
+                    "bytes_written": len(content.encode("utf-8")),
+                }
+            )
+            return
+
         if path == "/api/coord/fleet-signal-clear-output":
             self._write_json({"ok": True, **self.coordinator_store.bump_output_clear_generation()})
             return
 
         self._write_json({"error": "not found"}, status=404)
+
+    def _is_safe_worker_id(self, worker_id: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9._-]{1,80}", str(worker_id or "").strip()))
+
+    def _resolve_worker_config_path(self, worker_id: str) -> Path | None:
+        wid = str(worker_id or "").strip()
+        if not self._is_safe_worker_id(wid):
+            return None
+        candidates = [
+            self.app_root / "config" / "workers" / f"{wid}.json",
+            self.app_root / "config" / f"{wid}.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate.resolve()
+        return candidates[0].resolve()
+
+    def _resolve_worker_config_rel(self, worker_id: str) -> str | None:
+        path = self._resolve_worker_config_path(worker_id)
+        return _to_repo_relative_path(path) if path is not None else None
+
+    def _discover_worker_log_links(self, worker_id: str) -> list[dict[str, str]]:
+        wid = str(worker_id or "").strip()
+        if not self._is_safe_worker_id(wid):
+            return []
+        patterns = [
+            str(self.output_root.resolve() / f"**/*{wid}*.log"),
+            str(self.app_root / f"**/*{wid}*.log"),
+        ]
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            for raw_path in glob.iglob(pattern, recursive=True):
+                path = Path(raw_path)
+                if not path.is_file():
+                    continue
+                rel = _to_repo_relative_path(path)
+                if not rel:
+                    continue
+                key = rel.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"label": path.name, "relative": rel})
+                if len(out) >= 8:
+                    return out
+        return out
 
     def _render_dashboard_html(self) -> str:
         return """<!doctype html>
@@ -1568,7 +1827,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 </head>
 <body>
   <h1>Nightmare Live Dashboard</h1>
-  <div class="meta">Auto-refresh every 5s. Reports are served from this app via <code>/files/*</code>.</div>
+  <div class="meta">Auto-refresh every 5s. Reports are served from this app via <code>/files/*</code>. <a href="/workers">Open Worker Control</a></div>
   <div id="cards" class="cards"></div>
   <h2>Master Reports</h2>
   <div id="masters" class="muted">Loading…</div>
@@ -1644,6 +1903,168 @@ class DashboardHandler(BaseHTTPRequestHandler):
     }
     refresh();
     setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
+"""
+
+    def _render_workers_html(self) -> str:
+        return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker Control</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 8px; }
+    .meta { margin-bottom: 12px; color: #475569; font-size: 13px; }
+    .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px; }
+    .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+    .k { font-size: 12px; color: #64748b; }
+    .v { font-size: 20px; font-weight: 700; margin-top: 4px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: white; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #cbd5e1; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
+    th { background: #e2e8f0; }
+    .online { color: #15803d; font-weight: 600; }
+    .stale { color: #b45309; font-weight: 600; }
+    .muted { color: #64748b; }
+    #configModal { position: fixed; inset: 0; display: none; background: rgba(15, 23, 42, .35); }
+    #configModal .panel { margin: 5vh auto; width: min(940px, 95vw); background: #fff; padding: 12px; border-radius: 10px; border: 1px solid #cbd5e1; }
+    textarea { width: 100%; min-height: 340px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Worker Control Center</h1>
+  <div class="meta">Asynchronous auto-refresh every 3s. Use row selection to run bulk start/stop/pause commands. <a href="/dashboard">Back to Dashboard</a></div>
+  <div id="cards" class="cards"></div>
+  <div class="toolbar">
+    <input id="token" type="password" placeholder="Coordinator token">
+    <button class="primary" onclick="bulkCommand('start')">Start selected</button>
+    <button onclick="bulkCommand('pause')">Pause selected</button>
+    <button onclick="bulkCommand('stop')">Stop selected</button>
+    <span id="msg" class="muted"></span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="selectAll"></th>
+        <th>Worker</th>
+        <th>Status</th>
+        <th>Current Targets</th>
+        <th>URLs Scanned (session)</th>
+        <th>Actions</th>
+        <th>Logs</th>
+        <th>Config</th>
+      </tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="8">Loading…</td></tr></tbody>
+  </table>
+
+  <div id="configModal">
+    <div class="panel">
+      <h3 id="configTitle">Edit worker config</h3>
+      <textarea id="configText"></textarea>
+      <div class="toolbar">
+        <button class="primary" onclick="saveConfig()">Save config</button>
+        <button onclick="closeConfig()">Close</button>
+        <span id="configMsg" class="muted"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let selectedConfigWorker = "";
+    function esc(v){ return String(v || "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch])); }
+    function authHeaders() {
+      const token = document.getElementById("token").value.trim();
+      return token ? { "Authorization": `Bearer ${token}` } : {};
+    }
+    async function apiGet(path) {
+      const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
+      if (!rsp.ok) throw new Error(await rsp.text());
+      return rsp.json();
+    }
+    async function apiPost(path, body) {
+      const rsp = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(body || {}),
+      });
+      if (!rsp.ok) throw new Error(await rsp.text());
+      return rsp.json();
+    }
+    function selectedWorkers() { return [...document.querySelectorAll("input.workerSel:checked")].map((el) => el.value); }
+    async function bulkCommand(command) {
+      const workers = selectedWorkers();
+      if (!workers.length) { document.getElementById("msg").textContent = "Select at least one worker."; return; }
+      try {
+        const data = await apiPost("/api/coord/workers/command", { command, worker_ids: workers });
+        document.getElementById("msg").textContent = `Queued ${data.queued} ${command} command(s).`;
+        refresh();
+      } catch (e) {
+        document.getElementById("msg").textContent = `Command failed: ${e.message}`;
+      }
+    }
+    async function bulkCommandForOne(workerId, command) {
+      document.querySelectorAll("input.workerSel").forEach((el) => { el.checked = (el.value === workerId); });
+      await bulkCommand(command);
+    }
+    async function openConfig(workerId) {
+      selectedConfigWorker = workerId;
+      document.getElementById("configTitle").textContent = `Edit worker config: ${workerId}`;
+      document.getElementById("configMsg").textContent = "";
+      document.getElementById("configModal").style.display = "block";
+      try {
+        const data = await apiGet(`/api/coord/worker-config?worker_id=${encodeURIComponent(workerId)}`);
+        document.getElementById("configText").value = data.content || "";
+      } catch (e) {
+        document.getElementById("configText").value = "";
+        document.getElementById("configMsg").textContent = `Load failed: ${e.message}`;
+      }
+    }
+    function closeConfig() { document.getElementById("configModal").style.display = "none"; selectedConfigWorker = ""; }
+    async function saveConfig() {
+      if (!selectedConfigWorker) return;
+      try {
+        await apiPost("/api/coord/worker-config", { worker_id: selectedConfigWorker, content: document.getElementById("configText").value });
+        document.getElementById("configMsg").textContent = "Saved.";
+      } catch (e) {
+        document.getElementById("configMsg").textContent = `Save failed: ${e.message}`;
+      }
+    }
+    function render(data) {
+      const c = data.counts || {};
+      const cards = [["Workers", c.total_workers || 0],["Online", c.online_workers || 0],["Stale", c.stale_workers || 0]];
+      document.getElementById("cards").innerHTML = cards.map(([k,v]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
+      const rows = data.workers || [];
+      if (!rows.length) { document.getElementById("rows").innerHTML = "<tr><td colspan='8'>No workers discovered yet.</td></tr>"; return; }
+      document.getElementById("rows").innerHTML = rows.map((w) => {
+        const logs = (w.logs || []).map((l) => `<a href="/files/${encodeURIComponent(l.relative).replaceAll("%2F","/")}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>`).join("<br>") || "<span class='muted'>none</span>";
+        const statusClass = w.status === "online" ? "online" : "stale";
+        const targets = (w.current_targets || []).map(esc).join("<br>") || "<span class='muted'>none</span>";
+        return `<tr>
+          <td><input class="workerSel" type="checkbox" value="${esc(w.worker_id)}"></td>
+          <td>${esc(w.worker_id)}</td>
+          <td><span class="${statusClass}">${esc(w.status)}</span><br><span class="muted">${esc(w.seconds_since_heartbeat)}s since heartbeat</span></td>
+          <td>${targets}</td>
+          <td>${esc(w.urls_scanned_session)}</td>
+          <td><button onclick="bulkCommandForOne('${esc(w.worker_id)}','start')">Start</button><button onclick="bulkCommandForOne('${esc(w.worker_id)}','pause')">Pause</button><button onclick="bulkCommandForOne('${esc(w.worker_id)}','stop')">Stop</button></td>
+          <td>${logs}</td>
+          <td><button onclick="openConfig('${esc(w.worker_id)}')">Edit</button><br><span class="muted">${esc(w.config || "")}</span></td>
+        </tr>`;
+      }).join("");
+    }
+    async function refresh() {
+      try { render(await apiGet("/api/coord/worker-control")); }
+      catch (e) { document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load worker state: ${esc(e.message)}</td></tr>`; }
+    }
+    document.getElementById("selectAll").addEventListener("change", (e) => { document.querySelectorAll("input.workerSel").forEach((el) => { el.checked = e.target.checked; }); });
+    refresh();
+    setInterval(refresh, 3000);
   </script>
 </body>
 </html>
