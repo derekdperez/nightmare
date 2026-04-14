@@ -31,6 +31,7 @@ def _post_json(base_url: str, token: str, path: str, payload: dict[str, Any]) ->
         headers=headers,
         json_payload=payload,
         timeout_seconds=30.0,
+        verify=False,
         user_agent="nightmare-register-targets/1.0",
     )
 

@@ -1,0 +1,172 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: nightmare-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nightmare}
+      POSTGRES_USER: ${POSTGRES_USER:-nightmare}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nightmare} -d ${POSTGRES_DB:-nightmare}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - nightmare-net
+
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL}
+        COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN}
+        DATABASE_URL: postgresql://${POSTGRES_USER:-nightmare}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nightmare}
+    image: nightmare:latest
+    container_name: nightmare-coordinator-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ROLE: server
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nightmare}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nightmare}
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN}
+    volumes:
+      - ../output:/app/output
+      - ../config:/app/config
+      - ${TLS_CERT_FILE:?set TLS_CERT_FILE}:/run/tls/server.crt:ro
+      - ${TLS_KEY_FILE:?set TLS_KEY_FILE}:/run/tls/server.key:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    command:
+      - server
+      - --host
+      - 0.0.0.0
+      - --http-port
+      - "80"
+      - --https-port
+      - "443"
+      - --cert-file
+      - /run/tls/server.crt
+      - --key-file
+      - /run/tls/server.key
+    networks:
+      - nightmare-net
+
+  worker1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL}
+        COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN}
+    image: nightmare:latest
+    container_name: nightmare-worker-1
+    restart: unless-stopped
+    environment:
+      APP_ROLE: coordinator
+      COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL:?set COORDINATOR_BASE_URL}
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN}
+    volumes:
+      - ../output:/app/output
+      - ../config:/app/config
+    command:
+      - coordinator
+      - --config
+      - config/coordinator.json
+    depends_on:
+      - server
+    networks:
+      - nightmare-net
+
+  worker2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL}
+        COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN}
+    image: nightmare:latest
+    container_name: nightmare-worker-2
+    restart: unless-stopped
+    environment:
+      APP_ROLE: coordinator
+      COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL:?set COORDINATOR_BASE_URL}
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN}
+    volumes:
+      - ../output:/app/output
+      - ../config:/app/config
+    command:
+      - coordinator
+      - --config
+      - config/coordinator.json
+    depends_on:
+      - server
+    networks:
+      - nightmare-net
+
+  worker3:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL}
+        COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN}
+    image: nightmare:latest
+    container_name: nightmare-worker-3
+    restart: unless-stopped
+    environment:
+      APP_ROLE: coordinator
+      COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL:?set COORDINATOR_BASE_URL}
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN}
+    volumes:
+      - ../output:/app/output
+      - ../config:/app/config
+    command:
+      - coordinator
+      - --config
+      - config/coordinator.json
+    depends_on:
+      - server
+    networks:
+      - nightmare-net
+
+  worker4:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL}
+        COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN}
+    image: nightmare:latest
+    container_name: nightmare-worker-4
+    restart: unless-stopped
+    environment:
+      APP_ROLE: coordinator
+      COORDINATOR_BASE_URL: ${COORDINATOR_BASE_URL:?set COORDINATOR_BASE_URL}
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN}
+    volumes:
+      - ../output:/app/output
+      - ../config:/app/config
+    command:
+      - coordinator
+      - --config
+      - config/coordinator.json
+    depends_on:
+      - server
+    networks:
+      - nightmare-net
+
+volumes:
+  postgres_data:
+
+networks:
+  nightmare-net:
+    driver: bridge
