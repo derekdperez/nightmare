@@ -56,7 +56,7 @@ echo ""
 
 # Always restart containers to ensure they have latest environment variables
 echo "Restarting local Nightmare cluster with updated configuration..."
-docker compose -f docker-compose.local.yml --env-file .env down 2>/dev/null || true
+docker compose -f docker-compose.local.yml --env-file .env down -v 2>/dev/null || true
 docker compose -f docker-compose.local.yml --env-file .env up -d --build
 echo "Waiting for services to start..."
 sleep 10

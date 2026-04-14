@@ -2055,9 +2055,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
           <td><span class="${statusClass}">${esc(w.status)}</span><br><span class="muted">${esc(w.seconds_since_heartbeat)}s since heartbeat</span></td>
           <td>${targets}</td>
           <td>${esc(w.urls_scanned_session)}</td>
-          <td><button onclick="bulkCommandForOne('${esc(w.worker_id)}','start')">Start</button><button onclick="bulkCommandForOne('${esc(w.worker_id)}','pause')">Pause</button><button onclick="bulkCommandForOne('${esc(w.worker_id)}','stop')">Stop</button></td>
+          <td><button onclick="bulkCommandForOne('${escJs(w.worker_id)}','start')">Start</button><button onclick="bulkCommandForOne('${escJs(w.worker_id)}','pause')">Pause</button><button onclick="bulkCommandForOne('${escJs(w.worker_id)}','stop')">Stop</button></td>
           <td>${logs}</td>
-          <td><button onclick="openConfig('${esc(w.worker_id)}')">Edit</button><br><span class="muted">${esc(w.config || "")}</span></td>
+          <td><button onclick="openConfig('${escJs(w.worker_id)}')">Edit</button><br><span class="muted">${esc(w.config || "")}</span></td>
         </tr>`;
       }).join("");
     }
