@@ -33,7 +33,8 @@ Usage:
   ./deploy/bootstrap-central-auto.sh [--auto-provision-workers 20 --aws-ami-id ami-... --aws-subnet-id subnet-... --aws-security-group-ids sg-... --repo-url https://...]
 
 What it does:
-  - generates strong Postgres password + coordinator API token
+  - reuses existing Postgres credentials from deploy/.env when present
+  - only generates new Postgres password + coordinator API token for a fresh install (or --force)
   - auto-detects public host/IP (EC2 metadata first, external IP fallback)
   - generates self-signed TLS cert/key (unless already present)
   - writes deploy/.env
@@ -110,6 +111,48 @@ if ! [[ "$AUTO_PROVISION_WORKERS" =~ ^[0-9]+$ ]]; then
   echo "--auto-provision-workers must be an integer >= 0" >&2
   exit 2
 fi
+
+
+read_env_value() {
+  local file="$1"
+  local key="$2"
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+  python3 - "$file" "$key" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+wanted = sys.argv[2]
+for raw_line in path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() != wanted:
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    print(value)
+    break
+PY
+}
+
+detect_existing_postgres_data() {
+  local found=1
+
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq 'nightmare-postgres'; then
+    return 0
+  fi
+
+  if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -Eq '(^|[_-])postgres_data$'; then
+    return 0
+  fi
+
+  return 1
+}
 
 require_cmd() {
   local name="$1"
@@ -418,11 +461,67 @@ resolve_compose_cmd || {
 detect_docker_access_mode || exit 1
 
 mkdir -p "$TLS_DIR"
+
+EXISTING_INSTALL_DETECTED=0
+if [[ -f "$ENV_FILE" ]] || detect_existing_postgres_data; then
+  EXISTING_INSTALL_DETECTED=1
+fi
+
 POSTGRES_DB="${POSTGRES_DB_DEFAULT}"
 POSTGRES_USER="${POSTGRES_USER_DEFAULT}"
-POSTGRES_PASSWORD="$(gen_password)"
-COORDINATOR_API_TOKEN="$(gen_token)"
-COORDINATOR_BASE_URL="$(detect_base_url)"
+POSTGRES_PASSWORD=""
+COORDINATOR_API_TOKEN=""
+
+if [[ -f "$ENV_FILE" && "$FORCE_REGEN" -ne 1 ]]; then
+  existing_postgres_db="$(read_env_value "$ENV_FILE" POSTGRES_DB)"
+  existing_postgres_user="$(read_env_value "$ENV_FILE" POSTGRES_USER)"
+  existing_postgres_password="$(read_env_value "$ENV_FILE" POSTGRES_PASSWORD)"
+  existing_api_token="$(read_env_value "$ENV_FILE" COORDINATOR_API_TOKEN)"
+  existing_base_url="$(read_env_value "$ENV_FILE" COORDINATOR_BASE_URL)"
+
+  if [[ -n "$existing_postgres_db" ]]; then
+    POSTGRES_DB="$existing_postgres_db"
+  fi
+  if [[ -n "$existing_postgres_user" ]]; then
+    POSTGRES_USER="$existing_postgres_user"
+  fi
+  if [[ -n "$existing_postgres_password" ]]; then
+    POSTGRES_PASSWORD="$existing_postgres_password"
+  fi
+  if [[ -n "$existing_api_token" ]]; then
+    COORDINATOR_API_TOKEN="$existing_api_token"
+  fi
+  if [[ -z "$BASE_URL_OVERRIDE" && -n "$existing_base_url" ]]; then
+    COORDINATOR_BASE_URL="$existing_base_url"
+  else
+    COORDINATOR_BASE_URL="$(detect_base_url)"
+  fi
+else
+  COORDINATOR_BASE_URL="$(detect_base_url)"
+fi
+
+if [[ -z "$POSTGRES_PASSWORD" ]]; then
+  if [[ "$EXISTING_INSTALL_DETECTED" -eq 1 && "$FORCE_REGEN" -ne 1 ]]; then
+    echo "Detected an existing Nightmare/Postgres installation, but could not find reusable POSTGRES_PASSWORD in ${ENV_FILE}." >&2
+    echo "Refusing to generate a new database password automatically because that would break access to the existing database." >&2
+    echo "Restore ${ENV_FILE}, or intentionally reset with --force after removing the old Postgres data volume." >&2
+    exit 1
+  fi
+  POSTGRES_PASSWORD="$(gen_password)"
+fi
+
+if [[ -z "$COORDINATOR_API_TOKEN" ]]; then
+  if [[ "$EXISTING_INSTALL_DETECTED" -eq 1 && "$FORCE_REGEN" -ne 1 && -f "$ENV_FILE" ]]; then
+    existing_api_token="$(read_env_value "$ENV_FILE" COORDINATOR_API_TOKEN)"
+    if [[ -n "$existing_api_token" ]]; then
+      COORDINATOR_API_TOKEN="$existing_api_token"
+    fi
+  fi
+fi
+if [[ -z "$COORDINATOR_API_TOKEN" ]]; then
+  COORDINATOR_API_TOKEN="$(gen_token)"
+fi
+
 BASE_HOST="${COORDINATOR_BASE_URL#https://}"
 BASE_HOST="${BASE_HOST#http://}"
 BASE_HOST="${BASE_HOST%%/*}"
