@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
-import base64
-import glob
 import hashlib
 import json
-import os
-import re
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
+
+try:
+    import psycopg
+except Exception:  # pragma: no cover - optional dependency at runtime
+    psycopg = None
+
+DEFAULT_COORDINATOR_LEASE_SECONDS = 120
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _get_root_domain(hostname: str) -> str:
@@ -51,12 +57,6 @@ def _normalize_target_url(raw: str) -> tuple[str, str]:
 def _make_target_entry_id(line_no: int, raw: str) -> str:
     return hashlib.sha1(f"{line_no}:{raw}".encode("utf-8")).hexdigest()[:16]
 
-try:
-    import psycopg
-except Exception:  # pragma: no cover - optional dependency at runtime
-    psycopg = None
-
-DEFAULT_COORDINATOR_LEASE_SECONDS = 120
 
 class CoordinatorStore:
     def __init__(self, database_url: str):
@@ -168,7 +168,8 @@ CREATE INDEX IF NOT EXISTS idx_worker_commands_worker_created
                 continue
             try:
                 start_url, root_domain = _normalize_target_url(text)
-            except Exception:
+            except Exception as exc:
+                print(f"[register_targets] skip line {line_no}: {text!r} -> {exc!r}")
                 skipped += 1
                 continue
             rows.append((_make_target_entry_id(line_no, text), line_no, text, start_url, root_domain))
@@ -191,7 +192,7 @@ SET line_number = EXCLUDED.line_number,
         inserted = len(rows)
         return {"inserted": inserted, "skipped": skipped}
 
-    def claim_target(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any] ]:
+    def claim_target(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
         worker = str(worker_id or "").strip()
         if not worker:
             raise ValueError("worker_id is required")
@@ -279,7 +280,7 @@ WHERE entry_id = %s
             conn.commit()
         return updated > 0
 
-    def load_session(self, root_domain: str) -> Optional[dict[str, Any] ]:
+    def load_session(self, root_domain: str) -> Optional[dict[str, Any]]:
         sql = """
 SELECT root_domain, start_url, max_pages, saved_at_utc, payload
 FROM coordinator_sessions
@@ -349,7 +350,6 @@ SET start_url = EXCLUDED.start_url,
         return True
 
     def reset_coordinator_tables(self) -> dict[str, Any]:
-        """Truncate all coordinator tables (targets, sessions, stage tasks, artifacts)."""
         truncate_sql = """
 TRUNCATE TABLE coordinator_targets, coordinator_sessions, coordinator_stage_tasks, coordinator_artifacts;
 """
@@ -411,9 +411,7 @@ RETURNING output_clear_generation, updated_at_utc;
         counts: dict[str, int] = {}
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT status, COUNT(*) FROM coordinator_targets GROUP BY status;"
-                )
+                cur.execute("SELECT status, COUNT(*) FROM coordinator_targets GROUP BY status;")
                 rows = cur.fetchall()
             conn.commit()
         for status, count in rows:
@@ -618,7 +616,7 @@ ORDER BY worker_id ASC;
             "workers": workers,
         }
 
-    def queue_worker_command(self, worker_id: str, command: str, payload: Optional[dict[str, Any] ] = None) -> bool:
+    def queue_worker_command(self, worker_id: str, command: str, payload: Optional[dict[str, Any]] = None) -> bool:
         wid = str(worker_id or "").strip()
         cmd = str(command or "").strip().lower()
         if not wid or not cmd:
@@ -662,7 +660,7 @@ SET status = CASE
             conn.commit()
         return True
 
-    def claim_stage(self, stage: str, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any] ]:
+    def claim_stage(self, stage: str, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
         stg = str(stage or "").strip().lower()
         wid = str(worker_id or "").strip()
         if not stg or not wid:
@@ -817,7 +815,7 @@ SET source_worker = EXCLUDED.source_worker,
             conn.commit()
         return True
 
-    def get_artifact(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any] ]:
+    def get_artifact(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()
         at = str(artifact_type or "").strip().lower()
         if not rd or not at:
