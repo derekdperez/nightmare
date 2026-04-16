@@ -1,0 +1,8 @@
+-- Get env variables for this server
+cat deploy/.env
+
+-- Register targets
+python3 register_targets.py --server-base-url https://ec2-54-162-152-142.compute-1.amazonaws.com --api-token "a986f884602022a3ab5b188c8a4147f79fbd727977705332e74ade9e7eccd9b5201c67d9abbc6a094b2cbd9a8ce8e306" --targets-file targets.txt
+
+-- Get docker machine logs
+aws ec2 get-console-output --instance-id i-0a106f97947c75fba --latest --output text

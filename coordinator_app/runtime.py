@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import zipfile
+import sys
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
