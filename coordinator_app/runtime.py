@@ -13,6 +13,7 @@ import threading
 import time
 import zipfile
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -23,6 +24,43 @@ from nightmare_shared.config import CoordinatorSettings, atomic_write_json, load
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH_DEFAULT = BASE_DIR / "config" / "coordinator.json"
 OUTPUT_ROOT_DEFAULT = BASE_DIR / "output"
+
+
+@dataclass
+class CoordinatorConfig:
+    server_base_url: str
+    api_token: str
+    output_root: Path
+    heartbeat_interval_seconds: float
+    lease_seconds: int
+    poll_interval_seconds: float
+    nightmare_workers: int
+    fozzy_workers: int
+    extractor_workers: int
+    python_executable: str
+    nightmare_config: Path
+    fozzy_config: Path
+    extractor_config: Path
+    upload_session_every_seconds: float
+    enable_nightmare: bool
+    enable_fozzy: bool
+    enable_extractor: bool
+    fozzy_process_workers: int
+    extractor_process_workers: int
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
 
 class CoordinatorClient:
     def __init__(self, base_url: str, token: str, timeout_seconds: float = 20.0, verify_ssl: bool = True):

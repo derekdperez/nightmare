@@ -303,3 +303,12 @@
     - `docker compose ... ps --format json` for post-restart status output.
   - Added rollout flags: `--branch`, `--repo-dir`, `--ssm-target-key`, `--ssm-target-values`.
 - Why: operators needed a single central command to update worker VM code and restart processing across the fleet.
+
+- Fixed coordinator worker crash loop on startup (`NameError: CoordinatorConfig`).
+  - Moved the shared `CoordinatorConfig` dataclass into `coordinator_app/runtime.py` and imported it in `coordinator.py` so `load_config()` can instantiate it in-module.
+  - Restored missing runtime helpers `_read_json_dict` and `_now_iso` used by `SessionUploader`.
+- Why: workers were exiting immediately during config load; this unblocks normal boot and prevents the next latent NameError in session upload path.
+
+- Fixed local deploy auth mismatch caused by regenerated secrets with persisted Docker volumes.
+  - Updated `deploy/run-local.ps1` and `deploy/run-local.sh` to reuse existing `POSTGRES_PASSWORD` and `COORDINATOR_API_TOKEN` from `deploy/.env` when present.
+- Why: repeated local runs were regenerating DB credentials while keeping `postgres_data`, causing server startup failure (`password authentication failed`) and downstream worker `connection refused` loops.

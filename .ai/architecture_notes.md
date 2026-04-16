@@ -26,3 +26,6 @@
 - Operator control/visibility entrypoint:
   - `client.py` acts as a central-machine CLI facade for status checks, combining coordinator worker heartbeat view and optional AWS SSM fanout checks for worker container process state on each VM.
   - `client.py` now also performs centralized worker rollout (`rollout` action): remote git update + compose restart on targeted worker VMs through one SSM command.
+- Coordinator runtime boundary:
+  - `coordinator_app/runtime.py` must own all runtime config-model symbols returned by `load_config()` (currently `CoordinatorConfig`) plus helper functions referenced by runtime threads (`_read_json_dict`, `_now_iso`).
+  - Keeping these symbols in `coordinator.py` can break worker startup when `coordinator.py` is executed as `__main__`, because runtime module globals cannot resolve classes only defined in another module's script scope.

@@ -72,3 +72,5 @@
 - Linux bootstrap scripts should detect package manager in this order for AWS compatibility: yum, then dnf, then pt-get fallback.
 - Compose compatibility convention: bootstrap and worker launch paths must support both docker compose and docker-compose to handle mixed AMI toolchains.
 - Master report payload size convention: cap extractor-match rows included in ll_domains.results_summary.json and emit explicit extractor_matches_total/extractor_matches_truncated metadata so the HTML can render quickly and still communicate truncation.
+- Module ownership convention for coordinator runtime: any class instantiated in `coordinator_app/runtime.py` (for example `CoordinatorConfig` in `load_config`) must be defined or imported in that module, not only in `coordinator.py`.
+- Local deploy convention: `deploy/run-local.ps1` and `deploy/run-local.sh` must preserve existing `POSTGRES_PASSWORD` from `deploy/.env` when present, because `docker-compose.local.yml` persists Postgres state in `postgres_data` and credential rotation without volume reset breaks coordinator startup.

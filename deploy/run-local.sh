@@ -9,9 +9,28 @@ TLS_DIR="${DEPLOY_DIR}/tls"
 CERT_FILE="${TLS_DIR}/server.crt"
 KEY_FILE="${TLS_DIR}/server.key"
 
-# Generate random values
-POSTGRES_PASSWORD="$(openssl rand -hex 32)"
-COORDINATOR_API_TOKEN="$(openssl rand -hex 64)"
+get_env_value() {
+  local file_path="$1"
+  local key="$2"
+  [[ -f "$file_path" ]] || return 1
+  local line
+  line="$(grep -E "^${key}=" "$file_path" | head -n1 || true)"
+  [[ -n "$line" ]] || return 1
+  local value="${line#*=}"
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
+# Reuse secrets from existing .env so persisted Postgres volumes remain valid.
+POSTGRES_PASSWORD="$(get_env_value "$ENV_FILE" "POSTGRES_PASSWORD" || true)"
+COORDINATOR_API_TOKEN="$(get_env_value "$ENV_FILE" "COORDINATOR_API_TOKEN" || true)"
+
+if [[ -z "$POSTGRES_PASSWORD" ]]; then
+  POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+fi
+if [[ -z "$COORDINATOR_API_TOKEN" ]]; then
+  COORDINATOR_API_TOKEN="$(openssl rand -hex 64)"
+fi
 
 # Create TLS directory if needed
 mkdir -p "$TLS_DIR"

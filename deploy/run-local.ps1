@@ -30,6 +30,30 @@ function Test-CommandExists {
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Get-ExistingEnvValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    $prefix = "$Key="
+    foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
+        if ($line.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            $value = $line.Substring($prefix.Length).Trim()
+            if ($value.Length -gt 0) {
+                return $value
+            }
+            return $null
+        }
+    }
+    return $null
+}
+
 if (-not (Test-CommandExists 'openssl')) {
     throw "openssl was not found in PATH. Install OpenSSL for Windows and ensure 'openssl' is available from PowerShell."
 }
@@ -63,9 +87,12 @@ If Docker Desktop is already open, restart it and verify:
 "@
 }
 
-# Generate random values
-$PostgresPassword    = Get-RandomHex -ByteCount 32   # 64 hex chars
-$CoordinatorApiToken = Get-RandomHex -ByteCount 64   # 128 hex chars
+# Reuse secrets from existing .env so persisted Postgres volumes remain valid.
+$ExistingPostgresPassword = Get-ExistingEnvValue -Path $EnvFile -Key 'POSTGRES_PASSWORD'
+$ExistingCoordinatorToken = Get-ExistingEnvValue -Path $EnvFile -Key 'COORDINATOR_API_TOKEN'
+
+$PostgresPassword = if ($ExistingPostgresPassword) { $ExistingPostgresPassword } else { Get-RandomHex -ByteCount 32 }
+$CoordinatorApiToken = if ($ExistingCoordinatorToken) { $ExistingCoordinatorToken } else { Get-RandomHex -ByteCount 64 }
 
 # Create TLS directory if needed
 if (-not (Test-Path -LiteralPath $TlsDir)) {
