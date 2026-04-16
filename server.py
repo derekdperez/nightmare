@@ -561,13 +561,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if all_domains_html is not None:
                 self._serve_static_file(all_domains_html)
             else:
-                self._write_text(self._render_dashboard_html(), content_type="text/html; charset=utf-8")
+                self._write_text(render_dashboard_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/dashboard":
-            self._write_text(self._render_dashboard_html(), content_type="text/html; charset=utf-8")
+            self._write_text(render_dashboard_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/workers":
-            self._write_text(self._render_workers_html(), content_type="text/html; charset=utf-8")
+            self._write_text(render_workers_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root)
@@ -990,9 +990,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if len(out) >= 8:
                     return out
         return out
-
-def _render_dashboard_html(self) -> str:
-    return render_dashboard_html()
 
 def _render_workers_html(self) -> str:
     return render_workers_html()
