@@ -386,3 +386,18 @@ ightmare_coord_token and auto-populates token input on load.
   - Kept row cap at 20 and replaced raw SELECT * payloads with preview-safe projections (no full ytea transfer; text/json fields truncated for display).
   - Added response metadata (ow_count_is_estimate, max_text_preview_chars) and UI label for estimated row counts.
   - Updated DB-status unit test fixture to assert new query/model behavior.
+
+- Modularized spider URL policy and fuzzing core logic into reusable modules while preserving existing public function names in main scripts:
+  - Added 
+ightmare_shared/value_types.py with shared value-type inference (infer_observed_value_type) used by both Nightmare and Fozzy.
+  - Added 
+ightmare_app/spider_url_policy.py for URL normalization, crawl/AI/source-of-truth filtering, suffix matching, and AI URL condensation helpers.
+  - Added ozzy_app/fuzz_core.py for ParameterMeta/RouteGroup models and request-construction helpers.
+  - Updated 
+ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers, reducing god-file surface without changing call sites.
+  - Added module-level regression tests in 	ests/test_modular_spider_fuzz_core.py.
+- Fixed coordinator API auth fallback for browser UI pages:
+  - `server.py` now accepts `nightmare_coord_token` from `Cookie` header in `_is_coordinator_authorized()` in addition to `Authorization: Bearer` and `X-Coordinator-Token`.
+  - Added `_read_cookie()` helper for robust cookie parsing and URL-decoding.
+  - Added `tests/test_server_auth_cookie.py` covering bearer, X-token, cookie token, URL-encoded cookie token, and rejection cases.
+- Why: operators reported `/database` returning 401 despite valid token usage; cookie fallback hardens auth in environments where auth headers are dropped or not persisted.

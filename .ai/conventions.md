@@ -99,3 +99,15 @@
 ightmare_coord_token cookie (30-day TTL, SameSite=Strict, Path=/, Secure on HTTPS) and auto-hydrate the token input on page load.
 
 - Database-status endpoint convention: avoid full-table/full-cell payloads in operator APIs. Use small preview-select projections, never inline full ytea values, cap row count per table (20), and prefer catalog-estimated row counts for responsiveness on live coordinator databases.
+
+- Refactor convention for large runtime scripts (
+ightmare.py, ozzy.py): extract pure/policy logic into dedicated modules (
+ightmare_app/*, ozzy_app/*, 
+ightmare_shared/*) and keep thin compatibility wrappers in entrypoint scripts to avoid broad call-site churn.
+- Reuse convention: value-type inference for URL/form/query analysis should be shared via 
+ightmare_shared/value_types.py rather than duplicated in multiple executables.
+- Coordinator API auth convention: `_is_coordinator_authorized()` should accept coordinator token from all browser-safe channels used by operator pages:
+  - `Authorization: Bearer <token>`
+  - `X-Coordinator-Token: <token>`
+  - `Cookie: nightmare_coord_token=<token>` (URL-decoded)
+- Reason: database/worker pages persist token in cookie and some deployments can lose/strip auth headers; cookie fallback keeps operator APIs usable.

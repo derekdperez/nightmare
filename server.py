@@ -432,7 +432,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             candidate = authz[7:].strip()
             if candidate == token:
                 return True
-        return x_token == token
+        if x_token == token:
+            return True
+        cookie_token = self._read_cookie("nightmare_coord_token").strip()
+        return cookie_token == token
+
+    def _read_cookie(self, name: str) -> str:
+        cookie_header = str(self.headers.get("Cookie", "") or "")
+        if not cookie_header:
+            return ""
+        for raw_part in cookie_header.split(";"):
+            part = raw_part.strip()
+            if not part or "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            if key.strip() != name:
+                continue
+            decoded = unquote(value.strip())
+            if len(decoded) >= 2 and decoded[0] == decoded[-1] == '"':
+                return decoded[1:-1]
+            return decoded
+        return ""
 
     def _is_master_report_regen_authorized(self) -> bool:
         expected = self.master_report_regen_token

@@ -41,14 +41,30 @@ import time
 import urllib.parse
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Callable
 
+from fozzy_app.fuzz_core import (
+    ParameterMeta,
+    RouteGroup,
+    baseline_seed_value_for as _core_baseline_seed_value_for,
+    build_fuzz_http_request as _core_build_fuzz_http_request,
+    build_placeholder_request_summary as _core_build_placeholder_request_summary,
+    build_placeholder_url as _core_build_placeholder_url,
+    build_url as _core_build_url,
+    build_urlencoded_form_body as _core_build_urlencoded_form_body,
+    generic_value_for as _core_generic_value_for,
+    merge_data_type as _core_merge_data_type,
+    merge_request_headers as _core_merge_request_headers,
+    request_body_fingerprint as _core_request_body_fingerprint,
+    route_group_all_param_names as _core_route_group_all_param_names,
+    route_group_param_meta as _core_route_group_param_meta,
+)
 from http_client import request_capped
 from http_request_queue import HttpRequestQueue
+from nightmare_shared.value_types import infer_observed_value_type
 
 # Semaphore / RLock misuse or runtime issues should warn, not abort a long fuzz run.
 _FOZZY_LOCK_ERRORS: tuple[type[BaseException], ...] = (RuntimeError, ValueError, AttributeError)
@@ -494,30 +510,6 @@ def _resume_get(
     return _fozzy_with_rlock(lock, "resume read lock", lambda: resume.get(key))
 
 
-@dataclass
-class ParameterMeta:
-    name: str
-    data_type: str = "string"
-    observed_values: set[str] = field(default_factory=set)
-
-
-@dataclass
-class RouteGroup:
-    host: str
-    path: str
-    scheme: str
-    #: GET, POST, etc. GET may still carry a request body for fuzzing (non-standard but supported).
-    http_method: str = "GET"
-    observed_param_sets: set[frozenset[str]] = field(default_factory=set)
-    params: dict[str, ParameterMeta] = field(default_factory=dict)
-    body_params: dict[str, ParameterMeta] = field(default_factory=dict)
-    observed_body_param_sets: set[frozenset[str]] = field(default_factory=set)
-    #: Query ∪ body keys observed together (drives permutation generation).
-    observed_combined_sets: set[frozenset[str]] = field(default_factory=set)
-    extra_request_headers: dict[str, str] = field(default_factory=dict)
-    body_content_type: str | None = None
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -752,51 +744,12 @@ def build_effective_fozzy_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def merge_data_type(existing: str, new_type: str) -> str:
-    if not existing:
-        return new_type or "string"
-    if not new_type:
-        return existing
-    existing = existing.strip().lower()
-    new_type = new_type.strip().lower()
-    if existing == new_type:
-        return existing
-    if existing == "string" or new_type == "string":
-        return "string"
-    if {"float", "int"} == {existing, new_type}:
-        return "float"
     priority = active_fozzy_config().get("type_priority") or default_fozzy_config()["type_priority"]
-    for candidate in priority:
-        if candidate in {existing, new_type}:
-            return candidate
-    return "string"
+    return _core_merge_data_type(existing, new_type, type_priority=priority)
 
 
 def infer_value_type(value: str) -> str:
-    text = (value or "").strip()
-    if text == "":
-        return "empty"
-    lowered = text.lower()
-    if lowered in {"true", "false"}:
-        return "bool"
-    if re.fullmatch(r"[+-]?\d+", text):
-        return "int"
-    if re.fullmatch(r"[+-]?\d+\.\d+", text):
-        return "float"
-    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", text):
-        return "uuid"
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-        return "date"
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T[^ ]+", text):
-        return "datetime"
-    if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text):
-        return "email"
-    if re.fullmatch(r"https?://\S+", text, flags=re.IGNORECASE):
-        return "url"
-    if re.fullmatch(r"[0-9a-fA-F]+", text) and len(text) % 2 == 0:
-        return "hex"
-    if re.fullmatch(r"[A-Za-z0-9_-]{8,}={0,2}", text):
-        return "token"
-    return "string"
+    return infer_observed_value_type(value)
 
 
 def _merge_parameter_meta_dict(
@@ -1013,14 +966,12 @@ def merge_route_groups_lists(primary: list[RouteGroup], extra: list[RouteGroup])
 
 def generic_value_for(meta: ParameterMeta) -> str:
     table = active_fozzy_config().get("default_generic_by_type") or {}
-    return str(table.get(meta.data_type, "test"))
+    return _core_generic_value_for(meta, default_generic_by_type=table)
 
 
 def baseline_seed_value_for(meta: ParameterMeta) -> str:
-    observed = sorted({str(value) for value in meta.observed_values if str(value) != ""}, key=lambda item: (len(item), item))
-    if observed:
-        return observed[0]
-    return generic_value_for(meta)
+    table = active_fozzy_config().get("default_generic_by_type") or {}
+    return _core_baseline_seed_value_for(meta, default_generic_by_type=table)
 
 
 def load_quick_fuzz_values(quick_fuzz_path: str) -> list[str]:
@@ -1043,100 +994,47 @@ def load_quick_fuzz_values(quick_fuzz_path: str) -> list[str]:
 
 
 def build_url(scheme: str, host: str, path: str, values: dict[str, str]) -> str:
-    query = urllib.parse.urlencode([(name, values[name]) for name in sorted(values.keys())], doseq=True)
-    return urllib.parse.urlunparse((scheme, host, path, "", query, ""))
+    return _core_build_url(scheme, host, path, values)
 
 
 def build_placeholder_url(scheme: str, host: str, path: str, params: list[ParameterMeta]) -> str:
-    counters: dict[str, int] = defaultdict(int)
-    pairs: list[str] = []
-    for param in sorted(params, key=lambda item: item.name):
-        dtype = param.data_type or "string"
-        counters[dtype] += 1
-        placeholder = f"{{{dtype}{counters[dtype]}}}"
-        key_encoded = urllib.parse.quote_plus(param.name, safe="[]")
-        pairs.append(f"{key_encoded}={placeholder}")
-    query = "&".join(pairs)
-    return urllib.parse.urlunparse((scheme, host, path, "", query, ""))
+    return _core_build_placeholder_url(scheme, host, path, params)
 
 
 def route_group_param_meta(group: RouteGroup, name: str) -> ParameterMeta:
-    if name in group.params:
-        return group.params[name]
-    if name in group.body_params:
-        return group.body_params[name]
-    raise KeyError(name)
+    return _core_route_group_param_meta(group, name)
 
 
 def route_group_all_param_names(group: RouteGroup) -> set[str]:
-    return set(group.params.keys()) | set(group.body_params.keys())
+    return _core_route_group_all_param_names(group)
 
 
 def _merge_fozzy_headers(group: RouteGroup) -> dict[str, str]:
     base = active_fozzy_config().get("request_headers") or {}
-    out = {str(k): str(v) for k, v in base.items() if str(k).strip()}
-    for k, v in group.extra_request_headers.items():
-        key = str(k).strip()
-        if key:
-            out[key] = str(v)
-    return out
+    return _core_merge_request_headers(base, group.extra_request_headers)
 
 
 def build_urlencoded_form_body(values: dict[str, str]) -> bytes:
-    pairs = [(name, values[name]) for name in sorted(values.keys())]
-    return urllib.parse.urlencode(pairs, doseq=True).encode("utf-8")
+    return _core_build_urlencoded_form_body(values)
 
 
 def build_fuzz_http_request(
     group: RouteGroup,
     values: dict[str, str],
 ) -> tuple[str, str, dict[str, str], bytes]:
-    """Return (method, url, headers, body_bytes)."""
-    qvals = {k: values[k] for k in group.params if k in values}
-    bvals = {k: values[k] for k in group.body_params if k in values}
-    url = build_url(group.scheme, group.host, group.path, qvals)
-    headers = _merge_fozzy_headers(group)
-    body = b""
-    if bvals:
-        ct = (group.body_content_type or "application/x-www-form-urlencoded").strip().lower()
-        if "json" in ct:
-            headers.setdefault("Content-Type", group.body_content_type or "application/json")
-            body = json.dumps({k: bvals[k] for k in sorted(bvals.keys())}, ensure_ascii=False).encode("utf-8")
-        else:
-            headers.setdefault("Content-Type", group.body_content_type or "application/x-www-form-urlencoded")
-            body = build_urlencoded_form_body(bvals)
-    method = (group.http_method or "GET").strip().upper() or "GET"
-    return method, url, headers, body
+    return _core_build_fuzz_http_request(
+        group,
+        values,
+        base_headers=active_fozzy_config().get("request_headers") or {},
+    )
 
 
 def _request_body_fingerprint(body: bytes | None) -> str:
-    if not body:
-        return ""
-    return hashlib.sha256(body).hexdigest()[:16]
+    return _core_request_body_fingerprint(body)
 
 
 def build_placeholder_request_summary(group: RouteGroup, permutation: tuple[str, ...]) -> str:
-    """Human-readable plan line including method and body placeholders when applicable."""
-    qnames = [n for n in permutation if n in group.params]
-    bnames = [n for n in permutation if n in group.body_params]
-    q_meta = [group.params[n] for n in sorted(qnames)]
-    url_ph = build_placeholder_url(group.scheme, group.host, group.path, q_meta) if q_meta else urllib.parse.urlunparse(
-        (group.scheme, group.host, group.path, "", "", "")
-    )
-    method = (group.http_method or "GET").upper()
-    if not bnames:
-        return f"{method} {url_ph}"
-    b_meta = [route_group_param_meta(group, n) for n in sorted(bnames)]
-    counters: dict[str, int] = defaultdict(int)
-    body_parts: list[str] = []
-    for param in sorted(b_meta, key=lambda item: item.name):
-        dtype = param.data_type or "string"
-        counters[dtype] += 1
-        ph = f"{{{dtype}{counters[dtype]}}}"
-        key_enc = urllib.parse.quote_plus(param.name, safe="[]")
-        body_parts.append(f"{key_enc}={ph}")
-    body_s = "&".join(body_parts)
-    return f"{method} {url_ph}  body({group.body_content_type or 'application/x-www-form-urlencoded'}): {body_s}"
+    return _core_build_placeholder_request_summary(group, permutation)
 
 
 def _fozzy_queue_enabled() -> bool:
