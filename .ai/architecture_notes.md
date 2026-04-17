@@ -75,3 +75,8 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - Presence heartbeats now carry state hints from worker command polling, enabling status reporting beyond lease-derived running tasks.
 - Dashboard data boundary update:
   - `collect_dashboard_data()` now supports coordinator-store-backed domain enrichment so operator dashboard remains informative on central-only hosts with sparse local artifacts.
+
+- Extractor artifact browsing boundary:
+  - `server_app/store.py` now provides extractor-domain metadata (`list_extractor_match_domains`) while `server.py` owns zip extraction orchestration and HTTP responses.
+  - Parsed extractor zip rows/files are cached in-process (`_ExtractorMatchesCache`) keyed by `root_domain + content_sha256` with TTL + bounded domain count.
+  - UI page `/extractor-matches` consumes these APIs and can query one domain or all domains without requiring pre-expanded filesystem artifacts.

@@ -463,3 +463,17 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Dashboard `/api/summary` now merges coordinator crawl-progress data, so domains/URL counts still populate even when local output folders are empty on central nodes.
   - Crawl progress defaults increased to 2000 in API/page/client.
 - Validation: `python -m pytest -q` -> 88 passed.
+
+- Added extractor artifact exploration surface to the coordinator web app:
+  - New page route: `/extractor-matches`.
+  - New template: `templates/extractor_matches.html.j2` with domain dropdown (`domain + match count`), search, sortable columns, and file view/download links.
+  - New APIs in `server.py`:
+    - `GET /api/coord/extractor-matches/domains`
+    - `GET /api/coord/extractor-matches`
+    - `GET /api/coord/extractor-matches/download`
+    - `GET /api/coord/extractor-matches/file`
+  - Added in-memory TTL/LRU-style cache for parsed extractor zip content (`_ExtractorMatchesCache`) to avoid repeated unzip/JSON parse overhead.
+  - Added store query `CoordinatorStore.list_extractor_match_domains(...)` to list domains with extractor match artifacts and summary-derived counts.
+  - Updated cross-page nav links to include Extractor Matches from dashboard/workers/database pages.
+  - Added regression coverage for template/module decomposition and extractor-domain listing behavior.
+- Validation: `pytest -q` -> 91 passed.

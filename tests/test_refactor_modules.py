@@ -5,6 +5,7 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
+    render_extractor_matches_html,
     render_workers_html,
 )
 
@@ -77,4 +78,17 @@ def test_crawl_progress_template_renders():
     assert 'href="/workers"' in html
     assert 'href="/database"' in html
     assert "/api/coord/crawl-progress" in html
+    assert "nightmare_coord_token" in html
+
+
+def test_extractor_matches_template_renders():
+    html = render_extractor_matches_html()
+    assert "<!doctype html>" in html.lower()
+    assert "Extractor Matches" in html
+    assert 'href="/dashboard"' in html
+    assert 'href="/workers"' in html
+    assert 'href="/database"' in html
+    assert 'href="/crawl-progress"' in html
+    assert "/api/coord/extractor-matches/domains" in html
+    assert "/api/coord/extractor-matches" in html
     assert "nightmare_coord_token" in html

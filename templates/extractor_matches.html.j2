@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Extractor Matches</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 8px; }
+    .meta { margin-bottom: 12px; color: #475569; font-size: 13px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0 14px; flex-wrap: wrap; }
+    input, select { padding: 6px 8px; border: 1px solid #94a3b8; border-radius: 6px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: #fff; }
+    .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 14px; }
+    .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+    .k { font-size: 12px; color: #64748b; }
+    .v { font-size: 20px; font-weight: 700; margin-top: 4px; word-break: break-word; }
+    .muted { color: #64748b; }
+    .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #cbd5e1; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; text-align: left; vertical-align: top; }
+    th { background: #e2e8f0; cursor: pointer; user-select: none; }
+    td pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; }
+    .empty { padding: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Extractor Matches</h1>
+  <div class="meta">FTP-style artifact browsing for extractor match zips in coordinator storage. <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a></div>
+
+  <div class="toolbar">
+    <input id="token" type="password" placeholder="Coordinator token">
+    <select id="domainSelect" style="min-width: 320px;"></select>
+    <input id="searchText" type="text" placeholder="Search matches (supports all domains)">
+    <input id="limit" type="number" min="1" max="200000" value="10000" title="Max rows to load">
+    <button class="primary" onclick="refreshDomainsAndMatches()">Refresh</button>
+    <a id="downloadZip" href="#" target="_blank" rel="noopener noreferrer"><button type="button">Download Zip</button></a>
+    <span id="msg" class="muted"></span>
+  </div>
+
+  <div id="cards" class="cards"></div>
+
+  <div class="panel">
+    <strong>Artifact Files</strong>
+    <div id="filesBlock" class="empty muted">Select a domain to list files from its extractor zip.</div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th data-key="root_domain">Domain</th>
+        <th data-key="filter_name">Rule</th>
+        <th data-key="importance_score">Score</th>
+        <th data-key="scope">Scope</th>
+        <th data-key="response_side">Side</th>
+        <th data-key="source_http_status">HTTP</th>
+        <th data-key="url">URL</th>
+        <th data-key="source_request_url">Source URL</th>
+        <th data-key="match_preview">Match Preview</th>
+        <th data-key="match_file">Match File</th>
+      </tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="10">Loading...</td></tr></tbody>
+  </table>
+
+  <script>
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    let currentRows = [];
+    let sortKey = "importance_score";
+    let sortDir = "desc";
+
+    function readCookie(name) {
+      const needle = `${name}=`;
+      const cookies = String(document.cookie || "").split(";");
+      for (const part of cookies) {
+        const item = part.trim();
+        if (item.startsWith(needle)) return decodeURIComponent(item.slice(needle.length));
+      }
+      return "";
+    }
+    function writeCookie(name, value, days) {
+      const maxAge = Math.max(1, Number(days || 30)) * 24 * 60 * 60;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}`;
+    }
+    function deleteCookie(name) {
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+    }
+    function esc(v) {
+      return String(v ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+      }[ch]));
+    }
+    function persistTokenCookie() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      else deleteCookie(TOKEN_COOKIE_NAME);
+    }
+    function hydrateTokenFromCookie() {
+      const token = readCookie(TOKEN_COOKIE_NAME);
+      if (token) document.getElementById("token").value = token;
+    }
+    function authHeaders() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    async function apiGet(path) {
+      const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
+      if (!rsp.ok) throw new Error(await rsp.text());
+      const ct = String(rsp.headers.get("content-type") || "");
+      if (ct.includes("application/json")) return rsp.json();
+      return rsp.text();
+    }
+    function selectedDomain() {
+      return String(document.getElementById("domainSelect").value || "__all__");
+    }
+    function updateDownloadLink() {
+      const domain = selectedDomain();
+      const link = document.getElementById("downloadZip");
+      if (!domain || domain === "__all__") {
+        link.style.pointerEvents = "none";
+        link.style.opacity = "0.5";
+        link.href = "#";
+        return;
+      }
+      const href = `/api/coord/extractor-matches/download?root_domain=${encodeURIComponent(domain)}`;
+      link.href = href;
+      link.style.pointerEvents = "auto";
+      link.style.opacity = "1";
+    }
+    function renderCards(payload) {
+      const cards = [
+        ["Domain", payload.root_domain || "__all__"],
+        ["Rows", payload.rows_returned || 0],
+        ["Total", payload.total_rows || 0],
+        ["Truncated", payload.rows_limited ? "yes" : "no"],
+        ["Cache Hits", (payload.cache || {}).hits || 0],
+        ["Cache Misses", (payload.cache || {}).misses || 0],
+      ];
+      document.getElementById("cards").innerHTML = cards.map(([k,v]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
+    }
+    function sortRows(rows) {
+      const factor = sortDir === "asc" ? 1 : -1;
+      return [...rows].sort((a, b) => {
+        const av = a?.[sortKey];
+        const bv = b?.[sortKey];
+        const aNum = Number(av);
+        const bNum = Number(bv);
+        if (Number.isFinite(aNum) && Number.isFinite(bNum)) return (aNum - bNum) * factor;
+        return String(av ?? "").localeCompare(String(bv ?? "")) * factor;
+      });
+    }
+    function renderRows(rows) {
+      if (!rows.length) {
+        document.getElementById("rows").innerHTML = "<tr><td colspan='10'>No matches found.</td></tr>";
+        return;
+      }
+      const sorted = sortRows(rows);
+      document.getElementById("rows").innerHTML = sorted.map((r) => {
+        return `<tr>
+          <td>${esc(r.root_domain || "")}</td>
+          <td>${esc(r.filter_name || "")}</td>
+          <td>${esc(r.importance_score || 0)}</td>
+          <td>${esc(r.scope || "")}</td>
+          <td>${esc(r.response_side || "")}</td>
+          <td>${esc(r.source_http_status || 0)}</td>
+          <td><a href="${esc(r.url || "#")}" target="_blank" rel="noopener noreferrer">${esc(r.url || "")}</a></td>
+          <td>${esc(r.source_request_url || "")}</td>
+          <td><pre>${esc(r.match_preview || "")}</pre></td>
+          <td>${esc(r.match_file || "")}</td>
+        </tr>`;
+      }).join("");
+    }
+    function renderFiles(filesByDomain) {
+      const domain = selectedDomain();
+      if (!domain || domain === "__all__") {
+        document.getElementById("filesBlock").innerHTML = "<span class='muted'>Select one domain to list files from its extractor artifact.</span>";
+        return;
+      }
+      const files = Array.isArray(filesByDomain?.[domain]) ? filesByDomain[domain] : [];
+      if (!files.length) {
+        document.getElementById("filesBlock").innerHTML = "<span class='muted'>No file list loaded yet for this domain.</span>";
+        return;
+      }
+      document.getElementById("filesBlock").innerHTML = `
+        <table>
+          <thead><tr><th>Path</th><th>Size</th><th>View</th><th>Download</th></tr></thead>
+          <tbody>
+            ${files.map((f) => {
+              const p = String(f.path || "");
+              const viewHref = `/api/coord/extractor-matches/file?root_domain=${encodeURIComponent(domain)}&path=${encodeURIComponent(p)}`;
+              const dlHref = `${viewHref}&download=1`;
+              return `<tr>
+                <td>${esc(p)}</td>
+                <td>${esc(f.size || 0)}</td>
+                <td><a href="${viewHref}" target="_blank" rel="noopener noreferrer">View</a></td>
+                <td><a href="${dlHref}" target="_blank" rel="noopener noreferrer">Download</a></td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>`;
+    }
+    async function loadDomains() {
+      const payload = await apiGet("/api/coord/extractor-matches/domains?limit=20000");
+      const domains = Array.isArray(payload.domains) ? payload.domains : [];
+      const totalMatches = domains.reduce((sum, d) => sum + Number(d.match_count || 0), 0);
+      const select = document.getElementById("domainSelect");
+      const current = String(select.value || "__all__");
+      select.innerHTML = `<option value="__all__">All domains (${esc(domains.length)} domains, ${esc(totalMatches)} matches)</option>` +
+        domains.map((d) => `<option value="${esc(d.root_domain)}">${esc(d.root_domain)} (${esc(d.match_count || 0)})</option>`).join("");
+      if ([...select.options].some((o) => o.value === current)) select.value = current;
+      updateDownloadLink();
+      return domains.length;
+    }
+    async function loadMatches() {
+      const msg = document.getElementById("msg");
+      msg.textContent = "Loading...";
+      const domain = selectedDomain();
+      const q = String(document.getElementById("searchText").value || "").trim();
+      const limit = Math.max(1, Number(document.getElementById("limit").value || 10000));
+      let path = `/api/coord/extractor-matches?limit=${encodeURIComponent(limit)}`;
+      if (domain && domain !== "__all__") path += `&root_domain=${encodeURIComponent(domain)}`;
+      if (q) path += `&q=${encodeURIComponent(q)}`;
+      try {
+        const payload = await apiGet(path);
+        currentRows = Array.isArray(payload.rows) ? payload.rows : [];
+        renderCards(payload);
+        renderRows(currentRows);
+        renderFiles(payload.files_by_domain || {});
+        msg.textContent = `Loaded ${payload.rows_returned || 0} row(s).`;
+      } catch (e) {
+        document.getElementById("rows").innerHTML = `<tr><td colspan="10">Failed to load extractor matches: ${esc(e.message)}</td></tr>`;
+        document.getElementById("filesBlock").innerHTML = "<span class='muted'>Load failed.</span>";
+        msg.textContent = "Load failed.";
+      }
+    }
+    async function refreshDomainsAndMatches() {
+      try { await loadDomains(); } catch (_) {}
+      await loadMatches();
+    }
+
+    hydrateTokenFromCookie();
+    document.getElementById("token").addEventListener("change", persistTokenCookie);
+    document.getElementById("token").addEventListener("blur", persistTokenCookie);
+    document.getElementById("domainSelect").addEventListener("change", () => { updateDownloadLink(); loadMatches(); });
+    document.getElementById("searchText").addEventListener("change", loadMatches);
+    document.getElementById("limit").addEventListener("change", loadMatches);
+    document.querySelectorAll("th[data-key]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = String(th.getAttribute("data-key") || "");
+        if (!key) return;
+        if (sortKey === key) sortDir = sortDir === "asc" ? "desc" : "asc";
+        else { sortKey = key; sortDir = "asc"; }
+        renderRows(currentRows);
+      });
+    });
+    refreshDomainsAndMatches();
+  </script>
+</body>
+</html>

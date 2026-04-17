@@ -20,3 +20,7 @@ def render_database_html() -> str:
 
 def render_crawl_progress_html() -> str:
     return render_template("crawl_progress.html.j2")
+
+
+def render_extractor_matches_html() -> str:
+    return render_template("extractor_matches.html.j2")

@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import base64
+import io
+import zipfile
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -94,6 +96,36 @@ def _pick_recent_order_column(columns: list[tuple[str, str, str]]) -> Optional[s
     for candidate in preferred:
         if candidate in lowered:
             return lowered[candidate]
+    return None
+
+
+def _parse_summary_match_count(content: bytes, content_encoding: str) -> Optional[int]:
+    data = bytes(content or b"")
+    if not data:
+        return None
+    encoding = str(content_encoding or "identity").strip().lower()
+    try:
+        if encoding == "zip":
+            with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+                names = [name for name in zf.namelist() if name.lower().endswith(".json")]
+                if not names:
+                    return None
+                payload = zf.read(names[0])
+        else:
+            payload = data
+        parsed = json.loads(payload.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if "match_count" in parsed:
+        try:
+            return max(0, int(parsed.get("match_count", 0) or 0))
+        except Exception:
+            return None
+    rows = parsed.get("rows")
+    if isinstance(rows, list):
+        return len(rows)
     return None
 
 
@@ -1552,6 +1584,48 @@ ORDER BY artifact_type ASC;
                     "content_sha256": row[3],
                     "content_size_bytes": int(row[4] or 0),
                     "updated_at_utc": row[5].isoformat() if row[5] else None,
+                }
+            )
+        return out
+
+    def list_extractor_match_domains(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(20000, int(limit or 5000)))
+        sql = """
+SELECT
+  m.root_domain,
+  m.source_worker,
+  m.content_sha256,
+  m.content_size_bytes,
+  m.updated_at_utc,
+  s.content,
+  s.content_encoding,
+  s.updated_at_utc
+FROM coordinator_artifacts m
+LEFT JOIN coordinator_artifacts s
+  ON s.root_domain = m.root_domain
+ AND s.artifact_type = 'extractor_summary_json'
+WHERE m.artifact_type = 'extractor_matches_zip'
+ORDER BY m.updated_at_utc DESC NULLS LAST, m.root_domain ASC
+LIMIT %s;
+"""
+        out: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
+            conn.commit()
+        for row in rows:
+            summary_bytes = bytes(row[5] or b"")
+            summary_encoding = str(row[6] or "identity")
+            out.append(
+                {
+                    "root_domain": str(row[0] or "").strip().lower(),
+                    "source_worker": str(row[1] or ""),
+                    "content_sha256": str(row[2] or ""),
+                    "content_size_bytes": int(row[3] or 0),
+                    "updated_at_utc": row[4].isoformat() if row[4] else None,
+                    "summary_match_count": _parse_summary_match_count(summary_bytes, summary_encoding),
+                    "summary_updated_at_utc": row[7].isoformat() if row[7] else None,
                 }
             )
         return out

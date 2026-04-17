@@ -144,3 +144,9 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Worker start/pause/stop commands should be consumed through explicit claim/complete command endpoints and should supersede stale queued commands per worker.
 - Dashboard convention:
   - On central coordinator deployments, dashboard domain lists should merge coordinator DB progress data instead of relying only on local output folder discovery.
+
+- Extractor matches UI/API convention:
+  - Page rendering remains template-based (`templates/*.j2` via `reporting/server_pages.py`), with route wiring in `server.py`.
+  - Domain lists for extractor artifacts should come from store metadata queries first (summary counts), with expensive zip scans only as bounded fallback.
+  - Large zip artifacts should be parsed on demand and cached by artifact content hash to prevent repeated unzip/JSON parse work.
+  - File download/view endpoints should read directly from DB artifact zip content and avoid writing temporary files to disk.

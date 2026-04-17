@@ -29,6 +29,7 @@ import argparse
 import base64
 import glob
 import html
+import io
 import json
 import mimetypes
 import os
@@ -38,6 +39,8 @@ import subprocess
 import sys
 import time
 import threading
+import zipfile
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +53,7 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
+    render_extractor_matches_html,
     render_workers_html,
 )
 from server_app.store import CoordinatorStore
@@ -62,6 +66,9 @@ DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "server.json"
 MAX_LOG_TAIL_BYTES = 64 * 1024
 DEFAULT_COORDINATOR_LEASE_SECONDS = 120
 RESET_COORDINATOR_CONFIRM = "RESET_COORDINATOR_DATA"
+DEFAULT_EXTRACTOR_MATCH_LIMIT = 10000
+MAX_EXTRACTOR_CACHE_DOMAINS = 64
+EXTRACTOR_CACHE_TTL_SECONDS = 900
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -373,6 +380,157 @@ def collect_dashboard_data(output_root: Path, coordinator_store: CoordinatorStor
     }
 
 
+class _ExtractorMatchesCache:
+    def __init__(self, *, max_domains: int = MAX_EXTRACTOR_CACHE_DOMAINS, ttl_seconds: int = EXTRACTOR_CACHE_TTL_SECONDS):
+        self._max_domains = max(8, int(max_domains or MAX_EXTRACTOR_CACHE_DOMAINS))
+        self._ttl_seconds = max(60, int(ttl_seconds or EXTRACTOR_CACHE_TTL_SECONDS))
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def get(self, root_domain: str, content_sha256: str) -> Optional[dict[str, Any]]:
+        key = str(root_domain or "").strip().lower()
+        sha = str(content_sha256 or "").strip().lower()
+        now = time.time()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            if str(entry.get("content_sha256", "")).strip().lower() != sha:
+                self._entries.pop(key, None)
+                return None
+            loaded_at = float(entry.get("loaded_at_epoch", 0.0) or 0.0)
+            if now - loaded_at > self._ttl_seconds:
+                self._entries.pop(key, None)
+                return None
+            self._entries.move_to_end(key)
+            return entry
+
+    def set(
+        self,
+        root_domain: str,
+        content_sha256: str,
+        *,
+        updated_at_utc: Optional[str],
+        match_count: int,
+        rows: list[dict[str, Any]],
+        files: list[dict[str, Any]],
+    ) -> None:
+        key = str(root_domain or "").strip().lower()
+        if not key:
+            return
+        entry = {
+            "root_domain": key,
+            "content_sha256": str(content_sha256 or "").strip().lower(),
+            "updated_at_utc": str(updated_at_utc or "") or None,
+            "match_count": int(match_count or 0),
+            "rows": rows,
+            "files": files,
+            "loaded_at_epoch": time.time(),
+        }
+        with self._lock:
+            self._entries[key] = entry
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_domains:
+                self._entries.popitem(last=False)
+
+    def get_match_count(self, root_domain: str, content_sha256: str) -> Optional[int]:
+        entry = self.get(root_domain, content_sha256)
+        if entry is None:
+            return None
+        try:
+            return int(entry.get("match_count", 0) or 0)
+        except Exception:
+            return None
+
+
+def _normalize_zip_member_path(raw: str) -> str:
+    text = str(raw or "").replace("\\", "/").strip().lstrip("/")
+    if not text or text.startswith("../") or "/../" in text:
+        return ""
+    return text
+
+
+def _to_preview_text(value: Any, *, max_len: int = 220) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+def _count_matches_in_zip_bytes(data: bytes) -> int:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+            total = 0
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                name = _normalize_zip_member_path(info.filename).lower()
+                if not name.endswith(".json"):
+                    continue
+                if name.split("/")[-1].startswith("m_"):
+                    total += 1
+            return total
+    except Exception:
+        return 0
+
+
+def _load_extractor_match_rows_from_zip(
+    *,
+    root_domain: str,
+    data: bytes,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+        infos = sorted(zf.infolist(), key=lambda item: item.filename.lower())
+        for info in infos:
+            if info.is_dir():
+                continue
+            member_path = _normalize_zip_member_path(info.filename)
+            if not member_path:
+                continue
+            files.append(
+                {
+                    "path": member_path,
+                    "size": int(info.file_size or 0),
+                    "compressed_size": int(info.compress_size or 0),
+                }
+            )
+            if not member_path.lower().endswith(".json"):
+                continue
+            name = member_path.split("/")[-1].lower()
+            if not name.startswith("m_"):
+                continue
+            try:
+                payload = zf.read(info)
+                parsed = json.loads(payload.decode("utf-8", errors="replace"))
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            matched_text = str(parsed.get("matched_text", "") or "")
+            rows.append(
+                {
+                    "root_domain": root_domain,
+                    "match_file": member_path,
+                    "filter_name": str(parsed.get("filter_name", "") or ""),
+                    "importance_score": _safe_int(parsed.get("importance_score", 0), 0),
+                    "scope": str(parsed.get("scope", "") or ""),
+                    "response_side": str(parsed.get("response_side", "") or ""),
+                    "regex": str(parsed.get("regex", "") or ""),
+                    "url": str(parsed.get("url", "") or ""),
+                    "source_request_url": str(parsed.get("source_request_url", "") or ""),
+                    "source_http_status": _safe_int(parsed.get("source_http_status", 0), 0),
+                    "result_type": str(parsed.get("result_type", "") or ""),
+                    "result_file": str(parsed.get("result_file", "") or ""),
+                    "matched_text": matched_text,
+                    "match_preview": _to_preview_text(matched_text),
+                    "generated_at_utc": str(parsed.get("generated_at_utc", "") or ""),
+                }
+            )
+    return rows, files
+
+
 def _is_client_disconnect_error(exc: BaseException) -> bool:
     if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
         return True
@@ -405,6 +563,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     @property
     def coordinator_store(self) -> CoordinatorStore | None:
         return getattr(self.server, "coordinator_store", None)  # type: ignore[attr-defined]
+
+    @property
+    def extractor_matches_cache(self) -> _ExtractorMatchesCache:
+        return getattr(self.server, "extractor_matches_cache")  # type: ignore[attr-defined]
 
     @property
     def coordinator_token(self) -> str:
@@ -451,6 +613,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _write_bytes(
+        self,
+        payload: bytes,
+        *,
+        status: int = 200,
+        content_type: str = "application/octet-stream",
+        download_name: Optional[str] = None,
+    ) -> None:
+        data = bytes(payload or b"")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        if download_name:
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(download_name))
+            self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _serve_static_file(self, file_path: Path) -> None:
         if not file_path.is_file():
@@ -632,6 +816,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/crawl-progress":
             self._write_text(render_crawl_progress_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/extractor-matches":
+            self._write_text(render_extractor_matches_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root, self.coordinator_store)
             self._write_json(payload)
@@ -732,6 +919,180 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "crawl progress query failed", "detail": str(exc)}, status=500)
                 return
             self._write_json(payload)
+            return
+        if path == "/api/coord/extractor-matches/domains":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or [20000])[0], 20000)
+            search_text = str((query.get("q") or [""])[0] or "").strip().lower()
+            try:
+                rows = self.coordinator_store.list_extractor_match_domains(limit=limit)
+            except Exception as exc:
+                self.log_message("list_extractor_match_domains failed: %r", exc)
+                self._write_json({"error": "extractor domain list failed", "detail": str(exc)}, status=500)
+                return
+            out: list[dict[str, Any]] = []
+            fallback_budget = 200
+            for item in rows:
+                root_domain = str(item.get("root_domain", "") or "").strip().lower()
+                if not root_domain:
+                    continue
+                if search_text and search_text not in root_domain:
+                    continue
+                content_sha256 = str(item.get("content_sha256", "") or "")
+                match_count = item.get("summary_match_count")
+                if match_count is None:
+                    cached_count = self.extractor_matches_cache.get_match_count(root_domain, content_sha256)
+                    if cached_count is not None:
+                        match_count = cached_count
+                if match_count is None and fallback_budget > 0:
+                    try:
+                        artifact = self.coordinator_store.get_artifact(root_domain, "extractor_matches_zip")
+                    except Exception:
+                        artifact = None
+                    if artifact is not None:
+                        fallback_budget -= 1
+                        match_count = _count_matches_in_zip_bytes(bytes(artifact.get("content", b"") or b""))
+                out.append(
+                    {
+                        "root_domain": root_domain,
+                        "match_count": int(match_count or 0),
+                        "content_size_bytes": int(item.get("content_size_bytes", 0) or 0),
+                        "updated_at_utc": item.get("updated_at_utc"),
+                        "source_worker": item.get("source_worker"),
+                        "cached": self.extractor_matches_cache.get_match_count(root_domain, content_sha256) is not None,
+                    }
+                )
+            self._write_json(
+                {
+                    "generated_at_utc": _iso_now(),
+                    "total_domains": len(out),
+                    "domains": out,
+                }
+            )
+            return
+        if path == "/api/coord/extractor-matches":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            search_text = str((query.get("q") or [""])[0] or "").strip().lower()
+            limit = max(1, min(200000, _safe_int((query.get("limit") or [DEFAULT_EXTRACTOR_MATCH_LIMIT])[0], DEFAULT_EXTRACTOR_MATCH_LIMIT)))
+
+            domains_to_load: list[str] = []
+            if root_domain and root_domain != "__all__":
+                domains_to_load = [root_domain]
+            else:
+                domain_rows = self.coordinator_store.list_extractor_match_domains(limit=20000)
+                domains_to_load = [str(item.get("root_domain", "")).strip().lower() for item in domain_rows if str(item.get("root_domain", "")).strip()]
+
+            all_rows: list[dict[str, Any]] = []
+            files_by_domain: dict[str, list[dict[str, Any]]] = {}
+            cache_stats = {"hits": 0, "misses": 0}
+            for domain in domains_to_load:
+                try:
+                    loaded = self._load_extractor_matches_domain(domain)
+                except Exception as exc:
+                    self.log_message("extractor matches load failed for %s: %r", domain, exc)
+                    continue
+                if loaded is None:
+                    continue
+                if loaded.get("cached"):
+                    cache_stats["hits"] += 1
+                else:
+                    cache_stats["misses"] += 1
+                rows = loaded.get("rows", [])
+                if isinstance(rows, list):
+                    all_rows.extend(rows)
+                files = loaded.get("files", [])
+                if isinstance(files, list):
+                    files_by_domain[domain] = files
+
+            if search_text:
+                all_rows = [row for row in all_rows if search_text in self._matches_row_search_text(row if isinstance(row, dict) else {})]
+            total_rows = len(all_rows)
+            rows_limited = all_rows[:limit]
+            self._write_json(
+                {
+                    "generated_at_utc": _iso_now(),
+                    "root_domain": root_domain or "__all__",
+                    "search": search_text,
+                    "total_rows": total_rows,
+                    "rows_returned": len(rows_limited),
+                    "rows_limited": total_rows > len(rows_limited),
+                    "cache": cache_stats,
+                    "rows": rows_limited,
+                    "files_by_domain": files_by_domain if root_domain and root_domain != "__all__" else {},
+                }
+            )
+            return
+        if path == "/api/coord/extractor-matches/download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            artifact = self.coordinator_store.get_artifact(root_domain, "extractor_matches_zip")
+            if artifact is None:
+                self._write_json({"error": "extractor_matches_zip not found"}, status=404)
+                return
+            self._write_bytes(
+                bytes(artifact.get("content", b"") or b""),
+                content_type="application/zip",
+                download_name=f"{root_domain}.extractor.matches.zip",
+            )
+            return
+        if path == "/api/coord/extractor-matches/file":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            member_path = _normalize_zip_member_path(str((query.get("path") or [""])[0] or ""))
+            as_download = str((query.get("download") or ["0"])[0] or "0").strip() in {"1", "true", "yes"}
+            if not root_domain or not member_path:
+                self._write_json({"error": "root_domain and path are required"}, status=400)
+                return
+            artifact = self.coordinator_store.get_artifact(root_domain, "extractor_matches_zip")
+            if artifact is None:
+                self._write_json({"error": "extractor_matches_zip not found"}, status=404)
+                return
+            data = bytes(artifact.get("content", b"") or b"")
+            try:
+                with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+                    names = {_normalize_zip_member_path(name): name for name in zf.namelist()}
+                    real_name = names.get(member_path)
+                    if not real_name:
+                        self._write_json({"error": "file not found in zip"}, status=404)
+                        return
+                    payload = zf.read(real_name)
+            except Exception as exc:
+                self._write_json({"error": "failed to read zip file", "detail": str(exc)}, status=500)
+                return
+            content_type = "application/octet-stream"
+            if member_path.lower().endswith(".json"):
+                content_type = "application/json; charset=utf-8"
+            elif member_path.lower().endswith(".txt"):
+                content_type = "text/plain; charset=utf-8"
+            self._write_bytes(
+                payload,
+                content_type=content_type,
+                download_name=(Path(member_path).name if as_download else None),
+            )
             return
         if path == "/api/coord/worker-config":
             if self.coordinator_store is None:
@@ -1130,6 +1491,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return out
         return out
 
+    def _load_extractor_matches_domain(self, root_domain: str) -> Optional[dict[str, Any]]:
+        rd = str(root_domain or "").strip().lower()
+        if not rd or self.coordinator_store is None:
+            return None
+        artifact = self.coordinator_store.get_artifact(rd, "extractor_matches_zip")
+        if artifact is None:
+            return None
+        content_sha256 = str(artifact.get("content_sha256", "") or "")
+        cached = self.extractor_matches_cache.get(rd, content_sha256)
+        if cached is not None:
+            return {
+                **cached,
+                "cached": True,
+                "updated_at_utc": artifact.get("updated_at_utc"),
+                "content_size_bytes": int(artifact.get("content_size_bytes", 0) or 0),
+            }
+        content = bytes(artifact.get("content", b"") or b"")
+        try:
+            rows, files = _load_extractor_match_rows_from_zip(root_domain=rd, data=content)
+        except Exception as exc:
+            raise RuntimeError(f"failed to parse extractor zip for {rd}: {exc}") from exc
+        self.extractor_matches_cache.set(
+            rd,
+            content_sha256,
+            updated_at_utc=str(artifact.get("updated_at_utc", "") or "") or None,
+            match_count=len(rows),
+            rows=rows,
+            files=files,
+        )
+        return {
+            "root_domain": rd,
+            "content_sha256": content_sha256,
+            "updated_at_utc": artifact.get("updated_at_utc"),
+            "content_size_bytes": int(artifact.get("content_size_bytes", 0) or 0),
+            "match_count": len(rows),
+            "rows": rows,
+            "files": files,
+            "cached": False,
+        }
+
+    @staticmethod
+    def _matches_row_search_text(row: dict[str, Any]) -> str:
+        parts = [
+            row.get("root_domain"),
+            row.get("filter_name"),
+            row.get("scope"),
+            row.get("response_side"),
+            row.get("regex"),
+            row.get("url"),
+            row.get("source_request_url"),
+            row.get("result_file"),
+            row.get("matched_text"),
+            row.get("match_file"),
+        ]
+        return " ".join(str(item or "") for item in parts).lower()
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Nightmare/Fozzy report web dashboard server.")
     p.add_argument(
@@ -1258,6 +1675,7 @@ def main(argv: list[str] | None = None) -> int:
         srv.coordinator_token = coordinator_token  # type: ignore[attr-defined]
         srv.master_report_regen_token = master_report_regen_token  # type: ignore[attr-defined]
         srv._master_regen_lock = threading.Lock()  # type: ignore[attr-defined]
+        srv.extractor_matches_cache = _ExtractorMatchesCache()  # type: ignore[attr-defined]
         return srv
 
     servers: list[tuple[str, ThreadingHTTPServer]] = []

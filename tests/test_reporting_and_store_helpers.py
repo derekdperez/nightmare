@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from reporting.extractor_reports import build_javascript_extractor_matches_report_html
-from reporting.server_pages import render_crawl_progress_html, render_dashboard_html, render_workers_html
+from reporting.server_pages import render_crawl_progress_html, render_dashboard_html, render_extractor_matches_html, render_workers_html
 from server import collect_dashboard_data
 from server_app.store import CoordinatorStore, _get_root_domain, _make_target_entry_id, _normalize_target_url
 
@@ -25,6 +25,11 @@ def test_render_workers_html_contains_expected_heading():
 def test_render_crawl_progress_html_contains_expected_heading():
     html = render_crawl_progress_html()
     assert "Crawl Progress" in html
+
+
+def test_render_extractor_matches_html_contains_expected_heading():
+    html = render_extractor_matches_html()
+    assert "Extractor Matches" in html
 
 
 def test_extractor_report_html_escapes_script_content():
@@ -403,3 +408,62 @@ def test_collect_dashboard_data_uses_coordinator_progress_when_output_empty(tmp_
     assert domain["status"] == "nightmare_running"
     assert domain["unique_urls"] == 42
     assert domain["requested_urls"] == 11
+
+
+def test_list_extractor_match_domains_uses_summary_count():
+    now = datetime(2026, 4, 17, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchall = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "FROM coordinator_artifacts m LEFT JOIN coordinator_artifacts s" in compact:
+                assert params == (5000,)
+                self._fetchall = [
+                    (
+                        "example.com",
+                        "worker-1",
+                        "sha123",
+                        100,
+                        now,
+                        b'{"match_count": 7, "rows": []}',
+                        "identity",
+                        now,
+                    )
+                ]
+                return
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchall(self):
+            return self._fetchall
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    data = CoordinatorStore.list_extractor_match_domains(store, limit=5000)
+    assert len(data) == 1
+    row = data[0]
+    assert row["root_domain"] == "example.com"
+    assert row["summary_match_count"] == 7
+    assert row["content_sha256"] == "sha123"
