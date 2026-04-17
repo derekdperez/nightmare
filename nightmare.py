@@ -50,6 +50,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse, urlun
 from http_client import request_capped
 from http_request_queue import HttpRequestQueue
 from nightmare_app import spider_url_policy
+from nightmare_app.normalized_exports import write_normalized_exports
 from nightmare_shared.value_types import infer_observed_value_type
 
 import scrapy
@@ -6433,6 +6434,20 @@ def main() -> None:
     default_source_of_truth_output_path = default_domain_output_dir / f"{root_domain}_source_of_truth.json"
     default_parameters_output_path = default_domain_output_dir / f"{root_domain}.parameters.json"
     default_parameters_text_output_path = default_domain_output_dir / f"{root_domain}.parameters.txt"
+    default_normalized_data_dir_path = default_domain_output_dir / "normalized_data"
+    default_normalized_sitemap_json_output_path = default_domain_output_dir / "sitemap.json"
+    default_normalized_sitemap_xml_output_path = default_domain_output_dir / "sitemap.xml"
+    default_normalized_sitemap_html_output_path = default_domain_output_dir / "sitemap.html"
+    default_normalized_cookies_output_path = default_domain_output_dir / "cookies.json"
+    default_normalized_scripts_output_path = default_domain_output_dir / "scripts.json"
+    default_normalized_high_value_output_path = default_domain_output_dir / "high-value.json"
+    default_normalized_pages_output_path = default_domain_output_dir / "pages.json"
+    default_normalized_redirects_output_path = default_domain_output_dir / "redirects.json"
+    default_normalized_findings_output_path = default_domain_output_dir / "findings.json"
+    default_normalized_cookies_dir_path = default_domain_output_dir / "cookies"
+    default_normalized_scripts_dir_path = default_domain_output_dir / "scripts"
+    default_normalized_high_value_dir_path = default_domain_output_dir / "high-value"
+    default_normalized_pages_dir_path = default_domain_output_dir / "pages"
 
     sitemap_output_path = resolve_output_path_with_domain_default(
         cli_value=args.sitemap_output,
@@ -6512,6 +6527,90 @@ def main() -> None:
         key="parameters_text_output",
         default_path=default_parameters_text_output_path,
     )
+    normalized_data_dir_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_data_dir",
+        default_path=default_normalized_data_dir_path,
+    )
+    normalized_sitemap_json_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_sitemap_json_output",
+        default_path=default_normalized_sitemap_json_output_path,
+    )
+    normalized_sitemap_xml_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_sitemap_xml_output",
+        default_path=default_normalized_sitemap_xml_output_path,
+    )
+    normalized_sitemap_html_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_sitemap_html_output",
+        default_path=default_normalized_sitemap_html_output_path,
+    )
+    normalized_cookies_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_cookies_output",
+        default_path=default_normalized_cookies_output_path,
+    )
+    normalized_scripts_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_scripts_output",
+        default_path=default_normalized_scripts_output_path,
+    )
+    normalized_high_value_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_high_value_output",
+        default_path=default_normalized_high_value_output_path,
+    )
+    normalized_pages_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_pages_output",
+        default_path=default_normalized_pages_output_path,
+    )
+    normalized_redirects_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_redirects_output",
+        default_path=default_normalized_redirects_output_path,
+    )
+    normalized_findings_output_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_findings_output",
+        default_path=default_normalized_findings_output_path,
+    )
+    normalized_cookies_dir_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_cookies_dir",
+        default_path=default_normalized_cookies_dir_path,
+    )
+    normalized_scripts_dir_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_scripts_dir",
+        default_path=default_normalized_scripts_dir_path,
+    )
+    normalized_high_value_dir_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_high_value_dir",
+        default_path=default_normalized_high_value_dir_path,
+    )
+    normalized_pages_dir_path = resolve_output_path_with_domain_default(
+        cli_value=None,
+        config=config,
+        key="normalized_pages_dir",
+        default_path=default_normalized_pages_dir_path,
+    )
 
     app_log_level = parse_log_level(app_log_level_name, "log_level")
     console_log_level = parse_log_level(console_log_level_name, "console_log_level")
@@ -6550,6 +6649,20 @@ def main() -> None:
     ensure_directory(source_of_truth_output_path.parent)
     ensure_directory(parameters_output_path.parent)
     ensure_directory(parameters_text_output_path.parent)
+    ensure_directory(normalized_data_dir_path)
+    ensure_directory(normalized_sitemap_json_output_path.parent)
+    ensure_directory(normalized_sitemap_xml_output_path.parent)
+    ensure_directory(normalized_sitemap_html_output_path.parent)
+    ensure_directory(normalized_cookies_output_path.parent)
+    ensure_directory(normalized_scripts_output_path.parent)
+    ensure_directory(normalized_high_value_output_path.parent)
+    ensure_directory(normalized_pages_output_path.parent)
+    ensure_directory(normalized_redirects_output_path.parent)
+    ensure_directory(normalized_findings_output_path.parent)
+    ensure_directory(normalized_cookies_dir_path)
+    ensure_directory(normalized_scripts_dir_path)
+    ensure_directory(normalized_high_value_dir_path)
+    ensure_directory(normalized_pages_dir_path)
     progress.info(f"Prepared evidence directory at {evidence_dir_path.resolve()}")
     _cd_root = collected_data_root_from_evidence_dir(evidence_dir_path)
     ensure_collected_data_layout(_cd_root)
@@ -6563,6 +6676,11 @@ def main() -> None:
     progress.info(f"Source-of-truth file: {source_of_truth_output_path.resolve()}")
     progress.info(f"Parameters JSON file: {parameters_output_path.resolve()}")
     progress.info(f"Parameters text file: {parameters_text_output_path.resolve()}")
+    progress.info(f"Normalized sitemap JSON file: {normalized_sitemap_json_output_path.resolve()}")
+    progress.info(f"Normalized sitemap XML file: {normalized_sitemap_xml_output_path.resolve()}")
+    progress.info(f"Normalized sitemap HTML file: {normalized_sitemap_html_output_path.resolve()}")
+    progress.info(f"Redirects file: {normalized_redirects_output_path.resolve()}")
+    progress.info(f"Findings file: {normalized_findings_output_path.resolve()}")
     progress.info(f"AI compact payload truncated_for_ai: {truncated_for_ai}")
     progress.info(f"OpenAI timeout: {openai_timeout:.1f}s per request")
     progress.info(
@@ -6897,6 +7015,38 @@ def main() -> None:
     with dev_timed_call("main.write_requests_inventory", progress):
         write_json(requests_output_path, requests_inventory)
     progress.info(f"Wrote requests inventory to {requests_output_path.resolve()}")
+    with dev_timed_call("main.write_normalized_exports", progress):
+        normalized_outputs = write_normalized_exports(
+            root_domain=root_domain,
+            domain_output_dir=evidence_dir_path.parent.parent,
+            collected_data_root=_cd_root,
+            evidence_dir=evidence_dir_path,
+            url_inventory_payload=inventory,
+            legacy_requests_payload=requests_inventory,
+            config=config,
+            normalized_data_dir=normalized_data_dir_path,
+            requests_output_path=requests_output_path,
+            sitemap_json_output_path=normalized_sitemap_json_output_path,
+            sitemap_xml_output_path=normalized_sitemap_xml_output_path,
+            sitemap_html_output_path=normalized_sitemap_html_output_path,
+            cookies_output_path=normalized_cookies_output_path,
+            scripts_output_path=normalized_scripts_output_path,
+            high_value_output_path=normalized_high_value_output_path,
+            pages_output_path=normalized_pages_output_path,
+            redirects_output_path=normalized_redirects_output_path,
+            findings_output_path=normalized_findings_output_path,
+            cookies_dir_output_path=normalized_cookies_dir_path,
+            scripts_dir_output_path=normalized_scripts_dir_path,
+            high_value_dir_output_path=normalized_high_value_dir_path,
+            pages_dir_output_path=normalized_pages_dir_path,
+            source_high_value_root=high_value_domain_dir(evidence_dir_path, root_domain),
+        )
+    progress.info(
+        "Wrote normalized exports: "
+        f"sitemap={normalized_outputs['sitemap_json'].resolve()}, "
+        f"redirects={normalized_outputs['redirects_json'].resolve()}, "
+        f"findings={normalized_outputs['findings_json'].resolve()}"
+    )
     with dev_timed_call("main.build_source_of_truth_payload", progress):
         source_of_truth_payload = build_source_of_truth_payload(root_domain=root_domain, state=state)
     legacy_source_of_truth_output_path = source_of_truth_output_path.with_suffix(".jsonn")
@@ -7076,6 +7226,11 @@ def main() -> None:
     print(f"Condensed sitemap saved to: {condensed_sitemap_output_path.resolve()}")
     print(f"URL inventory saved to: {inventory_output_path.resolve()}")
     print(f"Requests inventory saved to: {requests_output_path.resolve()}")
+    print(f"Normalized sitemap JSON saved to: {normalized_sitemap_json_output_path.resolve()}")
+    print(f"Normalized sitemap XML saved to: {normalized_sitemap_xml_output_path.resolve()}")
+    print(f"Normalized sitemap HTML saved to: {normalized_sitemap_html_output_path.resolve()}")
+    print(f"Redirects file saved to: {normalized_redirects_output_path.resolve()}")
+    print(f"Findings file saved to: {normalized_findings_output_path.resolve()}")
     print(f"Evidence directory: {evidence_dir_path.resolve()}")
     print(f"Collected data directory: {collected_data_root_from_evidence_dir(evidence_dir_path).resolve()}")
     if HIGH_VALUE_EXTENSIONS or HIGH_VALUE_PATH_SUFFIXES:

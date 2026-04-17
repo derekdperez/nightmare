@@ -401,3 +401,24 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Added `_read_cookie()` helper for robust cookie parsing and URL-decoding.
   - Added `tests/test_server_auth_cookie.py` covering bearer, X-token, cookie token, URL-encoded cookie token, and rejection cases.
 - Why: operators reported `/database` returning 401 despite valid token usage; cookie fallback hardens auth in environments where auth headers are dropped or not persisted.
+
+- Added normalized crawl export generation into the `nightmare.py` main flow:
+  - Integrated `nightmare_app/normalized_exports.write_normalized_exports(...)` after inventory generation.
+  - New default artifacts under each domain output now include:
+    - `sitemap.json`, `sitemap.xml`, `sitemap.html`
+    - `requests.json`, `cookies.json`, `scripts.json`, `high-value.json`, `pages.json`
+    - `redirects.json`, `findings.json`
+    - mirrored folders: `cookies/`, `scripts/`, `high-value/`, `pages/`
+    - `normalized_data/raw_requests/` and `normalized_data/raw_responses/`
+  - Fixed normalized export bugs:
+    - removed self-copy loop for `pages/` mirroring
+    - deduplicated redirect rows and normalized findings rows
+    - made high-value source path explicit (`source_high_value_root`) instead of hardcoded wrong root
+  - Added `tests/test_normalized_exports_unit.py` to verify `redirects.json` and `findings.json` generation and expected finding types.
+
+- Hardened `/api/coord/database-status` reliability for operator UI:
+  - Added server-side exception guard in `server.py` around `CoordinatorStore.database_status()` to return structured HTTP 500 JSON instead of connection resets.
+  - Updated `server_app/store.py` `database_status()` to tolerate per-table query failures (records `table_error` for that table and continues).
+  - Updated `templates/database_status.html.j2` to render per-table query errors in the page.
+  - Added regression test `test_database_status_tolerates_single_table_query_failure` in `tests/test_reporting_and_store_helpers.py`.
+- Why: browser-side `Failed to fetch` on the Database page can result from unhandled DB introspection errors; endpoint now degrades gracefully and exposes actionable error details.

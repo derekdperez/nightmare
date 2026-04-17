@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -132,3 +132,162 @@ def test_database_status_limits_rows_per_table():
     assert table["rows_returned"] == 20
     assert table["rows_limited"] is True
     assert len(table["rows"]) == 20
+
+
+def test_database_status_tolerates_single_table_query_failure():
+    now = datetime(2026, 4, 16, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchone = None
+            self._fetchall = []
+            self.description = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "SELECT current_database(), current_user, version(), NOW();" in compact:
+                self._fetchone = ("nightmare", "nightmare", "PostgreSQL 16", now)
+                return
+            if "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace" in compact:
+                self._fetchall = [("public", "problem_table", 7)]
+                return
+            if "FROM information_schema.columns" in compact:
+                self._fetchall = [("raw", "text", "YES")]
+                return
+            if 'FROM "public"."problem_table" LIMIT %s;' in compact:
+                raise RuntimeError("simulated table read failure")
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchone(self):
+            return self._fetchone
+
+        def fetchall(self):
+            return self._fetchall
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    data = CoordinatorStore.database_status(store)
+    assert data["table_count"] == 1
+    table = data["tables"][0]
+    assert table["schema"] == "public"
+    assert table["name"] == "problem_table"
+    assert table["rows_returned"] == 0
+    assert table["rows_limited"] is False
+    assert "simulated table read failure" in table["table_error"]
+
+
+def test_worker_control_snapshot_includes_presence_only_worker():
+    now = datetime.now(timezone.utc) - timedelta(seconds=5)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchall = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "FROM worker_ids w" in compact and "queued_commands" in compact:
+                self._fetchall = [("presence-worker-1", now, 0, 0, 0, [], 0)]
+                return
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchall(self):
+            return self._fetchall
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    data = CoordinatorStore.worker_control_snapshot(store, stale_after_seconds=120)
+    assert data["counts"]["total_workers"] == 1
+    worker = data["workers"][0]
+    assert worker["worker_id"] == "presence-worker-1"
+    assert worker["status"] == "online"
+    assert worker["running_targets"] == 0
+    assert worker["running_stage_tasks"] == 0
+    assert worker["urls_scanned_session"] == 0
+
+
+def test_worker_statuses_includes_presence_only_worker():
+    now = datetime.now(timezone.utc) - timedelta(seconds=5)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchall = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "FROM worker_ids w" in compact and "active_target_leases" in compact:
+                self._fetchall = [("presence-worker-2", now, 0, 0, 0, 0, [])]
+                return
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchall(self):
+            return self._fetchall
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    data = CoordinatorStore.worker_statuses(store, stale_after_seconds=120)
+    assert data["counts"]["total_workers"] == 1
+    worker = data["workers"][0]
+    assert worker["worker_id"] == "presence-worker-2"
+    assert worker["status"] == "online"
+    assert worker["running_targets"] == 0
+    assert worker["running_stage_tasks"] == 0

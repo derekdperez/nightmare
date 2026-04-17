@@ -582,7 +582,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._is_coordinator_authorized():
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
-            self._write_json(self.coordinator_store.database_status())
+            try:
+                payload = self.coordinator_store.database_status()
+            except Exception as exc:
+                self.log_message("database_status failed: %r", exc)
+                self._write_json(
+                    {
+                        "error": "database status query failed",
+                        "detail": str(exc),
+                    },
+                    status=500,
+                )
+                return
+            self._write_json(payload)
             return
 
         if path == "/api/coord/state":
@@ -605,7 +617,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 (query.get("stale_after_seconds") or [DEFAULT_COORDINATOR_LEASE_SECONDS])[0],
                 DEFAULT_COORDINATOR_LEASE_SECONDS,
             )
-            self._write_json(self.coordinator_store.worker_statuses(stale_after_seconds=stale_after_seconds))
+            try:
+                payload = self.coordinator_store.worker_statuses(stale_after_seconds=stale_after_seconds)
+            except Exception as exc:
+                self.log_message("worker_statuses failed: %r", exc)
+                self._write_json({"error": "worker status query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
             return
         if path == "/api/coord/worker-control":
             if self.coordinator_store is None:
@@ -618,7 +636,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 (query.get("stale_after_seconds") or [DEFAULT_COORDINATOR_LEASE_SECONDS])[0],
                 DEFAULT_COORDINATOR_LEASE_SECONDS,
             )
-            snapshot = self.coordinator_store.worker_control_snapshot(stale_after_seconds=stale_after_seconds)
+            try:
+                snapshot = self.coordinator_store.worker_control_snapshot(stale_after_seconds=stale_after_seconds)
+            except Exception as exc:
+                self.log_message("worker_control_snapshot failed: %r", exc)
+                self._write_json({"error": "worker control query failed", "detail": str(exc)}, status=500)
+                return
             for worker in snapshot.get("workers", []):
                 worker_id = str(worker.get("worker_id", "") or "").strip()
                 worker["logs"] = self._discover_worker_log_links(worker_id)

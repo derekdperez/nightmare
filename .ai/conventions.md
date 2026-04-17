@@ -111,3 +111,14 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - `X-Coordinator-Token: <token>`
   - `Cookie: nightmare_coord_token=<token>` (URL-decoded)
 - Reason: database/worker pages persist token in cookie and some deployments can lose/strip auth headers; cookie fallback keeps operator APIs usable.
+
+- Crawl export convention:
+  - Keep legacy crawl artifacts (`<domain>_sitemap.json`, inventory/source-of-truth files) and also emit normalized replay/export artifacts via `nightmare_app/normalized_exports.py`.
+  - Required normalized files (domain output root): `sitemap.json`, `sitemap.xml`, `sitemap.html`, `requests.json`, `cookies.json`, `scripts.json`, `high-value.json`, `pages.json`, `redirects.json`, `findings.json`.
+  - Required normalized directories: `cookies/`, `scripts/`, `high-value/`, `pages/`, and `normalized_data/raw_requests|raw_responses`.
+  - `high_value` capture source remains under `<output_root>/high_value/<root_domain>`; normalized exports must pass that source root explicitly instead of assuming it lives under the domain folder.
+
+- Coordinator database-status resilience convention:
+  - `/api/coord/database-status` must never hard-fail the HTTP connection on query/introspection exceptions.
+  - Server route should catch `database_status()` exceptions and return structured JSON error (`500`) so UI receives a normal response body.
+  - Store-level table introspection should continue on per-table failure and annotate `table_error` on affected table rows.

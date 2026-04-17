@@ -127,6 +127,10 @@
             </tbody>
           </table>`
           : '<div class="empty">No rows.</div>';
+        const tableError = String(t.table_error || "");
+        const tableErrorHtml = tableError
+          ? `<div class="empty" style="margin-top:10px;">Table query failed: ${esc(tableError)}</div>`
+          : "";
         const returned = Number(t.rows_returned || rows.length || 0);
         const limitedLabel = t.rows_limited
           ? ` | showing first ${esc(returned)} row(s)`
@@ -137,6 +141,7 @@
           <div class="tableBody">
             <div><strong>Columns</strong><br>${columns || '<span class="muted">none</span>'}</div>
             ${tableHtml}
+            ${tableErrorHtml}
           </div>
         </section>`;
       }).join("");

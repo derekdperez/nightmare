@@ -202,11 +202,36 @@ CREATE TABLE IF NOT EXISTS coordinator_worker_commands (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_commands_worker_created
   ON coordinator_worker_commands(worker_id, created_at_utc DESC);
+
+CREATE TABLE IF NOT EXISTS coordinator_worker_presence (
+  worker_id TEXT PRIMARY KEY,
+  last_seen_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_activity TEXT NOT NULL DEFAULT 'unknown',
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_worker_presence_last_seen
+  ON coordinator_worker_presence(last_seen_at_utc DESC);
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(ddl)
             conn.commit()
+
+    @staticmethod
+    def _touch_worker_presence(cur: Any, worker_id: str, activity: str) -> None:
+        wid = str(worker_id or "").strip()
+        if not wid:
+            return
+        act = str(activity or "").strip().lower() or "unknown"
+        sql = """
+INSERT INTO coordinator_worker_presence(worker_id, last_seen_at_utc, last_activity, updated_at_utc)
+VALUES (%s, NOW(), %s, NOW())
+ON CONFLICT (worker_id) DO UPDATE
+SET last_seen_at_utc = NOW(),
+    last_activity = EXCLUDED.last_activity,
+    updated_at_utc = NOW();
+"""
+        cur.execute(sql, (wid, act[:64]))
 
     def register_targets(self, targets: list[str]) -> dict[str, Any]:
         inserted = 0
@@ -273,6 +298,7 @@ RETURNING t.entry_id, t.line_number, t.raw, t.start_url, t.root_domain, t.attemp
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
+                self._touch_worker_presence(cur, worker, "claim_target")
                 cur.execute(sql, (worker, lease))
                 row = cur.fetchone()
             conn.commit()
@@ -303,6 +329,7 @@ WHERE entry_id = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
+                self._touch_worker_presence(cur, str(worker_id), "heartbeat_target")
                 cur.execute(sql, (lease, str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
             conn.commit()
@@ -325,6 +352,7 @@ WHERE entry_id = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
+                self._touch_worker_presence(cur, str(worker_id), "complete_target")
                 cur.execute(sql, (status, int(exit_code), str(error or "")[:2000], str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
             conn.commit()
@@ -486,42 +514,57 @@ ORDER BY ordinal_position;
                 tables: list[dict[str, Any]] = []
                 for schema_name, table_name, estimated_row_count in table_rows:
                     safe_ident = f'"{str(schema_name).replace('"', '""')}"."{str(table_name).replace('"', '""')}"'
-                    cur.execute(columns_sql, (schema_name, table_name))
-                    column_rows = cur.fetchall()
-                    columns = [
-                        {
-                            "name": col_name,
-                            "data_type": data_type,
-                            "nullable": str(is_nullable).upper() == "YES",
-                        }
-                        for col_name, data_type, is_nullable in column_rows
-                    ]
-                    select_exprs = [
-                        _build_database_preview_expr(str(col_name), str(data_type), max_text_preview_chars)
-                        for col_name, data_type, _is_nullable in column_rows
-                    ]
-                    select_list = ", ".join(select_exprs) if select_exprs else "NULL"
-                    cur.execute(f"SELECT {select_list} FROM {safe_ident} LIMIT %s;", (max_rows_per_table,))
-                    rows = cur.fetchall()
-                    colnames = [desc[0] for desc in cur.description]
-                    serialized_rows: list[dict[str, Any]] = []
-                    for row in rows:
-                        serialized_rows.append({
-                            colnames[idx]: _json_safe_db_value(value)
-                            for idx, value in enumerate(row)
-                        })
-                    tables.append(
-                        {
-                            "schema": schema_name,
-                            "name": table_name,
-                            "row_count": int(estimated_row_count or 0),
-                            "row_count_is_estimate": True,
-                            "rows_returned": len(serialized_rows),
-                            "rows_limited": len(serialized_rows) >= max_rows_per_table,
-                            "columns": columns,
-                            "rows": serialized_rows,
-                        }
-                    )
+                    try:
+                        cur.execute(columns_sql, (schema_name, table_name))
+                        column_rows = cur.fetchall()
+                        columns = [
+                            {
+                                "name": col_name,
+                                "data_type": data_type,
+                                "nullable": str(is_nullable).upper() == "YES",
+                            }
+                            for col_name, data_type, is_nullable in column_rows
+                        ]
+                        select_exprs = [
+                            _build_database_preview_expr(str(col_name), str(data_type), max_text_preview_chars)
+                            for col_name, data_type, _is_nullable in column_rows
+                        ]
+                        select_list = ", ".join(select_exprs) if select_exprs else "NULL"
+                        cur.execute(f"SELECT {select_list} FROM {safe_ident} LIMIT %s;", (max_rows_per_table,))
+                        rows = cur.fetchall()
+                        colnames = [desc[0] for desc in cur.description]
+                        serialized_rows: list[dict[str, Any]] = []
+                        for row in rows:
+                            serialized_rows.append({
+                                colnames[idx]: _json_safe_db_value(value)
+                                for idx, value in enumerate(row)
+                            })
+                        tables.append(
+                            {
+                                "schema": schema_name,
+                                "name": table_name,
+                                "row_count": int(estimated_row_count or 0),
+                                "row_count_is_estimate": True,
+                                "rows_returned": len(serialized_rows),
+                                "rows_limited": len(serialized_rows) >= max_rows_per_table,
+                                "columns": columns,
+                                "rows": serialized_rows,
+                            }
+                        )
+                    except Exception as exc:
+                        tables.append(
+                            {
+                                "schema": schema_name,
+                                "name": table_name,
+                                "row_count": int(estimated_row_count or 0),
+                                "row_count_is_estimate": True,
+                                "rows_returned": 0,
+                                "rows_limited": False,
+                                "columns": [],
+                                "rows": [],
+                                "table_error": str(exc),
+                            }
+                        )
             conn.commit()
         return {
             "database": {
@@ -582,23 +625,43 @@ stage_agg AS (
     FROM coordinator_stage_tasks
     WHERE worker_id IS NOT NULL AND worker_id <> ''
     GROUP BY worker_id
+),
+presence_agg AS (
+    SELECT
+      worker_id,
+      MAX(last_seen_at_utc) AS last_presence_heartbeat
+    FROM coordinator_worker_presence
+    WHERE worker_id IS NOT NULL AND worker_id <> ''
+    GROUP BY worker_id
+),
+worker_ids AS (
+    SELECT worker_id FROM target_agg
+    UNION
+    SELECT worker_id FROM stage_agg
+    UNION
+    SELECT worker_id FROM presence_agg
 )
 SELECT
-  COALESCE(t.worker_id, s.worker_id) AS worker_id,
-  CASE
-    WHEN t.last_target_heartbeat IS NULL THEN s.last_stage_heartbeat
-    WHEN s.last_stage_heartbeat IS NULL THEN t.last_target_heartbeat
-    ELSE GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat)
-  END AS last_heartbeat_at_utc,
+  w.worker_id AS worker_id,
+  COALESCE(
+    GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat, p.last_presence_heartbeat),
+    GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat),
+    GREATEST(t.last_target_heartbeat, p.last_presence_heartbeat),
+    GREATEST(s.last_stage_heartbeat, p.last_presence_heartbeat),
+    t.last_target_heartbeat,
+    s.last_stage_heartbeat,
+    p.last_presence_heartbeat
+  ) AS last_heartbeat_at_utc,
   COALESCE(t.running_targets, 0) AS running_targets,
   COALESCE(s.running_stage_tasks, 0) AS running_stage_tasks,
   COALESCE(t.active_target_leases, 0) AS active_target_leases,
   COALESCE(s.active_stage_leases, 0) AS active_stage_leases,
   COALESCE(s.active_stages, ARRAY[]::text[]) AS active_stages
-FROM target_agg t
-FULL OUTER JOIN stage_agg s
-  ON s.worker_id = t.worker_id
-ORDER BY worker_id ASC;
+FROM worker_ids w
+LEFT JOIN target_agg t ON t.worker_id = w.worker_id
+LEFT JOIN stage_agg s ON s.worker_id = w.worker_id
+LEFT JOIN presence_agg p ON p.worker_id = w.worker_id
+ORDER BY w.worker_id ASC;
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -681,23 +744,46 @@ commands AS (
     SELECT worker_id, COUNT(*) FILTER (WHERE status = 'queued') AS queued_commands
     FROM coordinator_worker_commands
     GROUP BY worker_id
+),
+presence_agg AS (
+    SELECT
+      worker_id,
+      MAX(last_seen_at_utc) AS last_presence_heartbeat
+    FROM coordinator_worker_presence
+    WHERE worker_id IS NOT NULL AND worker_id <> ''
+    GROUP BY worker_id
+),
+worker_ids AS (
+    SELECT worker_id FROM target_agg
+    UNION
+    SELECT worker_id FROM stage_agg
+    UNION
+    SELECT worker_id FROM commands
+    UNION
+    SELECT worker_id FROM presence_agg
 )
 SELECT
-  COALESCE(t.worker_id, s.worker_id, c.worker_id) AS worker_id,
-  CASE
-    WHEN t.last_target_heartbeat IS NULL THEN s.last_stage_heartbeat
-    WHEN s.last_stage_heartbeat IS NULL THEN t.last_target_heartbeat
-    ELSE GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat)
-  END AS last_heartbeat_at_utc,
+  w.worker_id AS worker_id,
+  COALESCE(
+    GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat, p.last_presence_heartbeat),
+    GREATEST(t.last_target_heartbeat, s.last_stage_heartbeat),
+    GREATEST(t.last_target_heartbeat, p.last_presence_heartbeat),
+    GREATEST(s.last_stage_heartbeat, p.last_presence_heartbeat),
+    t.last_target_heartbeat,
+    s.last_stage_heartbeat,
+    p.last_presence_heartbeat
+  ) AS last_heartbeat_at_utc,
   COALESCE(t.running_targets, 0) AS running_targets,
   COALESCE(s.running_stage_tasks, 0) AS running_stage_tasks,
   COALESCE(t.urls_scanned_session, 0) AS urls_scanned_session,
   COALESCE(t.current_targets, ARRAY[]::text[]) AS current_targets,
   COALESCE(c.queued_commands, 0) AS queued_commands
-FROM target_agg t
-FULL OUTER JOIN stage_agg s ON s.worker_id = t.worker_id
-FULL OUTER JOIN commands c ON c.worker_id = COALESCE(t.worker_id, s.worker_id)
-ORDER BY worker_id ASC;
+FROM worker_ids w
+LEFT JOIN target_agg t ON t.worker_id = w.worker_id
+LEFT JOIN stage_agg s ON s.worker_id = w.worker_id
+LEFT JOIN commands c ON c.worker_id = w.worker_id
+LEFT JOIN presence_agg p ON p.worker_id = w.worker_id
+ORDER BY w.worker_id ASC;
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -826,6 +912,7 @@ RETURNING t.root_domain, t.stage, t.status, t.worker_id, t.attempt_count, t.leas
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
+                self._touch_worker_presence(cur, wid, f"claim_stage_{stg}")
                 cur.execute(sql, (stg, wid, lease, stg))
                 row = cur.fetchone()
             conn.commit()
@@ -859,6 +946,7 @@ WHERE root_domain = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
+                self._touch_worker_presence(cur, wid, f"heartbeat_stage_{stg}")
                 cur.execute(sql, (lease, rd, stg, wid))
                 updated = int(cur.rowcount or 0)
             conn.commit()
@@ -895,6 +983,7 @@ WHERE root_domain = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
+                self._touch_worker_presence(cur, wid, f"complete_stage_{stg}")
                 cur.execute(sql, (next_status, int(exit_code), str(error or "")[:2000], rd, stg, wid))
                 updated = int(cur.rowcount or 0)
             conn.commit()

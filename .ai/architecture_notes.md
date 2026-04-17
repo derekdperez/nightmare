@@ -52,3 +52,12 @@
 
 - Runtime boundary cleanup: separated crawl URL policy (
 ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_core.py) from the monolithic CLI scripts. Entrypoints now orchestrate config/state while reusable logic lives in importable modules for future service/test reuse.
+
+- Normalized export boundary:
+  - `nightmare.py` remains the crawl orchestrator; normalized artifact shaping/writing is delegated to `nightmare_app/normalized_exports.py`.
+  - Normalized exports consolidate endpoint snapshots (`collected_data/endpoints/*.json`) and evidence snapshots (`*_evidence/*.json.gz`) into deduplicated raw request/response blobs plus derived inventories (`sitemap`, `requests`, `redirects`, `findings`, etc.).
+  - High-value source files are still produced by crawl/high-value capture flow under `<output_root>/high_value/<domain>` and then mirrored into normalized `high-value/` output.
+
+- Database-status fault isolation boundary:
+  - `server.py` owns API-level failure translation (exceptions -> HTTP JSON errors).
+  - `server_app/store.py` owns table-by-table fault isolation during DB introspection (`table_error` per table) so one problematic relation/type does not break the entire `/api/coord/database-status` payload.
