@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 import pytest
 
 from reporting.extractor_reports import build_javascript_extractor_matches_report_html
 from reporting.server_pages import render_dashboard_html, render_workers_html
-from server_app.store import _get_root_domain, _make_target_entry_id, _normalize_target_url
+from server_app.store import CoordinatorStore, _get_root_domain, _make_target_entry_id, _normalize_target_url
 
 
 def test_render_dashboard_html_contains_expected_heading():
@@ -61,3 +62,74 @@ def test_make_target_entry_id_is_stable_and_short():
     assert a == b
     assert a != c
     assert re.fullmatch(r"[0-9a-f]{16}", a)
+
+
+def test_database_status_limits_rows_per_table():
+    now = datetime(2026, 4, 16, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchone = None
+            self._fetchall = []
+            self.description = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "SELECT current_database(), current_user, version(), NOW();" in compact:
+                self._fetchone = ("nightmare", "nightmare", "PostgreSQL 16", now)
+                return
+            if "FROM information_schema.tables" in compact:
+                self._fetchall = [("public", "coordinator_targets")]
+                return
+            if "FROM information_schema.columns" in compact:
+                self._fetchall = [
+                    ("entry_id", "text", "NO"),
+                    ("raw", "text", "YES"),
+                ]
+                return
+            if compact.startswith('SELECT COUNT(*) FROM "public"."coordinator_targets";'):
+                self._fetchone = (50,)
+                return
+            if compact.startswith('SELECT * FROM "public"."coordinator_targets" LIMIT %s;'):
+                assert params == (20,)
+                self.description = [("entry_id",), ("raw",)]
+                self._fetchall = [(f"id-{idx}", f"raw-{idx}") for idx in range(20)]
+                return
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchone(self):
+            return self._fetchone
+
+        def fetchall(self):
+            return self._fetchall
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    data = CoordinatorStore.database_status(store)
+    assert data["max_rows_per_table"] == 20
+    assert data["table_count"] == 1
+    table = data["tables"][0]
+    assert table["row_count"] == 50
+    assert table["rows_returned"] == 20
+    assert table["rows_limited"] is True
+    assert len(table["rows"]) == 20

@@ -38,6 +38,37 @@
   <div id="cards" class="cards"></div>
   <div id="tables"><div class="empty">Loading...</div></div>
   <script>
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+
+    function readCookie(name) {
+      const needle = `${name}=`;
+      const cookies = String(document.cookie || "").split(";");
+      for (const part of cookies) {
+        const item = part.trim();
+        if (item.startsWith(needle)) {
+          return decodeURIComponent(item.slice(needle.length));
+        }
+      }
+      return "";
+    }
+    function writeCookie(name, value, days) {
+      const maxAge = Math.max(1, Number(days || 30)) * 24 * 60 * 60;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}`;
+    }
+    function deleteCookie(name) {
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+    }
+    function persistTokenCookie() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      else deleteCookie(TOKEN_COOKIE_NAME);
+    }
+    function hydrateTokenFromCookie() {
+      const token = readCookie(TOKEN_COOKIE_NAME);
+      if (token) document.getElementById("token").value = token;
+    }
     function esc(v) {
       return String(v ?? "").replace(/[&<>"']/g, (ch) => ({
         "&": "&amp;",
@@ -49,6 +80,7 @@
     }
     function authHeaders() {
       const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { Authorization: `Bearer ${token}` } : {};
     }
     async function apiGet(path) {
@@ -63,6 +95,7 @@
         ["User", db.current_user || ""],
         ["Server Time", db.server_time_utc || ""],
         ["Tables", data.table_count || 0],
+        ["Rows / table", data.max_rows_per_table || 20],
       ];
       document.getElementById("cards").innerHTML = cards
         .map(([k, v]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`)
@@ -94,8 +127,12 @@
             </tbody>
           </table>`
           : '<div class="empty">No rows.</div>';
+        const returned = Number(t.rows_returned || rows.length || 0);
+        const limitedLabel = t.rows_limited
+          ? ` | showing first ${esc(returned)} row(s)`
+          : "";
         return `<section class="tableCard">
-          <div class="tableHead"><strong>${esc(t.schema)}.${esc(t.name)}</strong> | ${esc(t.row_count)} row(s)</div>
+          <div class="tableHead"><strong>${esc(t.schema)}.${esc(t.name)}</strong> | ${esc(t.row_count)} row(s)${limitedLabel}</div>
           <div class="tableBody">
             <div><strong>Columns</strong><br>${columns || '<span class="muted">none</span>'}</div>
             ${tableHtml}
@@ -116,6 +153,9 @@
         msg.textContent = "Load failed.";
       }
     }
+    hydrateTokenFromCookie();
+    document.getElementById("token").addEventListener("change", persistTokenCookie);
+    document.getElementById("token").addEventListener("blur", persistTokenCookie);
     refresh();
   </script>
 </body>

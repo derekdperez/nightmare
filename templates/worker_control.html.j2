@@ -67,10 +67,43 @@
 
   <script>
     let selectedConfigWorker = "";
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+
+    function readCookie(name) {
+      const needle = `${name}=`;
+      const cookies = String(document.cookie || "").split(";");
+      for (const part of cookies) {
+        const item = part.trim();
+        if (item.startsWith(needle)) {
+          return decodeURIComponent(item.slice(needle.length));
+        }
+      }
+      return "";
+    }
+    function writeCookie(name, value, days) {
+      const maxAge = Math.max(1, Number(days || 30)) * 24 * 60 * 60;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}`;
+    }
+    function deleteCookie(name) {
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+    }
+    function persistTokenCookie() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      else deleteCookie(TOKEN_COOKIE_NAME);
+    }
+    function hydrateTokenFromCookie() {
+      const token = readCookie(TOKEN_COOKIE_NAME);
+      if (token) document.getElementById("token").value = token;
+    }
+
     function esc(v){ return String(v || "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch])); }
     function escJs(v){ return String(v || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/'/g, "\\'").replace(/\\n/g, "\\\\n").replace(/\\r/g, "\\\\r"); }
     function authHeaders() {
       const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { "Authorization": `Bearer ${token}` } : {};
     }
     async function apiGet(path) {
@@ -152,6 +185,9 @@
       try { render(await apiGet("/api/coord/worker-control")); }
       catch (e) { document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load worker state: ${esc(e.message)}</td></tr>`; }
     }
+    hydrateTokenFromCookie();
+    document.getElementById("token").addEventListener("change", persistTokenCookie);
+    document.getElementById("token").addEventListener("blur", persistTokenCookie);
     document.getElementById("selectAll").addEventListener("change", (e) => { document.querySelectorAll("input.workerSel").forEach((el) => { el.checked = e.target.checked; }); });
     refresh();
     setInterval(refresh, 3000);

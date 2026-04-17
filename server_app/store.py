@@ -438,6 +438,7 @@ RETURNING output_clear_generation, updated_at_utc;
         }
 
     def database_status(self) -> dict[str, Any]:
+        max_rows_per_table = 20
         tables_sql = """
 SELECT table_schema, table_name
 FROM information_schema.tables
@@ -469,7 +470,10 @@ ORDER BY ordinal_position;
                         }
                         for col_name, data_type, is_nullable in column_rows
                     ]
-                    cur.execute(f"SELECT * FROM {safe_ident};")
+                    cur.execute(f"SELECT COUNT(*) FROM {safe_ident};")
+                    row_count_value = cur.fetchone()
+                    total_rows = int((row_count_value[0] if row_count_value else 0) or 0)
+                    cur.execute(f"SELECT * FROM {safe_ident} LIMIT %s;", (max_rows_per_table,))
                     rows = cur.fetchall()
                     colnames = [desc[0] for desc in cur.description]
                     serialized_rows: list[dict[str, Any]] = []
@@ -482,7 +486,9 @@ ORDER BY ordinal_position;
                         {
                             "schema": schema_name,
                             "name": table_name,
-                            "row_count": len(serialized_rows),
+                            "row_count": total_rows,
+                            "rows_returned": len(serialized_rows),
+                            "rows_limited": total_rows > len(serialized_rows),
                             "columns": columns,
                             "rows": serialized_rows,
                         }
@@ -496,6 +502,7 @@ ORDER BY ordinal_position;
                 "server_time_utc": _json_safe_db_value(db_row[3]),
             },
             "table_count": len(tables),
+            "max_rows_per_table": max_rows_per_table,
             "tables": tables,
             "generated_at_utc": _iso_now(),
         }

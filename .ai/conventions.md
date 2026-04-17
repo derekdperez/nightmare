@@ -92,3 +92,8 @@
 - Server page rendering convention: all operator UI pages (`/dashboard`, `/workers`, `/database`) should render from `templates/*.j2` through `reporting/server_pages.py`; avoid inline HTML page methods in `server.py`.
 - Dashboard/worker client URL encoding convention: use `encodeURIComponent(...).replace(/%2F/g, "/")` instead of `replaceAll` for broader JS runtime compatibility.
 - Dashboard refresh UX convention: never silently swallow summary-fetch failures; show explicit on-page load failure messaging so operators can distinguish empty data from failed API calls.
+
+- Coordinator DB status endpoint convention: /api/coord/database-status must cap table row payloads (current cap: 20 rows/table), while still reporting true ow_count and explicit truncation metadata (ows_returned, ows_limited, max_rows_per_table).
+
+- Coordinator UI auth UX convention: pages that call /api/coord/* from browser templates should share token persistence via 
+ightmare_coord_token cookie (30-day TTL, SameSite=Strict, Path=/, Secure on HTTPS) and auto-hydrate the token input on page load.

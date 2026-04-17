@@ -367,3 +367,16 @@
 - Extended refactor tests:
   - Added assertions for database template rendering and route wiring expectations.
   - Updated decomposition tests to enforce externalized database page rendering in `server.py`.
+
+- Limited coordinator database-status payload size for stability:
+  - server_app/store.py now returns only the first 20 rows per table (max_rows_per_table=20) while still returning full ow_count via COUNT(*).
+  - Added ows_returned and ows_limited metadata per table.
+  - Updated 	emplates/database_status.html.j2 to display truncation context (showing first N rows) and show the active row-limit card.
+  - Added unit coverage in 	ests/test_reporting_and_store_helpers.py to lock row-limit/query behavior.
+
+- Added coordinator token cookie persistence in server UI templates:
+  - 	emplates/database_status.html.j2 now reads/writes 
+ightmare_coord_token and auto-populates token input on load.
+  - 	emplates/worker_control.html.j2 now uses the same cookie behavior for shared auth UX across coordinator pages.
+  - Cookie attributes: Path=/, SameSite=Strict, Max-Age (30 days), and Secure when served over HTTPS.
+  - Added template regression assertions in 	ests/test_refactor_modules.py for cookie helper presence.

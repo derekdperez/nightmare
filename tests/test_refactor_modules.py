@@ -48,6 +48,7 @@ def test_worker_template_renders_database_link():
     assert "Worker Control Center" in html
     assert 'href="/database"' in html
     assert 'encodeURIComponent(l.relative).replace(/%2F/g, "/")' in html
+    assert "nightmare_coord_token" in html
 
 
 def test_database_template_renders():
@@ -57,3 +58,4 @@ def test_database_template_renders():
     assert 'href="/dashboard"' in html
     assert 'href="/workers"' in html
     assert "/api/coord/database-status" in html
+    assert "nightmare_coord_token" in html
