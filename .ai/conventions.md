@@ -151,3 +151,5 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Large zip artifacts should be parsed on demand and cached by artifact content hash to prevent repeated unzip/JSON parse work.
   - File download/view endpoints should read directly from DB artifact zip content and avoid writing temporary files to disk.
   - Aggregated filter insights should be computed server-side and returned by API payload (`top_filters`) so UI can render consistent rankings independent of client-side row sorting.
+  - For high-row extractor datasets, use server-side paging/filter/sort (`limit`, `offset`, `sort_key`, `sort_dir`, `f_<column>`) with small defaults (250/page) and bounded max page size to keep API responses fast.
+  - Extractor UI tables should use fixed-height scrollable containers so the page layout stays stable as row counts grow.

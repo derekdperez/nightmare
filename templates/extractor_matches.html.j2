@@ -12,17 +12,24 @@
     input, select { padding: 6px 8px; border: 1px solid #94a3b8; border-radius: 6px; }
     button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
     button.primary { background: #0ea5e9; border-color: #0284c7; color: #fff; }
+    button:disabled { opacity: 0.55; cursor: default; }
     .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 14px; }
     .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
     .k { font-size: 12px; color: #64748b; }
     .v { font-size: 20px; font-weight: 700; margin-top: 4px; word-break: break-word; }
     .muted { color: #64748b; }
     .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #cbd5e1; }
+    .table-wrap { max-height: 420px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+    .table-wrap.matches { max-height: 540px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
     th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; text-align: left; vertical-align: top; }
     th { background: #e2e8f0; cursor: pointer; user-select: none; }
+    th .sort-ind { color: #0f172a; font-weight: 700; margin-left: 4px; }
     td pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; }
     .empty { padding: 10px; }
+    .filters-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .section-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+    .pager { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
   </style>
 </head>
 <body>
@@ -32,8 +39,8 @@
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <select id="domainSelect" style="min-width: 320px;"></select>
-    <input id="searchText" type="text" placeholder="Search matches (supports all domains)">
-    <input id="limit" type="number" min="1" max="200000" value="10000" title="Max rows to load">
+    <input id="searchText" type="text" placeholder="Global search (all fields)">
+    <input id="limit" type="number" min="1" max="2000" value="250" title="Rows per page">
     <button class="primary" onclick="refreshDomainsAndMatches()">Refresh</button>
     <a id="downloadZip" href="#" target="_blank" rel="noopener noreferrer"><button type="button">Download Zip</button></a>
     <span id="msg" class="muted"></span>
@@ -43,37 +50,100 @@
 
   <div class="panel">
     <strong>Top Filters (Top 10)</strong>
-    <div id="topFiltersBlock" class="empty muted">Load extractor matches to compute top filters.</div>
+    <div class="section-toolbar">
+      <input id="topSearch" type="text" placeholder="Search top filters (all columns)">
+      <input id="topFilterName" type="text" placeholder="Filter name contains">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th data-top-sort="filter_name">Filter Name <span class="sort-ind" id="topSortFilterName"></span></th>
+            <th data-top-sort="match_count">Match Count <span class="sort-ind" id="topSortMatchCount"></span></th>
+          </tr>
+        </thead>
+        <tbody id="topFiltersRows"><tr><td colspan="2">Load extractor matches to compute top filters.</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="panel">
     <strong>Artifact Files</strong>
-    <div id="filesBlock" class="empty muted">Select a domain to list files from its extractor zip.</div>
+    <div class="section-toolbar">
+      <input id="filesSearch" type="text" placeholder="Search files (all columns)">
+      <input id="filesPathFilter" type="text" placeholder="Path contains">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th data-files-sort="path">Path <span class="sort-ind" id="filesSortPath"></span></th>
+            <th data-files-sort="size">Size <span class="sort-ind" id="filesSortSize"></span></th>
+            <th>View</th>
+            <th>Download</th>
+          </tr>
+        </thead>
+        <tbody id="filesRows"><tr><td colspan="4">Select one domain to list files from its extractor artifact.</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th data-key="root_domain">Domain</th>
-        <th data-key="filter_name">Rule</th>
-        <th data-key="importance_score">Score</th>
-        <th data-key="scope">Scope</th>
-        <th data-key="response_side">Side</th>
-        <th data-key="source_http_status">HTTP</th>
-        <th data-key="url">URL</th>
-        <th data-key="source_request_url">Source URL</th>
-        <th data-key="match_preview">Match Preview</th>
-        <th data-key="match_file">Match File</th>
-      </tr>
-    </thead>
-    <tbody id="rows"><tr><td colspan="10">Loading...</td></tr></tbody>
-  </table>
+  <div class="panel">
+    <strong>Matches</strong>
+    <div class="filters-grid">
+      <input id="colRootDomain" type="text" placeholder="Domain contains">
+      <input id="colFilterName" type="text" placeholder="Rule contains">
+      <input id="colImportanceScore" type="text" placeholder="Score contains">
+      <input id="colScope" type="text" placeholder="Scope contains">
+      <input id="colResponseSide" type="text" placeholder="Side contains">
+      <input id="colHttpStatus" type="text" placeholder="HTTP contains">
+      <input id="colUrl" type="text" placeholder="URL contains">
+      <input id="colSourceUrl" type="text" placeholder="Source URL contains">
+      <input id="colMatchPreview" type="text" placeholder="Match Preview contains">
+      <input id="colMatchFile" type="text" placeholder="Match File contains">
+    </div>
+    <div class="pager">
+      <button id="prevPageBtn" type="button">Prev</button>
+      <button id="nextPageBtn" type="button">Next</button>
+      <span class="muted" id="pageInfo">Page 1</span>
+      <span class="muted" id="pagingTotals"></span>
+    </div>
+    <div class="table-wrap matches">
+      <table>
+        <thead>
+          <tr>
+            <th data-key="root_domain">Domain <span class="sort-ind" id="sort_root_domain"></span></th>
+            <th data-key="filter_name">Rule <span class="sort-ind" id="sort_filter_name"></span></th>
+            <th data-key="importance_score">Score <span class="sort-ind" id="sort_importance_score"></span></th>
+            <th data-key="scope">Scope <span class="sort-ind" id="sort_scope"></span></th>
+            <th data-key="response_side">Side <span class="sort-ind" id="sort_response_side"></span></th>
+            <th data-key="source_http_status">HTTP <span class="sort-ind" id="sort_source_http_status"></span></th>
+            <th data-key="url">URL <span class="sort-ind" id="sort_url"></span></th>
+            <th data-key="source_request_url">Source URL <span class="sort-ind" id="sort_source_request_url"></span></th>
+            <th data-key="match_preview">Match Preview <span class="sort-ind" id="sort_match_preview"></span></th>
+            <th data-key="match_file">Match File <span class="sort-ind" id="sort_match_file"></span></th>
+          </tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="10">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    const DEFAULT_LIMIT = 250;
     let currentRows = [];
+    let currentTopFilters = [];
+    let currentFiles = [];
+    let currentOffset = 0;
+    let currentTotalRows = 0;
+    let debounceHandle = null;
     let sortKey = "importance_score";
     let sortDir = "desc";
+    let topSortKey = "match_count";
+    let topSortDir = "desc";
+    let filesSortKey = "path";
+    let filesSortDir = "asc";
 
     function readCookie(name) {
       const needle = `${name}=`;
@@ -137,34 +207,67 @@
       link.style.opacity = "1";
     }
     function renderCards(payload) {
+      const page = Math.floor((Number(payload.offset || 0)) / Math.max(1, Number(payload.limit || DEFAULT_LIMIT))) + 1;
       const cards = [
         ["Domain", payload.root_domain || "__all__"],
+        ["Page", page],
+        ["Page Size", payload.limit || DEFAULT_LIMIT],
         ["Rows", payload.rows_returned || 0],
-        ["Total", payload.total_rows || 0],
-        ["Truncated", payload.rows_limited ? "yes" : "no"],
+        ["Total (Filtered)", payload.total_rows || 0],
+        ["Has More", payload.has_more ? "yes" : "no"],
         ["Cache Hits", (payload.cache || {}).hits || 0],
         ["Cache Misses", (payload.cache || {}).misses || 0],
       ];
       document.getElementById("cards").innerHTML = cards.map(([k,v]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
     }
-    function sortRows(rows) {
-      const factor = sortDir === "asc" ? 1 : -1;
-      return [...rows].sort((a, b) => {
-        const av = a?.[sortKey];
-        const bv = b?.[sortKey];
-        const aNum = Number(av);
-        const bNum = Number(bv);
-        if (Number.isFinite(aNum) && Number.isFinite(bNum)) return (aNum - bNum) * factor;
-        return String(av ?? "").localeCompare(String(bv ?? "")) * factor;
-      });
+    function setSortIndicators() {
+      document.querySelectorAll("[id^='sort_']").forEach((el) => { el.textContent = ""; });
+      const node = document.getElementById(`sort_${sortKey}`);
+      if (node) node.textContent = sortDir === "asc" ? "▲" : "▼";
+      document.getElementById("topSortFilterName").textContent = topSortKey === "filter_name" ? (topSortDir === "asc" ? "▲" : "▼") : "";
+      document.getElementById("topSortMatchCount").textContent = topSortKey === "match_count" ? (topSortDir === "asc" ? "▲" : "▼") : "";
+      document.getElementById("filesSortPath").textContent = filesSortKey === "path" ? (filesSortDir === "asc" ? "▲" : "▼") : "";
+      document.getElementById("filesSortSize").textContent = filesSortKey === "size" ? (filesSortDir === "asc" ? "▲" : "▼") : "";
+    }
+    function updatePager(payload) {
+      const offset = Number(payload.offset || 0);
+      const limit = Math.max(1, Number(payload.limit || DEFAULT_LIMIT));
+      const total = Number(payload.total_rows || 0);
+      const page = Math.floor(offset / limit) + 1;
+      const pageCount = Math.max(1, Math.ceil(total / limit));
+      document.getElementById("pageInfo").textContent = `Page ${page} of ${pageCount}`;
+      document.getElementById("pagingTotals").textContent = `${payload.rows_returned || 0} shown / ${total} total`;
+      document.getElementById("prevPageBtn").disabled = !(offset > 0);
+      document.getElementById("nextPageBtn").disabled = !Boolean(payload.has_more);
+    }
+    function getColumnFilters() {
+      return {
+        root_domain: String(document.getElementById("colRootDomain").value || "").trim(),
+        filter_name: String(document.getElementById("colFilterName").value || "").trim(),
+        importance_score: String(document.getElementById("colImportanceScore").value || "").trim(),
+        scope: String(document.getElementById("colScope").value || "").trim(),
+        response_side: String(document.getElementById("colResponseSide").value || "").trim(),
+        source_http_status: String(document.getElementById("colHttpStatus").value || "").trim(),
+        url: String(document.getElementById("colUrl").value || "").trim(),
+        source_request_url: String(document.getElementById("colSourceUrl").value || "").trim(),
+        match_preview: String(document.getElementById("colMatchPreview").value || "").trim(),
+        match_file: String(document.getElementById("colMatchFile").value || "").trim(),
+      };
+    }
+    function scheduleLoadMatches(resetOffset = true) {
+      if (debounceHandle) clearTimeout(debounceHandle);
+      debounceHandle = setTimeout(() => {
+        debounceHandle = null;
+        if (resetOffset) currentOffset = 0;
+        loadMatches();
+      }, 250);
     }
     function renderRows(rows) {
       if (!rows.length) {
         document.getElementById("rows").innerHTML = "<tr><td colspan='10'>No matches found.</td></tr>";
         return;
       }
-      const sorted = sortRows(rows);
-      document.getElementById("rows").innerHTML = sorted.map((r) => {
+      document.getElementById("rows").innerHTML = rows.map((r) => {
         return `<tr>
           <td>${esc(r.root_domain || "")}</td>
           <td>${esc(r.filter_name || "")}</td>
@@ -180,35 +283,67 @@
       }).join("");
     }
     function renderTopFilters(topFilters) {
-      const rows = Array.isArray(topFilters) ? topFilters : [];
-      if (!rows.length) {
-        document.getElementById("topFiltersBlock").innerHTML = "<span class='muted'>No filter matches found.</span>";
+      const rows = Array.isArray(topFilters) ? [...topFilters] : [];
+      const qAll = String(document.getElementById("topSearch").value || "").trim().toLowerCase();
+      const qName = String(document.getElementById("topFilterName").value || "").trim().toLowerCase();
+      const filtered = rows.filter((r) => {
+        const name = String(r.filter_name || "");
+        const count = String(r.match_count || 0);
+        const blob = `${name} ${count}`.toLowerCase();
+        if (qAll && !blob.includes(qAll)) return false;
+        if (qName && !name.toLowerCase().includes(qName)) return false;
+        return true;
+      });
+      filtered.sort((a, b) => {
+        if (topSortKey === "match_count") {
+          const diff = Number(a.match_count || 0) - Number(b.match_count || 0);
+          return topSortDir === "asc" ? diff : -diff;
+        }
+        const diff = String(a.filter_name || "").localeCompare(String(b.filter_name || ""));
+        return topSortDir === "asc" ? diff : -diff;
+      });
+      if (!filtered.length) {
+        document.getElementById("topFiltersRows").innerHTML = "<tr><td colspan='2'>No filter matches found.</td></tr>";
         return;
       }
-      document.getElementById("topFiltersBlock").innerHTML = `
-        <table>
-          <thead><tr><th>Filter Name</th><th>Match Count</th></tr></thead>
-          <tbody>
-            ${rows.map((r) => `<tr><td>${esc(r.filter_name || "")}</td><td>${esc(r.match_count || 0)}</td></tr>`).join("")}
-          </tbody>
-        </table>`;
+      document.getElementById("topFiltersRows").innerHTML =
+        filtered.map((r) => `<tr><td>${esc(r.filter_name || "")}</td><td>${esc(r.match_count || 0)}</td></tr>`).join("");
     }
-    function renderFiles(filesByDomain) {
+    function renderFiles(filesInput) {
       const domain = selectedDomain();
       if (!domain || domain === "__all__") {
-        document.getElementById("filesBlock").innerHTML = "<span class='muted'>Select one domain to list files from its extractor artifact.</span>";
+        document.getElementById("filesRows").innerHTML = "<tr><td colspan='4'>Select one domain to list files from its extractor artifact.</td></tr>";
         return;
       }
-      const files = Array.isArray(filesByDomain?.[domain]) ? filesByDomain[domain] : [];
+      const files = Array.isArray(filesInput) ? filesInput : [];
+      const qAll = String(document.getElementById("filesSearch").value || "").trim().toLowerCase();
+      const qPath = String(document.getElementById("filesPathFilter").value || "").trim().toLowerCase();
+      const filtered = files.filter((f) => {
+        const p = String(f.path || "");
+        const size = String(f.size || 0);
+        const blob = `${p} ${size}`.toLowerCase();
+        if (qAll && !blob.includes(qAll)) return false;
+        if (qPath && !p.toLowerCase().includes(qPath)) return false;
+        return true;
+      });
+      filtered.sort((a, b) => {
+        if (filesSortKey === "size") {
+          const diff = Number(a.size || 0) - Number(b.size || 0);
+          return filesSortDir === "asc" ? diff : -diff;
+        }
+        const diff = String(a.path || "").localeCompare(String(b.path || ""));
+        return filesSortDir === "asc" ? diff : -diff;
+      });
       if (!files.length) {
-        document.getElementById("filesBlock").innerHTML = "<span class='muted'>No file list loaded yet for this domain.</span>";
+        document.getElementById("filesRows").innerHTML = "<tr><td colspan='4'>No file list loaded yet for this domain.</td></tr>";
         return;
       }
-      document.getElementById("filesBlock").innerHTML = `
-        <table>
-          <thead><tr><th>Path</th><th>Size</th><th>View</th><th>Download</th></tr></thead>
-          <tbody>
-            ${files.map((f) => {
+      if (!filtered.length) {
+        document.getElementById("filesRows").innerHTML = "<tr><td colspan='4'>No files matched current filters.</td></tr>";
+        return;
+      }
+      document.getElementById("filesRows").innerHTML =
+        filtered.map((f) => {
               const p = String(f.path || "");
               const viewHref = `/api/coord/extractor-matches/file?root_domain=${encodeURIComponent(domain)}&path=${encodeURIComponent(p)}`;
               const dlHref = `${viewHref}&download=1`;
@@ -218,9 +353,7 @@
                 <td><a href="${viewHref}" target="_blank" rel="noopener noreferrer">View</a></td>
                 <td><a href="${dlHref}" target="_blank" rel="noopener noreferrer">Download</a></td>
               </tr>`;
-            }).join("")}
-          </tbody>
-        </table>`;
+            }).join("");
     }
     async function loadDomains() {
       const payload = await apiGet("/api/coord/extractor-matches/domains?limit=20000");
@@ -239,45 +372,120 @@
       msg.textContent = "Loading...";
       const domain = selectedDomain();
       const q = String(document.getElementById("searchText").value || "").trim();
-      const limit = Math.max(1, Number(document.getElementById("limit").value || 10000));
-      let path = `/api/coord/extractor-matches?limit=${encodeURIComponent(limit)}`;
-      if (domain && domain !== "__all__") path += `&root_domain=${encodeURIComponent(domain)}`;
-      if (q) path += `&q=${encodeURIComponent(q)}`;
+      const limit = Math.max(1, Math.min(2000, Number(document.getElementById("limit").value || DEFAULT_LIMIT)));
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      params.set("offset", String(Math.max(0, currentOffset)));
+      params.set("sort_key", sortKey);
+      params.set("sort_dir", sortDir);
+      if (domain && domain !== "__all__") params.set("root_domain", domain);
+      if (q) params.set("q", q);
+      const columnFilters = getColumnFilters();
+      Object.entries(columnFilters).forEach(([key, val]) => {
+        if (val) params.set(`f_${key}`, val);
+      });
+      const path = `/api/coord/extractor-matches?${params.toString()}`;
       try {
         const payload = await apiGet(path);
         currentRows = Array.isArray(payload.rows) ? payload.rows : [];
+        currentTopFilters = Array.isArray(payload.top_filters) ? payload.top_filters : [];
+        currentTotalRows = Number(payload.total_rows || 0);
+        currentOffset = Number(payload.offset || 0);
+        const filesByDomain = payload.files_by_domain || {};
+        currentFiles = domain && domain !== "__all__" && Array.isArray(filesByDomain[domain]) ? filesByDomain[domain] : [];
         renderCards(payload);
-        renderTopFilters(payload.top_filters || []);
+        renderTopFilters(currentTopFilters);
         renderRows(currentRows);
-        renderFiles(payload.files_by_domain || {});
-        msg.textContent = `Loaded ${payload.rows_returned || 0} row(s).`;
+        renderFiles(currentFiles);
+        updatePager(payload);
+        setSortIndicators();
+        msg.textContent = `Loaded ${payload.rows_returned || 0} row(s) from offset ${payload.offset || 0}.`;
       } catch (e) {
         document.getElementById("rows").innerHTML = `<tr><td colspan="10">Failed to load extractor matches: ${esc(e.message)}</td></tr>`;
-        document.getElementById("topFiltersBlock").innerHTML = "<span class='muted'>Load failed.</span>";
-        document.getElementById("filesBlock").innerHTML = "<span class='muted'>Load failed.</span>";
+        document.getElementById("topFiltersRows").innerHTML = "<tr><td colspan='2'>Load failed.</td></tr>";
+        document.getElementById("filesRows").innerHTML = "<tr><td colspan='4'>Load failed.</td></tr>";
         msg.textContent = "Load failed.";
       }
     }
     async function refreshDomainsAndMatches() {
       try { await loadDomains(); } catch (_) {}
+      currentOffset = 0;
       await loadMatches();
     }
 
     hydrateTokenFromCookie();
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
-    document.getElementById("domainSelect").addEventListener("change", () => { updateDownloadLink(); loadMatches(); });
-    document.getElementById("searchText").addEventListener("change", loadMatches);
-    document.getElementById("limit").addEventListener("change", loadMatches);
+    document.getElementById("domainSelect").addEventListener("change", () => { updateDownloadLink(); scheduleLoadMatches(true); });
+    document.getElementById("searchText").addEventListener("input", () => scheduleLoadMatches(true));
+    document.getElementById("limit").addEventListener("change", () => scheduleLoadMatches(true));
+    [
+      "colRootDomain",
+      "colFilterName",
+      "colImportanceScore",
+      "colScope",
+      "colResponseSide",
+      "colHttpStatus",
+      "colUrl",
+      "colSourceUrl",
+      "colMatchPreview",
+      "colMatchFile",
+    ].forEach((id) => {
+      document.getElementById(id).addEventListener("input", () => scheduleLoadMatches(true));
+    });
+    document.getElementById("prevPageBtn").addEventListener("click", () => {
+      const limit = Math.max(1, Math.min(2000, Number(document.getElementById("limit").value || DEFAULT_LIMIT)));
+      currentOffset = Math.max(0, currentOffset - limit);
+      loadMatches();
+    });
+    document.getElementById("nextPageBtn").addEventListener("click", () => {
+      const limit = Math.max(1, Math.min(2000, Number(document.getElementById("limit").value || DEFAULT_LIMIT)));
+      currentOffset = currentOffset + limit;
+      loadMatches();
+    });
     document.querySelectorAll("th[data-key]").forEach((th) => {
       th.addEventListener("click", () => {
         const key = String(th.getAttribute("data-key") || "");
         if (!key) return;
         if (sortKey === key) sortDir = sortDir === "asc" ? "desc" : "asc";
-        else { sortKey = key; sortDir = "asc"; }
-        renderRows(currentRows);
+        else {
+          sortKey = key;
+          sortDir = key === "importance_score" || key === "source_http_status" ? "desc" : "asc";
+        }
+        scheduleLoadMatches(true);
       });
     });
+    document.querySelectorAll("th[data-top-sort]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = String(th.getAttribute("data-top-sort") || "");
+        if (!key) return;
+        if (topSortKey === key) topSortDir = topSortDir === "asc" ? "desc" : "asc";
+        else {
+          topSortKey = key;
+          topSortDir = key === "match_count" ? "desc" : "asc";
+        }
+        setSortIndicators();
+        renderTopFilters(currentTopFilters);
+      });
+    });
+    document.querySelectorAll("th[data-files-sort]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = String(th.getAttribute("data-files-sort") || "");
+        if (!key) return;
+        if (filesSortKey === key) filesSortDir = filesSortDir === "asc" ? "desc" : "asc";
+        else {
+          filesSortKey = key;
+          filesSortDir = key === "size" ? "desc" : "asc";
+        }
+        setSortIndicators();
+        renderFiles(currentFiles);
+      });
+    });
+    document.getElementById("topSearch").addEventListener("input", () => renderTopFilters(currentTopFilters));
+    document.getElementById("topFilterName").addEventListener("input", () => renderTopFilters(currentTopFilters));
+    document.getElementById("filesSearch").addEventListener("input", () => renderFiles(currentFiles));
+    document.getElementById("filesPathFilter").addEventListener("input", () => renderFiles(currentFiles));
+    setSortIndicators();
     refreshDomainsAndMatches();
   </script>
 </body>

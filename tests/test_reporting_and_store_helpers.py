@@ -8,7 +8,7 @@ import pytest
 
 from reporting.extractor_reports import build_javascript_extractor_matches_report_html
 from reporting.server_pages import render_crawl_progress_html, render_dashboard_html, render_extractor_matches_html, render_workers_html
-from server import _top_extractor_filters, collect_dashboard_data
+from server import _apply_extractor_row_query, _top_extractor_filters, collect_dashboard_data
 from server_app.store import CoordinatorStore, _get_root_domain, _make_target_entry_id, _normalize_target_url
 
 
@@ -485,3 +485,30 @@ def test_top_extractor_filters_ranks_descending_and_limits_top_10():
     assert top[0]["match_count"] == 12
     assert top[1]["filter_name"] == "rule-10"
     assert top[-1]["filter_name"] == "rule-02"
+
+
+def test_apply_extractor_row_query_filters_sorts_and_pages():
+    rows = [
+        {"filter_name": "alpha", "importance_score": 1, "source_http_status": 200, "url": "https://a.example/x"},
+        {"filter_name": "beta", "importance_score": 10, "source_http_status": 500, "url": "https://b.example/y"},
+        {"filter_name": "alpha", "importance_score": 7, "source_http_status": 404, "url": "https://a.example/z"},
+    ]
+
+    result = _apply_extractor_row_query(
+        rows,
+        search_text="example",
+        column_filters={"filter_name": "alpha"},
+        sort_key="importance_score",
+        sort_dir="desc",
+        offset=0,
+        limit=1,
+    )
+    page_rows = result["rows"]
+    filtered_rows = result["filtered_rows_for_stats"]
+    assert result["total_rows"] == 2
+    assert len(page_rows) == 1
+    assert page_rows[0]["importance_score"] == 7
+    assert len(filtered_rows) == 2
+    assert result["has_more"] is True
+    assert result["next_offset"] == 1
+    assert result["prev_offset"] is None

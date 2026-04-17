@@ -66,7 +66,8 @@ DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "server.json"
 MAX_LOG_TAIL_BYTES = 64 * 1024
 DEFAULT_COORDINATOR_LEASE_SECONDS = 120
 RESET_COORDINATOR_CONFIRM = "RESET_COORDINATOR_DATA"
-DEFAULT_EXTRACTOR_MATCH_LIMIT = 10000
+DEFAULT_EXTRACTOR_MATCH_LIMIT = 250
+MAX_EXTRACTOR_MATCH_LIMIT = 2000
 MAX_EXTRACTOR_CACHE_DOMAINS = 64
 EXTRACTOR_CACHE_TTL_SECONDS = 900
 
@@ -471,6 +472,116 @@ def _top_extractor_filters(rows: list[dict[str, Any]], *, top_n: int = 10) -> li
     for name, count in ranked[: max(1, int(top_n or 10))]:
         out.append({"filter_name": name, "match_count": int(count)})
     return out
+
+
+EXTRACTOR_MATCH_FILTER_KEYS = {
+    "root_domain",
+    "filter_name",
+    "importance_score",
+    "scope",
+    "response_side",
+    "source_http_status",
+    "url",
+    "source_request_url",
+    "match_preview",
+    "match_file",
+    "regex",
+    "result_type",
+    "result_file",
+    "generated_at_utc",
+}
+EXTRACTOR_MATCH_NUMERIC_KEYS = {"importance_score", "source_http_status"}
+EXTRACTOR_MATCH_DEFAULT_SORT_KEY = "importance_score"
+
+
+def _extractor_row_search_blob(row: dict[str, Any]) -> str:
+    parts = [
+        row.get("root_domain"),
+        row.get("filter_name"),
+        row.get("scope"),
+        row.get("response_side"),
+        row.get("regex"),
+        row.get("url"),
+        row.get("source_request_url"),
+        row.get("result_file"),
+        row.get("matched_text"),
+        row.get("match_file"),
+    ]
+    return " ".join(str(item or "") for item in parts).lower()
+
+
+def _apply_extractor_row_query(
+    rows: list[dict[str, Any]],
+    *,
+    search_text: str,
+    column_filters: dict[str, str],
+    sort_key: str,
+    sort_dir: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    q = str(search_text or "").strip().lower()
+    effective_filters: dict[str, str] = {}
+    for key, value in (column_filters or {}).items():
+        col = str(key or "").strip()
+        if col not in EXTRACTOR_MATCH_FILTER_KEYS:
+            continue
+        text = str(value or "").strip().lower()
+        if text:
+            effective_filters[col] = text
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if q and q not in _extractor_row_search_blob(row):
+            continue
+        failed = False
+        for col, needle in effective_filters.items():
+            value = row.get(col)
+            if col in EXTRACTOR_MATCH_NUMERIC_KEYS:
+                hay = str(_safe_int(value, 0))
+            else:
+                hay = str(value or "")
+            if needle not in hay.lower():
+                failed = True
+                break
+        if not failed:
+            filtered.append(row)
+
+    safe_sort_key = str(sort_key or EXTRACTOR_MATCH_DEFAULT_SORT_KEY).strip()
+    if safe_sort_key not in EXTRACTOR_MATCH_FILTER_KEYS:
+        safe_sort_key = EXTRACTOR_MATCH_DEFAULT_SORT_KEY
+    safe_sort_dir = "asc" if str(sort_dir or "").strip().lower() == "asc" else "desc"
+    reverse = safe_sort_dir == "desc"
+
+    def _sort_tuple(item: dict[str, Any]) -> tuple[int, Any]:
+        value = item.get(safe_sort_key)
+        if safe_sort_key in EXTRACTOR_MATCH_NUMERIC_KEYS:
+            return (0, _safe_int(value, 0))
+        return (1, str(value or "").lower())
+
+    filtered.sort(key=_sort_tuple, reverse=reverse)
+    total_rows = len(filtered)
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = max(1, min(MAX_EXTRACTOR_MATCH_LIMIT, int(limit or DEFAULT_EXTRACTOR_MATCH_LIMIT)))
+    page_rows = filtered[safe_offset : safe_offset + safe_limit]
+    next_offset = safe_offset + safe_limit if (safe_offset + safe_limit) < total_rows else None
+    prev_offset = max(0, safe_offset - safe_limit) if safe_offset > 0 else None
+
+    return {
+        "rows": page_rows,
+        "filtered_rows_for_stats": filtered,
+        "total_rows": total_rows,
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "next_offset": next_offset,
+        "prev_offset": prev_offset,
+        "has_more": next_offset is not None,
+        "sort_key": safe_sort_key,
+        "sort_dir": safe_sort_dir,
+        "column_filters": effective_filters,
+    }
 
 
 def _count_matches_in_zip_bytes(data: bytes) -> int:
@@ -1000,7 +1111,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
             search_text = str((query.get("q") or [""])[0] or "").strip().lower()
-            limit = max(1, min(200000, _safe_int((query.get("limit") or [DEFAULT_EXTRACTOR_MATCH_LIMIT])[0], DEFAULT_EXTRACTOR_MATCH_LIMIT)))
+            limit = max(
+                1,
+                min(
+                    MAX_EXTRACTOR_MATCH_LIMIT,
+                    _safe_int((query.get("limit") or [DEFAULT_EXTRACTOR_MATCH_LIMIT])[0], DEFAULT_EXTRACTOR_MATCH_LIMIT),
+                ),
+            )
+            offset = max(0, _safe_int((query.get("offset") or [0])[0], 0))
+            sort_key = str((query.get("sort_key") or [EXTRACTOR_MATCH_DEFAULT_SORT_KEY])[0] or EXTRACTOR_MATCH_DEFAULT_SORT_KEY).strip()
+            sort_dir = str((query.get("sort_dir") or ["desc"])[0] or "desc").strip().lower()
+            column_filters: dict[str, str] = {}
+            for key in sorted(EXTRACTOR_MATCH_FILTER_KEYS):
+                raw = str((query.get(f"f_{key}") or [""])[0] or "").strip()
+                if raw:
+                    column_filters[key] = raw
 
             domains_to_load: list[str] = []
             if root_domain and root_domain != "__all__":
@@ -1031,22 +1156,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if isinstance(files, list):
                     files_by_domain[domain] = files
 
-            if search_text:
-                all_rows = [row for row in all_rows if search_text in self._matches_row_search_text(row if isinstance(row, dict) else {})]
-            total_rows = len(all_rows)
-            top_filters = _top_extractor_filters(all_rows, top_n=10)
-            rows_limited = all_rows[:limit]
+            query_result = _apply_extractor_row_query(
+                all_rows,
+                search_text=search_text,
+                column_filters=column_filters,
+                sort_key=sort_key,
+                sort_dir=sort_dir,
+                offset=offset,
+                limit=limit,
+            )
+            filtered_rows = query_result.get("rows", [])
+            filtered_rows_for_stats = query_result.get("filtered_rows_for_stats", [])
+            total_rows = int(query_result.get("total_rows", 0) or 0)
+            top_filters = _top_extractor_filters(
+                filtered_rows_for_stats if isinstance(filtered_rows_for_stats, list) else filtered_rows,
+                top_n=10,
+            )
             self._write_json(
                 {
                     "generated_at_utc": _iso_now(),
                     "root_domain": root_domain or "__all__",
                     "search": search_text,
                     "total_rows": total_rows,
-                    "rows_returned": len(rows_limited),
-                    "rows_limited": total_rows > len(rows_limited),
+                    "rows_returned": len(filtered_rows),
+                    "rows_limited": total_rows > len(filtered_rows),
+                    "offset": int(query_result.get("offset", 0) or 0),
+                    "limit": int(query_result.get("limit", limit) or limit),
+                    "next_offset": query_result.get("next_offset"),
+                    "prev_offset": query_result.get("prev_offset"),
+                    "has_more": bool(query_result.get("has_more", False)),
+                    "sort_key": str(query_result.get("sort_key", EXTRACTOR_MATCH_DEFAULT_SORT_KEY) or EXTRACTOR_MATCH_DEFAULT_SORT_KEY),
+                    "sort_dir": str(query_result.get("sort_dir", "desc") or "desc"),
+                    "column_filters": query_result.get("column_filters", {}),
                     "cache": cache_stats,
                     "top_filters": top_filters,
-                    "rows": rows_limited,
+                    "rows": filtered_rows,
                     "files_by_domain": files_by_domain if root_domain and root_domain != "__all__" else {},
                 }
             )

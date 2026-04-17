@@ -484,3 +484,16 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - UI renders this in a dedicated panel (`Top Filters (Top 10)`).
   - Added unit coverage for ranking/limit behavior (`_top_extractor_filters`).
 - Validation: `pytest -q` -> 92 passed.
+
+- Extractor Matches performance/UX hardening:
+  - Switched `/api/coord/extractor-matches` to server-side paging/sort/filter with `limit`, `offset`, `sort_key`, `sort_dir`, and per-column `f_<column>` filters.
+  - Default page size lowered to 250 (max 2000 per request) to reduce response size and latency.
+  - Added response paging metadata (`offset`, `next_offset`, `prev_offset`, `has_more`, applied sort/filter fields).
+  - Added fixed-height scrollable table containers on extractor page so large datasets do not expand page height.
+  - Added lazy page loading controls (Prev/Next) and debounced server fetches for global and column filters.
+  - Added sortable/filterable/searchable behavior for all extractor-page tables:
+    - matches (server-driven global + per-column search/filter/sort),
+    - top filters (client-side global + column filter + sort),
+    - artifact files (client-side global + column filter + sort).
+  - Kept top-filter aggregation server-side and based on full filtered set (pre-pagination).
+- Validation: `pytest -q` -> 93 passed.
