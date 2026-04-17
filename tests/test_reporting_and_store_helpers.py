@@ -291,3 +291,76 @@ def test_worker_statuses_includes_presence_only_worker():
     assert worker["status"] == "online"
     assert worker["running_targets"] == 0
     assert worker["running_stage_tasks"] == 0
+
+
+def test_crawl_progress_snapshot_reports_domain_counts():
+    now = datetime.now(timezone.utc)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchall = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "FROM domain_set d" in compact and "discovered_urls_count" in compact:
+                assert params == (200,)
+                self._fetchall = [
+                    (
+                        "example.com",  # root_domain
+                        "https://example.com",  # start_url
+                        12,  # discovered_urls_count
+                        5,  # visited_urls_count
+                        7,  # frontier_count
+                        now,  # session_saved_at_utc
+                        now,  # last_activity_at_utc
+                        0,  # pending_targets
+                        1,  # running_targets
+                        0,  # completed_targets
+                        0,  # failed_targets
+                        0,  # pending_stage_tasks
+                        0,  # running_stage_tasks
+                        0,  # completed_stage_tasks
+                        0,  # failed_stage_tasks
+                        [],  # active_stages
+                        ["worker-1"],  # target_workers
+                        [],  # stage_workers
+                    )
+                ]
+                return
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchall(self):
+            return self._fetchall
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    data = CoordinatorStore.crawl_progress_snapshot(store, limit=200)
+    assert data["counts"]["total_domains"] == 1
+    assert data["counts"]["running_domains"] == 1
+    domain = data["domains"][0]
+    assert domain["root_domain"] == "example.com"
+    assert domain["phase"] == "nightmare_running"
+    assert domain["discovered_urls_count"] == 12
+    assert domain["visited_urls_count"] == 5
+    assert domain["frontier_count"] == 7
+    assert domain["active_workers"] == ["worker-1"]

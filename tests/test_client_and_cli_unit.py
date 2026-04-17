@@ -77,6 +77,42 @@ def test_client_main_rejects_noop_skip_flags():
         client.main(["status", "--skip-coordinator", "--skip-ssm"])
 
 
+def test_client_main_progress_rejects_skip_coordinator():
+    with pytest.raises(ValueError, match="does nothing"):
+        client.main(["progress", "--skip-coordinator"])
+
+
+def test_client_main_progress_fetches_crawl_progress(monkeypatch: pytest.MonkeyPatch):
+    captured_paths: list[str] = []
+
+    def fake_http_get_json(base_url, path, **kwargs):
+        captured_paths.append(path)
+        if path == "/api/coord/crawl-progress":
+            return {
+                "generated_at_utc": "2026-04-17T00:00:00Z",
+                "counts": {"total_domains": 1, "running_domains": 1, "queued_domains": 0, "failed_domains": 0, "completed_domains": 0},
+                "domains": [
+                    {
+                        "root_domain": "example.com",
+                        "phase": "nightmare_running",
+                        "discovered_urls_count": 12,
+                        "visited_urls_count": 5,
+                        "frontier_count": 7,
+                        "seconds_since_activity": 3,
+                        "active_workers": ["worker-a"],
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(client, "_http_get_json", fake_http_get_json)
+    monkeypatch.setattr(client, "_print_crawl_progress", lambda payload: None)
+
+    rc = client.main(["progress", "--server-base-url", "https://coord.example.com", "--api-token", "tok", "--skip-ssm"])
+    assert rc == 0
+    assert captured_paths == ["/api/coord/crawl-progress"]
+
+
 def test_register_targets_read_targets_filters_blank_and_comments(tmp_path: Path):
     targets_file = tmp_path / "targets.txt"
     targets_file.write_text(
@@ -162,4 +198,3 @@ def test_http_queue_cli_main_requeue(monkeypatch: pytest.MonkeyPatch, capsys: py
     out = capsys.readouterr().out
     assert rc == 0
     assert '"requeued": 5' in out
-

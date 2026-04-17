@@ -648,6 +648,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 worker["config"] = self._resolve_worker_config_rel(worker_id)
             self._write_json(snapshot)
             return
+        if path == "/api/coord/crawl-progress":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or [200])[0], 200)
+            try:
+                payload = self.coordinator_store.crawl_progress_snapshot(limit=limit)
+            except Exception as exc:
+                self.log_message("crawl_progress_snapshot failed: %r", exc)
+                self._write_json({"error": "crawl progress query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
+            return
         if path == "/api/coord/worker-config":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)

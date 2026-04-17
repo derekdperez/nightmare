@@ -112,6 +112,36 @@ def _print_coordinator_worker_status(payload: dict[str, Any]) -> None:
         print(f"{wid} | {status} | {age_text} | {run_targets} | {run_stage_tasks} | {active_stages}")
 
 
+def _print_crawl_progress(payload: dict[str, Any]) -> None:
+    counts = payload.get("counts", {}) if isinstance(payload.get("counts"), dict) else {}
+    domains = payload.get("domains", []) if isinstance(payload.get("domains"), list) else []
+    print("[crawl-progress]")
+    print(
+        "domains total={total} running={running} queued={queued} failed={failed} completed={completed} generated_at={ts}".format(
+            total=int(counts.get("total_domains", 0) or 0),
+            running=int(counts.get("running_domains", 0) or 0),
+            queued=int(counts.get("queued_domains", 0) or 0),
+            failed=int(counts.get("failed_domains", 0) or 0),
+            completed=int(counts.get("completed_domains", 0) or 0),
+            ts=str(payload.get("generated_at_utc", "")),
+        )
+    )
+    print("root_domain | phase | found_urls | visited | frontier | age_s | active_workers")
+    for item in domains:
+        if not isinstance(item, dict):
+            continue
+        root_domain = str(item.get("root_domain", "") or "")
+        phase = str(item.get("phase", "unknown") or "unknown")
+        found_urls = int(item.get("discovered_urls_count", 0) or 0)
+        visited_urls = int(item.get("visited_urls_count", 0) or 0)
+        frontier_count = int(item.get("frontier_count", 0) or 0)
+        age = item.get("seconds_since_activity")
+        age_text = str(int(age)) if isinstance(age, int) else "-"
+        active_workers_raw = item.get("active_workers", [])
+        active_workers = ",".join(str(x) for x in active_workers_raw) if isinstance(active_workers_raw, list) else ""
+        print(f"{root_domain} | {phase} | {found_urls} | {visited_urls} | {frontier_count} | {age_text} | {active_workers}")
+
+
 def _parse_compose_ps_stdout(raw: str) -> str:
     text = str(raw or "").strip()
     if not text:
@@ -357,7 +387,7 @@ def _run_ssm_rollout(
 def parse_args(argv: Optional[list[str] ] = None) -> argparse.Namespace:
     env_from_file = _read_env_file(BASE_DIR / "deploy" / ".env")
     p = argparse.ArgumentParser(description="Central operator client for worker and VM status checks")
-    p.add_argument("action", nargs="?", default="status", choices=["status", "rollout"], help="Action to run")
+    p.add_argument("action", nargs="?", default="status", choices=["status", "progress", "rollout"], help="Action to run")
     p.add_argument("--server-base-url", default=os.getenv("COORDINATOR_BASE_URL", env_from_file.get("COORDINATOR_BASE_URL", "")), help="Coordinator server base URL")
     p.add_argument("--api-token", default=os.getenv("COORDINATOR_API_TOKEN", env_from_file.get("COORDINATOR_API_TOKEN", "")), help="Coordinator API token")
     p.add_argument(
@@ -366,6 +396,7 @@ def parse_args(argv: Optional[list[str] ] = None) -> argparse.Namespace:
         help="Do not verify HTTPS certificates (use for bootstrap self-signed certs on the central host)",
     )
     p.add_argument("--stale-after-seconds", type=int, default=180, help="Heartbeat freshness window for online/stale worker status")
+    p.add_argument("--progress-limit", type=int, default=200, help="Max domains to include in crawl progress snapshots")
     p.add_argument("--skip-coordinator", action="store_true", help="Do not call coordinator HTTP APIs (use when this host cannot reach COORDINATOR_BASE_URL)")
     p.add_argument("--skip-ssm", action="store_true", help="Skip AWS SSM per-VM docker status checks")
     p.add_argument("--aws-region", default=os.getenv("AWS_REGION", env_from_file.get("AWS_REGION", "us-east-1")), help="AWS region for SSM checks")
@@ -382,7 +413,7 @@ def main(argv: Optional[list[str] ] = None) -> int:
     load_env_file_into_os(BASE_DIR / "deploy" / ".env", override=False)
     logger = get_logger("client")
     args = parse_args(argv)
-    if args.action not in {"status", "rollout"}:
+    if args.action not in {"status", "progress", "rollout"}:
         raise ValueError(f"unsupported action: {args.action}")
 
     conn = ClientSettings.model_validate(
@@ -394,6 +425,8 @@ def main(argv: Optional[list[str] ] = None) -> int:
     )
 
     if args.skip_coordinator:
+        if args.action == "progress":
+            raise ValueError("progress does nothing with --skip-coordinator")
         if args.action == "status" and args.skip_ssm:
             raise ValueError(
                 "status with --skip-coordinator does nothing when --skip-ssm is also set "
@@ -403,15 +436,25 @@ def main(argv: Optional[list[str] ] = None) -> int:
     else:
         if not conn.server_base_url:
             raise ValueError("server base URL is required (use --server-base-url or COORDINATOR_BASE_URL)")
-        logger.info("client_fetching_coordinator_status", base_url=conn.server_base_url)
-        workers_payload = _http_get_json(
-            base_url=conn.server_base_url,
-            path="/api/coord/workers",
-            token=conn.api_token,
-            query={"stale_after_seconds": max(15, int(args.stale_after_seconds or 180))},
-            insecure_tls=bool(conn.insecure_tls),
-        )
-        _print_coordinator_worker_status(workers_payload)
+        if args.action == "status":
+            logger.info("client_fetching_coordinator_status", base_url=conn.server_base_url)
+            workers_payload = _http_get_json(
+                base_url=conn.server_base_url,
+                path="/api/coord/workers",
+                token=conn.api_token,
+                query={"stale_after_seconds": max(15, int(args.stale_after_seconds or 180))},
+                insecure_tls=bool(conn.insecure_tls),
+            )
+            _print_coordinator_worker_status(workers_payload)
+        if args.action in {"status", "progress"}:
+            crawl_progress_payload = _http_get_json(
+                base_url=conn.server_base_url,
+                path="/api/coord/crawl-progress",
+                token=conn.api_token,
+                query={"limit": max(1, int(args.progress_limit or 200))},
+                insecure_tls=bool(conn.insecure_tls),
+            )
+            _print_crawl_progress(crawl_progress_payload)
 
     if args.action == "status" and not args.skip_ssm:
         _run_ssm_worker_status(
@@ -420,6 +463,8 @@ def main(argv: Optional[list[str] ] = None) -> int:
             target_values=str(args.ssm_target_values or "nightmare-worker*"),
             timeout_seconds=max(10, int(args.ssm_timeout_seconds or 60)),
         )
+    if args.action == "progress":
+        return 0
     if args.action == "rollout":
         logger.info("client_starting_rollout", region=str(args.aws_region or "us-east-1"), branch=str(args.branch or "main"))
         return _run_ssm_rollout(

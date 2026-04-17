@@ -594,6 +594,206 @@ ORDER BY ordinal_position;
             "generated_at_utc": _iso_now(),
         }
 
+    def crawl_progress_snapshot(self, *, limit: int = 200) -> dict[str, Any]:
+        safe_limit = max(1, min(2000, int(limit or 200)))
+        sql = """
+WITH domain_set AS (
+    SELECT DISTINCT root_domain FROM coordinator_targets
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_stage_tasks
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_sessions
+),
+target_agg AS (
+    SELECT
+      root_domain,
+      COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
+      COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets,
+      MAX(heartbeat_at_utc) AS last_target_heartbeat,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN worker_id ELSE NULL END), NULL) AS target_workers,
+      MIN(start_url) FILTER (WHERE start_url IS NOT NULL AND start_url <> '') AS sample_start_url
+    FROM coordinator_targets
+    GROUP BY root_domain
+),
+stage_agg AS (
+    SELECT
+      root_domain,
+      COUNT(*) FILTER (WHERE status = 'pending') AS pending_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'failed') AS failed_stage_tasks,
+      MAX(heartbeat_at_utc) AS last_stage_heartbeat,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN stage ELSE NULL END), NULL) AS active_stages,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN worker_id ELSE NULL END), NULL) AS stage_workers
+    FROM coordinator_stage_tasks
+    GROUP BY root_domain
+)
+SELECT
+  d.root_domain,
+  COALESCE(t.sample_start_url, sess.start_url, '') AS start_url,
+  COALESCE(
+    CASE
+      WHEN jsonb_typeof(sess.payload #> '{state,discovered_urls}') = 'array'
+      THEN jsonb_array_length(sess.payload #> '{state,discovered_urls}')
+      ELSE 0
+    END,
+    0
+  ) AS discovered_urls_count,
+  COALESCE(
+    CASE
+      WHEN jsonb_typeof(sess.payload #> '{state,visited_urls}') = 'array'
+      THEN jsonb_array_length(sess.payload #> '{state,visited_urls}')
+      ELSE 0
+    END,
+    0
+  ) AS visited_urls_count,
+  COALESCE(
+    CASE
+      WHEN jsonb_typeof(sess.payload #> '{frontier}') = 'array'
+      THEN jsonb_array_length(sess.payload #> '{frontier}')
+      ELSE 0
+    END,
+    0
+  ) AS frontier_count,
+  sess.saved_at_utc,
+  COALESCE(
+    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, sess.saved_at_utc),
+    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat),
+    GREATEST(t.last_target_heartbeat, sess.saved_at_utc),
+    GREATEST(st.last_stage_heartbeat, sess.saved_at_utc),
+    t.last_target_heartbeat,
+    st.last_stage_heartbeat,
+    sess.saved_at_utc
+  ) AS last_activity_at_utc,
+  COALESCE(t.pending_targets, 0) AS pending_targets,
+  COALESCE(t.running_targets, 0) AS running_targets,
+  COALESCE(t.completed_targets, 0) AS completed_targets,
+  COALESCE(t.failed_targets, 0) AS failed_targets,
+  COALESCE(st.pending_stage_tasks, 0) AS pending_stage_tasks,
+  COALESCE(st.running_stage_tasks, 0) AS running_stage_tasks,
+  COALESCE(st.completed_stage_tasks, 0) AS completed_stage_tasks,
+  COALESCE(st.failed_stage_tasks, 0) AS failed_stage_tasks,
+  COALESCE(st.active_stages, ARRAY[]::text[]) AS active_stages,
+  COALESCE(t.target_workers, ARRAY[]::text[]) AS target_workers,
+  COALESCE(st.stage_workers, ARRAY[]::text[]) AS stage_workers
+FROM domain_set d
+LEFT JOIN target_agg t ON t.root_domain = d.root_domain
+LEFT JOIN stage_agg st ON st.root_domain = d.root_domain
+LEFT JOIN coordinator_sessions sess ON sess.root_domain = d.root_domain
+ORDER BY last_activity_at_utc DESC NULLS LAST, d.root_domain ASC
+LIMIT %s;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
+            conn.commit()
+
+        now_utc = datetime.now(timezone.utc)
+        domains: list[dict[str, Any]] = []
+        running_domains = 0
+        queued_domains = 0
+        failed_domains = 0
+        completed_domains = 0
+
+        for row in rows:
+            root_domain = str(row[0] or "").strip().lower()
+            if not root_domain:
+                continue
+            active_stages_raw = row[15] if isinstance(row[15], list) else []
+            active_stages = [str(item) for item in active_stages_raw if str(item or "").strip()]
+            target_workers_raw = row[16] if isinstance(row[16], list) else []
+            stage_workers_raw = row[17] if isinstance(row[17], list) else []
+            active_workers = sorted(
+                {
+                    str(item).strip()
+                    for item in [*target_workers_raw, *stage_workers_raw]
+                    if str(item or "").strip()
+                }
+            )
+            last_activity = row[6]
+            last_activity_iso: Optional[str] = None
+            seconds_since_activity: Optional[int] = None
+            if last_activity is not None:
+                last_activity_iso = last_activity.isoformat()
+                seconds_since_activity = max(0, int((now_utc - last_activity).total_seconds()))
+
+            pending_targets = int(row[7] or 0)
+            running_targets = int(row[8] or 0)
+            completed_targets = int(row[9] or 0)
+            failed_targets = int(row[10] or 0)
+            pending_stage_tasks = int(row[11] or 0)
+            running_stage_tasks = int(row[12] or 0)
+            completed_stage_tasks = int(row[13] or 0)
+            failed_stage_tasks = int(row[14] or 0)
+
+            phase = "idle"
+            if running_targets > 0:
+                phase = "nightmare_running"
+            elif running_stage_tasks > 0:
+                if "fozzy" in active_stages:
+                    phase = "fozzy_running"
+                elif "extractor" in active_stages:
+                    phase = "extractor_running"
+                else:
+                    phase = "stage_running"
+            elif pending_targets > 0:
+                phase = "nightmare_pending"
+            elif pending_stage_tasks > 0:
+                phase = "stage_pending"
+            elif failed_targets > 0 or failed_stage_tasks > 0:
+                phase = "failed"
+            elif completed_targets > 0 or completed_stage_tasks > 0:
+                phase = "completed"
+
+            if phase.endswith("_running"):
+                running_domains += 1
+            elif phase.endswith("_pending"):
+                queued_domains += 1
+            elif phase == "failed":
+                failed_domains += 1
+            elif phase == "completed":
+                completed_domains += 1
+
+            domains.append(
+                {
+                    "root_domain": root_domain,
+                    "start_url": str(row[1] or ""),
+                    "phase": phase,
+                    "discovered_urls_count": int(row[2] or 0),
+                    "visited_urls_count": int(row[3] or 0),
+                    "frontier_count": int(row[4] or 0),
+                    "session_saved_at_utc": row[5].isoformat() if row[5] else None,
+                    "last_activity_at_utc": last_activity_iso,
+                    "seconds_since_activity": seconds_since_activity,
+                    "pending_targets": pending_targets,
+                    "running_targets": running_targets,
+                    "completed_targets": completed_targets,
+                    "failed_targets": failed_targets,
+                    "pending_stage_tasks": pending_stage_tasks,
+                    "running_stage_tasks": running_stage_tasks,
+                    "completed_stage_tasks": completed_stage_tasks,
+                    "failed_stage_tasks": failed_stage_tasks,
+                    "active_stages": active_stages,
+                    "active_workers": active_workers,
+                }
+            )
+
+        return {
+            "generated_at_utc": now_utc.isoformat(),
+            "limit": safe_limit,
+            "counts": {
+                "total_domains": len(domains),
+                "running_domains": running_domains,
+                "queued_domains": queued_domains,
+                "failed_domains": failed_domains,
+                "completed_domains": completed_domains,
+            },
+            "domains": domains,
+        }
+
     def worker_statuses(self, *, stale_after_seconds: int = DEFAULT_COORDINATOR_LEASE_SECONDS) -> dict[str, Any]:
         stale_after = max(15, int(stale_after_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
         sql = """
