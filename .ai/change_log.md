@@ -477,3 +477,10 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Updated cross-page nav links to include Extractor Matches from dashboard/workers/database pages.
   - Added regression coverage for template/module decomposition and extractor-domain listing behavior.
 - Validation: `pytest -q` -> 91 passed.
+
+- Extractor Matches page enhancement:
+  - Added top-filter summary on `/extractor-matches` showing top 10 filters by match count.
+  - `/api/coord/extractor-matches` now returns `top_filters` computed from the full matched set (after optional search filter, before row-limit truncation).
+  - UI renders this in a dedicated panel (`Top Filters (Top 10)`).
+  - Added unit coverage for ranking/limit behavior (`_top_extractor_filters`).
+- Validation: `pytest -q` -> 92 passed.

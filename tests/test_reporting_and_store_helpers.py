@@ -8,7 +8,7 @@ import pytest
 
 from reporting.extractor_reports import build_javascript_extractor_matches_report_html
 from reporting.server_pages import render_crawl_progress_html, render_dashboard_html, render_extractor_matches_html, render_workers_html
-from server import collect_dashboard_data
+from server import _top_extractor_filters, collect_dashboard_data
 from server_app.store import CoordinatorStore, _get_root_domain, _make_target_entry_id, _normalize_target_url
 
 
@@ -30,6 +30,7 @@ def test_render_crawl_progress_html_contains_expected_heading():
 def test_render_extractor_matches_html_contains_expected_heading():
     html = render_extractor_matches_html()
     assert "Extractor Matches" in html
+    assert "Top Filters (Top 10)" in html
 
 
 def test_extractor_report_html_escapes_script_content():
@@ -467,3 +468,20 @@ def test_list_extractor_match_domains_uses_summary_count():
     assert row["root_domain"] == "example.com"
     assert row["summary_match_count"] == 7
     assert row["content_sha256"] == "sha123"
+
+
+def test_top_extractor_filters_ranks_descending_and_limits_top_10():
+    rows = []
+    for idx in range(12):
+        name = f"rule-{idx:02d}"
+        for _ in range(idx + 1):
+            rows.append({"filter_name": name})
+    rows.append({"filter_name": ""})
+    rows.append({})
+
+    top = _top_extractor_filters(rows, top_n=10)
+    assert len(top) == 10
+    assert top[0]["filter_name"] == "rule-11"
+    assert top[0]["match_count"] == 12
+    assert top[1]["filter_name"] == "rule-10"
+    assert top[-1]["filter_name"] == "rule-02"

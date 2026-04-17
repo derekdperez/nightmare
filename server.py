@@ -457,6 +457,22 @@ def _to_preview_text(value: Any, *, max_len: int = 220) -> str:
     return text
 
 
+def _top_extractor_filters(rows: list[dict[str, Any]], *, top_n: int = 10) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("filter_name", "") or "").strip()
+        if not name:
+            name = "(unnamed)"
+        counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+    out: list[dict[str, Any]] = []
+    for name, count in ranked[: max(1, int(top_n or 10))]:
+        out.append({"filter_name": name, "match_count": int(count)})
+    return out
+
+
 def _count_matches_in_zip_bytes(data: bytes) -> int:
     try:
         with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
@@ -1018,6 +1034,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if search_text:
                 all_rows = [row for row in all_rows if search_text in self._matches_row_search_text(row if isinstance(row, dict) else {})]
             total_rows = len(all_rows)
+            top_filters = _top_extractor_filters(all_rows, top_n=10)
             rows_limited = all_rows[:limit]
             self._write_json(
                 {
@@ -1028,6 +1045,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "rows_returned": len(rows_limited),
                     "rows_limited": total_rows > len(rows_limited),
                     "cache": cache_stats,
+                    "top_filters": top_filters,
                     "rows": rows_limited,
                     "files_by_domain": files_by_domain if root_domain and root_domain != "__all__" else {},
                 }

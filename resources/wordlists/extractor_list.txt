@@ -214,15 +214,7 @@
     "description": "Extract common Swagger/OpenAPI documentation and specification paths from content or traffic.",
     "output_filename": "openapi_swagger_paths.txt",
     "importance_score": 6
-  },
-  {
-    "name": "filesystem_paths_unix",
-    "scope": "response_body",
-    "regex": "(?:/[^\\s\"'<>:]+)+",
-    "description": "Extract Unix-style filesystem paths from response content. Useful for identifying deployment directories, source locations, and log paths.",
-    "output_filename": "filesystem_paths_unix.txt",
-    "importance_score": 6
-  },
+  },  
   {
     "name": "filesystem_paths_windows",
     "scope": "response_body",
@@ -839,14 +831,6 @@
     "description": "Extract indicators of file upload surfaces useful for file handling and validation assessment.",
     "output_filename": "file_upload_parameters.txt",
     "importance_score": 5
-  },
-  {
-    "name": "path_traversal_indicators",
-    "scope": "request_response",
-    "regex": "(?:\\.\\./|\\.\\.\\\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd|boot\\.ini|win\\.ini|web\\.xml)",
-    "description": "Extract path traversal payloads or sensitive file references observed in requests or responses.",
-    "output_filename": "path_traversal_indicators.txt",
-    "importance_score": 7
   },
   {
     "name": "sensitive_env_variable_names",

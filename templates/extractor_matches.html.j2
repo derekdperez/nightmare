@@ -42,6 +42,11 @@
   <div id="cards" class="cards"></div>
 
   <div class="panel">
+    <strong>Top Filters (Top 10)</strong>
+    <div id="topFiltersBlock" class="empty muted">Load extractor matches to compute top filters.</div>
+  </div>
+
+  <div class="panel">
     <strong>Artifact Files</strong>
     <div id="filesBlock" class="empty muted">Select a domain to list files from its extractor zip.</div>
   </div>
@@ -174,6 +179,20 @@
         </tr>`;
       }).join("");
     }
+    function renderTopFilters(topFilters) {
+      const rows = Array.isArray(topFilters) ? topFilters : [];
+      if (!rows.length) {
+        document.getElementById("topFiltersBlock").innerHTML = "<span class='muted'>No filter matches found.</span>";
+        return;
+      }
+      document.getElementById("topFiltersBlock").innerHTML = `
+        <table>
+          <thead><tr><th>Filter Name</th><th>Match Count</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `<tr><td>${esc(r.filter_name || "")}</td><td>${esc(r.match_count || 0)}</td></tr>`).join("")}
+          </tbody>
+        </table>`;
+    }
     function renderFiles(filesByDomain) {
       const domain = selectedDomain();
       if (!domain || domain === "__all__") {
@@ -228,11 +247,13 @@
         const payload = await apiGet(path);
         currentRows = Array.isArray(payload.rows) ? payload.rows : [];
         renderCards(payload);
+        renderTopFilters(payload.top_filters || []);
         renderRows(currentRows);
         renderFiles(payload.files_by_domain || {});
         msg.textContent = `Loaded ${payload.rows_returned || 0} row(s).`;
       } catch (e) {
         document.getElementById("rows").innerHTML = `<tr><td colspan="10">Failed to load extractor matches: ${esc(e.message)}</td></tr>`;
+        document.getElementById("topFiltersBlock").innerHTML = "<span class='muted'>Load failed.</span>";
         document.getElementById("filesBlock").innerHTML = "<span class='muted'>Load failed.</span>";
         msg.textContent = "Load failed.";
       }
