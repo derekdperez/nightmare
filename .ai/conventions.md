@@ -221,3 +221,6 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Log source discovery convention: do not restrict remote docker source discovery only to worker compose services; include all EC2 fleet instances matched by log filters and query `docker ps` over SSM.
 - View Logs resilience convention: when log DB query returns zero events, fallback to live source reads before returning an empty response.
 - Fleet log filter convention: default EC2 log filter values should include coordinator, workers, and dedicated log-db VM name patterns.
+- View Logs observability convention: expose per-source diagnostics (health/error/probe preview) via dedicated API and UI panel.
+- Log retrieval convention: structured log DB is preferred, but when query total=0, backend must fallback to live source reads to avoid false-empty dashboards.
+- Fleet coverage convention: include central coordinator, central DB, and dedicated log DB source entries regardless of dynamic discovery success.

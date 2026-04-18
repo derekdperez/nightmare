@@ -21,6 +21,7 @@
     .status-timeout .status-dot { background: #d97706; }
     @keyframes pulse { 0%, 100% { transform: scale(0.8); opacity: 0.7; } 50% { transform: scale(1.2); opacity: 1; } }
     .table-wrap { max-height: 68vh; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; margin-top: 8px; }
+    .diag-wrap { max-height: 36vh; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; margin-top: 8px; }
     table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
     #logEventsTable { table-layout: fixed; }
     th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
@@ -32,6 +33,8 @@
     .sev-warning { color: #b45309; font-weight: 600; }
     .sev-error { color: #dc2626; font-weight: 700; }
     .sev-critical { color: #991b1b; font-weight: 700; }
+    .diag-ok { color: #15803d; font-weight: 700; }
+    .diag-error { color: #b91c1c; font-weight: 700; }
   </style>
 </head>
 <body>
@@ -62,6 +65,7 @@
     </select>
     <button class="primary" onclick="loadEvents()">Refresh</button>
     <button onclick="refreshSources(true)">Refresh Sources</button>
+    <button onclick="runDiagnostics(true)">Run Diagnostics</button>
     <button onclick="downloadSource()">Download Zip</button>
     <span id="loadState" class="status-pill status-idle"><span class="status-dot"></span><span id="loadStateText">Idle</span></span>
     <span id="msg" class="muted"></span>
@@ -82,6 +86,26 @@
       <tbody id="eventsRows"><tr><td colspan="7">Loading...</td></tr></tbody>
     </table>
   </div>
+  <h3 style="margin-top:16px;margin-bottom:6px;">Log Source Diagnostics</h3>
+  <div id="diagMeta" class="meta">Run diagnostics to see which sources are readable and which are failing.</div>
+  <div class="diag-wrap">
+    <table id="diagTable">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Source</th>
+          <th>System</th>
+          <th>Type</th>
+          <th>Container</th>
+          <th>Instance</th>
+          <th>Lines</th>
+          <th>Error</th>
+          <th>Preview</th>
+        </tr>
+      </thead>
+      <tbody id="diagRows"><tr><td colspan="9">No diagnostics run yet.</td></tr></tbody>
+    </table>
+  </div>
   {% include '_grid_controls.html.j2' %}
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
@@ -89,6 +113,7 @@
     const LOG_LINES = 300;
     const SOURCE_LOAD_TIMEOUT_MS = 30000;
     const EVENTS_LOAD_TIMEOUT_MS = 45000;
+    const DIAG_LOAD_TIMEOUT_MS = 90000;
     let logGridCtrl = null;
 
     function esc(v){ return String(v ?? "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch])); }
@@ -239,6 +264,32 @@
         logGridCtrl.refresh();
       }
     }
+    function renderDiagnostics(payload) {
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      const meta = document.getElementById("diagMeta");
+      meta.textContent = `Diagnosed ${payload.diagnosed_sources || 0}/${payload.total_sources || 0} sources | ok=${payload.ok_sources || 0} | error=${payload.error_sources || 0} | generated=${payload.generated_at_utc || ""}`;
+      const tbody = document.getElementById("diagRows");
+      if (!rows.length) {
+        tbody.innerHTML = "<tr><td colspan='9'>No diagnostics data returned.</td></tr>";
+        return;
+      }
+      tbody.innerHTML = rows.map((row) => {
+        const ok = Boolean(row.ok);
+        const status = ok ? "ok" : "error";
+        const statusCls = ok ? "diag-ok" : "diag-error";
+        return `<tr>
+          <td><span class="${statusCls}">${esc(status)}</span></td>
+          <td>${esc(row.label || row.source_id || "")}</td>
+          <td>${esc(row.system || "")}</td>
+          <td>${esc(row.source_type || "")}</td>
+          <td>${esc(row.container_name || "")}</td>
+          <td>${esc(row.instance_id || "")}</td>
+          <td>${esc(row.line_count || 0)}</td>
+          <td>${esc(row.error || "")}</td>
+          <td><code>${esc(row.preview || "")}</code></td>
+        </tr>`;
+      }).join("");
+    }
     async function loadEvents() {
       const msg = document.getElementById("msg");
       const sourceId = String(document.getElementById("sourceSelect").value || "__all__").trim() || "__all__";
@@ -271,6 +322,23 @@
         setLoadState(isTimeout ? "timeout" : "error", isTimeout ? "Event load timed out" : "Event load failed");
       }
     }
+    async function runDiagnostics(forceRefresh) {
+      const msg = document.getElementById("msg");
+      setLoadState("loading", "Running log diagnostics...");
+      msg.textContent = "Running log diagnostics...";
+      try {
+        const force = Boolean(forceRefresh);
+        const payload = await apiGet(`/api/coord/log-source-diagnostics?force_refresh=${force ? "1" : "0"}&lines=20&limit=200`, DIAG_LOAD_TIMEOUT_MS);
+        renderDiagnostics(payload);
+        setLoadState("success", `Diagnostics: ok=${payload.ok_sources || 0}, error=${payload.error_sources || 0}`);
+        msg.textContent = `Diagnostics complete: ${payload.ok_sources || 0} readable, ${payload.error_sources || 0} failing source(s).`;
+      } catch (e) {
+        const isTimeout = String(e && (e.name || "")).toLowerCase() === "aborterror";
+        document.getElementById("diagRows").innerHTML = `<tr><td colspan="9">Diagnostics failed: ${esc(e.message || e)}</td></tr>`;
+        setLoadState(isTimeout ? "timeout" : "error", isTimeout ? "Diagnostics timed out" : "Diagnostics failed");
+        msg.textContent = isTimeout ? "Diagnostics timed out." : `Diagnostics failed: ${e.message || e}`;
+      }
+    }
     function rowsCount(rows) {
       return Array.isArray(rows) ? rows.length : 0;
     }
@@ -297,6 +365,7 @@
     (async () => {
       await refreshSources();
       await loadEvents();
+      await runDiagnostics(false);
     })();
   </script>
 </body>

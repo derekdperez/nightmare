@@ -706,3 +706,20 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Updated `/api/coord/log-events` to fall back to live source parsing when structured log DB query returns zero rows, instead of returning empty immediately.
 - Updated `deploy/docker-compose.central.yml` default `COORDINATOR_LOG_EC2_FILTER_VALUES` to include `nightmare-log-db*`.
 - Why: operators were seeing empty/no-log behavior despite active fleet services and required visibility for coordinator + both DBs.
+## 2026-04-18
+
+- Added View Logs diagnostics subsystem.
+- New API endpoint:
+  - `GET /api/coord/log-source-diagnostics` (auth required)
+  - Probes sources and returns per-source status (`ok/error`), line count, error text, and preview.
+- Updated `templates/view_logs.html.j2`:
+  - Added `Run Diagnostics` action.
+  - Added diagnostics summary + table with per-source error visibility.
+  - Added timeout-aware diagnostics status messaging.
+- Log source coverage fixes:
+  - Added remote EC2 docker discovery via SSM `docker ps` across matched EC2 instances (not just worker compose stack).
+  - Included dedicated log DB VM pattern in default EC2 filter values.
+  - Ensured central coordinator + central DB + log DB docker sources are always present in source list.
+  - Allowed source reader to handle `system=remote_vm` docker sources.
+  - `/api/coord/log-events` now falls back to live source reads when log DB query returns zero rows.
+- Why: operators need immediate visibility into why a source is empty/failing and must always see coordinator + DB log sources.

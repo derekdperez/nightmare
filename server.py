@@ -1278,6 +1278,60 @@ def _collect_view_log_sources_cached(
     return sources
 
 
+def _diagnose_view_log_sources(
+    app_root: Path,
+    output_root: Path,
+    *,
+    lines: int = 20,
+    force_refresh: bool = False,
+    limit: int = 200,
+) -> dict[str, Any]:
+    safe_lines = max(1, min(200, int(lines or 20)))
+    safe_limit = max(1, min(500, int(limit or 200)))
+    sources = _collect_view_log_sources_cached(app_root, output_root, force_refresh=force_refresh)
+    diagnostics: list[dict[str, Any]] = []
+    ok_count = 0
+    error_count = 0
+    for source in sources[:safe_limit]:
+        source_id = str(source.get("source_id", "") or "")
+        label = str(source.get("label", "") or source_id)
+        source_type = str(source.get("source_type", "") or "")
+        system = str(source.get("system", "") or "")
+        ok, text, error = _read_log_source_text(source, lines=safe_lines, full=False, app_root=app_root)
+        if ok:
+            ok_count += 1
+        else:
+            error_count += 1
+        line_count = len(str(text or "").splitlines()) if ok else 0
+        preview = ""
+        if ok and text:
+            preview = "\n".join(str(text).splitlines()[:3])[:280]
+        diagnostics.append(
+            {
+                "source_id": source_id,
+                "label": label,
+                "source_type": source_type,
+                "system": system,
+                "instance_id": str(source.get("instance_id", "") or ""),
+                "container_name": str(source.get("container_name", "") or ""),
+                "ok": bool(ok),
+                "status": "ok" if ok else "error",
+                "error": str(error or ""),
+                "line_count": int(line_count),
+                "preview": preview,
+            }
+        )
+    diagnostics.sort(key=lambda row: (0 if not row.get("ok") else 1, str(row.get("label", "")).lower()))
+    return {
+        "generated_at_utc": _iso_now(),
+        "total_sources": len(sources),
+        "diagnosed_sources": len(diagnostics),
+        "ok_sources": ok_count,
+        "error_sources": error_count,
+        "rows": diagnostics,
+    }
+
+
 def _resolve_view_log_source(source_id: str, app_root: Path, output_root: Path) -> Optional[dict[str, Any]]:
     sid = str(source_id or "").strip()
     if not sid:
@@ -2734,6 +2788,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "sources": sources,
                 }
             )
+            return
+        if path == "/api/coord/log-source-diagnostics":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            force_refresh = str((query.get("force_refresh") or ["0"])[0] or "0").strip().lower() in {"1", "true", "yes"}
+            lines = max(1, min(200, _safe_int((query.get("lines") or [20])[0], 20)))
+            limit = max(1, min(500, _safe_int((query.get("limit") or [200])[0], 200)))
+            payload = _diagnose_view_log_sources(
+                self.app_root,
+                self.output_root,
+                lines=lines,
+                force_refresh=force_refresh,
+                limit=limit,
+            )
+            self._write_json(payload)
             return
         if path == "/api/coord/log-tail":
             if self.coordinator_store is None:
