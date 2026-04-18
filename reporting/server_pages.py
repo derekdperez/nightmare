@@ -28,3 +28,11 @@ def render_extractor_matches_html() -> str:
 
 def render_fuzzing_html() -> str:
     return render_template("fuzzing.html.j2")
+
+
+def render_docker_status_html() -> str:
+    return render_template("docker_status.html.j2")
+
+
+def render_view_logs_html() -> str:
+    return render_template("view_logs.html.j2")

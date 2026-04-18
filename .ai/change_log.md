@@ -578,3 +578,17 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Added double-click auto-fit width for the target column.
   - Normalized sort indicator glyphs to ASCII (`^` / `v`) for cross-platform rendering consistency.
 - Why: resize drag area was intermittently acting on wrong behavior and did not support requested auto-fit interaction.
+
+## 2026-04-18
+
+- Added two new operator web pages in template-backed server UI:
+  - `/docker-status` shows live container status plus compose status snapshots.
+  - `/view-logs` lists available docker/file log sources and loads latest 300 lines on demand.
+- Added new coordinator-authenticated APIs in `server.py`:
+  - `GET /api/coord/docker-status`
+  - `GET /api/coord/log-sources`
+  - `GET /api/coord/log-tail?source_id=...&lines=...`
+- Navigation links across dashboard/worker/database/crawl/extractor/fuzzing pages now include Docker Status + View Logs.
+- Added template render helpers in `reporting/server_pages.py` for the two new pages.
+- Added/updated tests to cover template render and routing-module expectations for these new pages.
+- Why: provide in-app operational visibility for container health and logs without leaving the coordinator web UI.

@@ -183,3 +183,9 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Web grid UX convention: use shared template include `templates/_grid_controls.html.j2` for consistent table behavior (column resize, handle double-click auto-fit, per-table column visibility modal, and persisted column prefs).
 - For dynamic table pages (rows re-rendered by JS), call returned grid controller `.refresh()` after each render so hidden/width/sort/filter state reapplies to new rows.
 - Fuzzing resize convention: resize handles must suppress click bubbling to prevent header-sort race conditions while dragging.
+- Operator observability convention:
+  - Keep new ops pages template-backed (`templates/*.j2` + `reporting/server_pages.py`) and route them from `server.py`.
+  - Protect ops JSON endpoints under `/api/coord/*` with coordinator auth and cookie/Bearer token support.
+  - For log viewing, expose source enumeration first (`/api/coord/log-sources`) and fetch tails by stable source ID (`/api/coord/log-tail`) rather than accepting arbitrary file paths from the browser.
+- Docker status convention:
+  - Prefer `docker-compose` command family in backend status probes; include compose-file scoped status plus raw `docker ps` container inventory.

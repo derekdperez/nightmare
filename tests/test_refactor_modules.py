@@ -5,8 +5,10 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
+    render_docker_status_html,
     render_extractor_matches_html,
     render_fuzzing_html,
+    render_view_logs_html,
     render_workers_html,
 )
 
@@ -111,4 +113,23 @@ def test_fuzzing_template_renders():
     assert "/api/coord/fuzzing?" in html
     assert "/api/coord/ui-preferences" in html
     assert "columnToggleBtn" in html
+    assert "nightmare_coord_token" in html
+
+
+def test_docker_status_template_renders():
+    html = render_docker_status_html()
+    assert "<!doctype html>" in html.lower()
+    assert "Docker Status" in html
+    assert 'href="/view-logs"' in html
+    assert "/api/coord/docker-status" in html
+    assert "nightmare_coord_token" in html
+
+
+def test_view_logs_template_renders():
+    html = render_view_logs_html()
+    assert "<!doctype html>" in html.lower()
+    assert "View Logs" in html
+    assert 'href="/docker-status"' in html
+    assert "/api/coord/log-sources" in html
+    assert "/api/coord/log-tail" in html
     assert "nightmare_coord_token" in html

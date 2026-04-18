@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from output_cleanup import clear_output_root_children
@@ -53,8 +53,10 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
+    render_docker_status_html,
     render_extractor_matches_html,
     render_fuzzing_html,
+    render_view_logs_html,
     render_workers_html,
 )
 from server_app.store import CoordinatorStore
@@ -75,6 +77,9 @@ DEFAULT_FUZZING_RESULT_LIMIT = 250
 MAX_FUZZING_RESULT_LIMIT = 2000
 MAX_FUZZING_CACHE_DOMAINS = 64
 FUZZING_CACHE_TTL_SECONDS = 900
+DEFAULT_VIEW_LOG_LINES = 300
+MAX_VIEW_LOG_LINES = 2000
+MAX_VIEW_LOG_FILE_SOURCES = 1000
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -229,6 +234,258 @@ def _read_tail_text(path: Path, max_bytes: int = MAX_LOG_TAIL_BYTES) -> str:
         return data.decode("utf-8", errors="replace")
     except Exception:
         return ""
+
+
+def _read_tail_lines(path: Path, *, lines: int = DEFAULT_VIEW_LOG_LINES, max_bytes: int = MAX_LOG_TAIL_BYTES) -> str:
+    text = _read_tail_text(path, max_bytes=max_bytes)
+    if not text:
+        return ""
+    line_count = max(1, int(lines or DEFAULT_VIEW_LOG_LINES))
+    return "\n".join(text.splitlines()[-line_count:])
+
+
+def _run_command(command: list[str], *, cwd: Optional[Path] = None, timeout_seconds: int = 20) -> tuple[bool, str, str, int]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_seconds)),
+            env={**os.environ, "PYTHONUTF8": "1"},
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return False, "", str(exc), 127
+    except subprocess.TimeoutExpired as exc:
+        out = str(exc.stdout or "")
+        err = str(exc.stderr or "")
+        return False, out, f"command timeout after {timeout_seconds}s: {err}".strip(), 124
+    except Exception as exc:
+        return False, "", str(exc), 1
+    return completed.returncode == 0, str(completed.stdout or ""), str(completed.stderr or ""), int(completed.returncode or 0)
+
+
+def _load_docker_containers() -> dict[str, Any]:
+    cmd = ["docker", "ps", "--no-trunc", "--format", "{{json .}}"]
+    ok, stdout, stderr, exit_code = _run_command(cmd)
+    if not ok:
+        return {
+            "ok": False,
+            "command": cmd,
+            "error": stderr.strip() or f"docker ps failed with exit code {exit_code}",
+            "containers": [],
+        }
+    containers: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("Names", "") or "")
+        image = str(row.get("Image", "") or "")
+        lowered = f"{name} {image}".lower()
+        containers.append(
+            {
+                "id": str(row.get("ID", "") or ""),
+                "name": name,
+                "image": image,
+                "command": str(row.get("Command", "") or ""),
+                "created_at": str(row.get("CreatedAt", "") or ""),
+                "running_for": str(row.get("RunningFor", "") or ""),
+                "status": str(row.get("Status", "") or ""),
+                "ports": str(row.get("Ports", "") or ""),
+                "is_application": "nightmare" in lowered or "deploy-" in lowered,
+            }
+        )
+    containers.sort(key=lambda item: str(item.get("name", "")).lower())
+    return {
+        "ok": True,
+        "command": cmd,
+        "error": "",
+        "containers": containers,
+    }
+
+
+def _candidate_compose_specs(app_root: Path) -> list[tuple[Path, Optional[Path]]]:
+    deploy_dir = app_root / "deploy"
+    out: list[tuple[Path, Optional[Path]]] = []
+    if not deploy_dir.is_dir():
+        return out
+    env_file = (deploy_dir / ".env").resolve() if (deploy_dir / ".env").is_file() else None
+    for name in ("docker-compose.central.yml", "docker-compose.local.yml", "docker-compose.worker.yml"):
+        compose_file = (deploy_dir / name).resolve()
+        if compose_file.is_file():
+            out.append((compose_file, env_file))
+    return out
+
+
+def _run_compose_ps(compose_file: Path, env_file: Optional[Path]) -> dict[str, Any]:
+    variants: list[list[str]] = []
+    compose_file_arg = str(compose_file)
+    if env_file is not None:
+        variants.append(["docker-compose", "-f", compose_file_arg, "--env-file", str(env_file), "ps", "--format", "json"])
+    variants.append(["docker-compose", "-f", compose_file_arg, "ps", "--format", "json"])
+    errors: list[str] = []
+    for cmd in variants:
+        ok, stdout, stderr, exit_code = _run_command(cmd, cwd=compose_file.parent)
+        if not ok:
+            msg = stderr.strip() or f"exit={exit_code}"
+            errors.append(f"{' '.join(cmd)} -> {msg}")
+            continue
+        text = stdout.strip()
+        try:
+            parsed = json.loads(text) if text else []
+        except Exception:
+            parsed = []
+        rows: list[dict[str, Any]] = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                rows.append(
+                    {
+                        "name": str(item.get("Name", "") or item.get("name", "") or ""),
+                        "service": str(item.get("Service", "") or item.get("service", "") or ""),
+                        "state": str(item.get("State", "") or item.get("state", "") or ""),
+                        "status": str(item.get("Status", "") or item.get("status", "") or ""),
+                        "image": str(item.get("Image", "") or item.get("image", "") or ""),
+                        "publishers": item.get("Publishers", item.get("publishers", [])),
+                    }
+                )
+        rows.sort(key=lambda item: str(item.get("name", "")).lower())
+        return {
+            "ok": True,
+            "command": cmd,
+            "compose_file": str(compose_file),
+            "env_file": str(env_file) if env_file is not None else None,
+            "rows": rows,
+            "error": "",
+        }
+    return {
+        "ok": False,
+        "command": variants[0] if variants else [],
+        "compose_file": str(compose_file),
+        "env_file": str(env_file) if env_file is not None else None,
+        "rows": [],
+        "error": " | ".join(errors) if errors else "docker-compose ps failed",
+    }
+
+
+def _collect_docker_status(app_root: Path) -> dict[str, Any]:
+    docker = _load_docker_containers()
+    compose_specs = _candidate_compose_specs(app_root)
+    compose: list[dict[str, Any]] = [_run_compose_ps(compose_file, env_file) for compose_file, env_file in compose_specs]
+    containers = docker.get("containers", []) if isinstance(docker.get("containers"), list) else []
+    app_containers = [item for item in containers if bool(item.get("is_application"))]
+    return {
+        "generated_at_utc": _iso_now(),
+        "docker": docker,
+        "compose": compose,
+        "summary": {
+            "container_count": len(containers),
+            "application_container_count": len(app_containers),
+            "compose_files_checked": len(compose),
+            "compose_files_ok": sum(1 for item in compose if item.get("ok")),
+        },
+        "application_containers": app_containers,
+    }
+
+
+def _discover_view_log_file_sources(app_root: Path, output_root: Path) -> list[dict[str, Any]]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    roots = [output_root.resolve(), app_root.resolve()]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.glob("**/*.log"):
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+            if len(candidates) >= MAX_VIEW_LOG_FILE_SOURCES:
+                break
+        if len(candidates) >= MAX_VIEW_LOG_FILE_SOURCES:
+            break
+    candidates.sort(key=lambda p: str(p).lower())
+    out: list[dict[str, Any]] = []
+    for path in candidates:
+        rel = _to_repo_relative_path(path)
+        if not rel:
+            continue
+        out.append(
+            {
+                "source_id": f"file:{rel}",
+                "source_type": "file",
+                "system": "filesystem",
+                "label": path.name,
+                "relative_path": rel,
+                "size_bytes": int(path.stat().st_size if path.exists() else 0),
+                "updated_at_utc": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat() if path.exists() else "",
+            }
+        )
+    return out
+
+
+def _discover_view_log_docker_sources() -> list[dict[str, Any]]:
+    docker = _load_docker_containers()
+    rows = docker.get("containers", []) if isinstance(docker.get("containers"), list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        container_name = str(row.get("name", "") or "").strip()
+        if not container_name:
+            continue
+        out.append(
+            {
+                "source_id": f"docker:{container_name}",
+                "source_type": "docker",
+                "system": "docker",
+                "label": container_name,
+                "container_name": container_name,
+                "status": str(row.get("status", "") or ""),
+                "image": str(row.get("image", "") or ""),
+                "is_application": bool(row.get("is_application")),
+            }
+        )
+    out.sort(key=lambda item: str(item.get("label", "")).lower())
+    return out
+
+
+def _collect_view_log_sources(app_root: Path, output_root: Path) -> list[dict[str, Any]]:
+    sources = _discover_view_log_docker_sources() + _discover_view_log_file_sources(app_root, output_root)
+    sources.sort(key=lambda item: (str(item.get("source_type", "")), str(item.get("label", "")).lower()))
+    return sources
+
+
+def _resolve_view_log_source(source_id: str, app_root: Path, output_root: Path) -> Optional[dict[str, Any]]:
+    sid = str(source_id or "").strip()
+    if not sid:
+        return None
+    for source in _collect_view_log_sources(app_root, output_root):
+        if str(source.get("source_id", "")).strip() == sid:
+            return source
+    return None
+
+
+def _read_docker_log_tail(container_name: str, lines: int) -> tuple[bool, str, str]:
+    cmd = ["docker", "logs", "--tail", str(max(1, int(lines or DEFAULT_VIEW_LOG_LINES))), str(container_name or "").strip()]
+    ok, stdout, stderr, exit_code = _run_command(cmd, timeout_seconds=30)
+    if ok:
+        # docker logs often writes output to stderr.
+        text = "\n".join([part for part in [stdout.strip(), stderr.strip()] if part]).strip()
+        return True, text, ""
+    error = stderr.strip() or f"docker logs failed with exit code {exit_code}"
+    return False, "", error
 
 
 def collect_dashboard_data(output_root: Path, coordinator_store: CoordinatorStore | None = None) -> dict[str, Any]:
@@ -1456,6 +1713,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/fuzzing":
             self._write_text(render_fuzzing_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/docker-status":
+            self._write_text(render_docker_status_html(), content_type="text/html; charset=utf-8")
+            return
+        if path == "/view-logs":
+            self._write_text(render_view_logs_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root, self.coordinator_store)
             self._write_json(payload)
@@ -1488,6 +1751,88 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._write_json(payload)
+            return
+        if path == "/api/coord/docker-status":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            payload = _collect_docker_status(self.app_root)
+            self._write_json(payload)
+            return
+        if path == "/api/coord/log-sources":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            sources = _collect_view_log_sources(self.app_root, self.output_root)
+            self._write_json(
+                {
+                    "generated_at_utc": _iso_now(),
+                    "total_sources": len(sources),
+                    "sources": sources,
+                }
+            )
+            return
+        if path == "/api/coord/log-tail":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            source_id = str((query.get("source_id") or [""])[0] or "").strip()
+            lines = max(
+                1,
+                min(
+                    MAX_VIEW_LOG_LINES,
+                    _safe_int((query.get("lines") or [DEFAULT_VIEW_LOG_LINES])[0], DEFAULT_VIEW_LOG_LINES),
+                ),
+            )
+            source = _resolve_view_log_source(source_id, self.app_root, self.output_root)
+            if source is None:
+                self._write_json({"error": "unknown source_id"}, status=404)
+                return
+            source_type = str(source.get("source_type", "") or "")
+            if source_type == "docker":
+                container_name = str(source.get("container_name", "") or "").strip()
+                ok, tail, error = _read_docker_log_tail(container_name, lines)
+                if not ok:
+                    self._write_json(
+                        {
+                            "error": "docker log read failed",
+                            "detail": error,
+                            "source": source,
+                        },
+                        status=500,
+                    )
+                    return
+                self._write_json(
+                    {
+                        "generated_at_utc": _iso_now(),
+                        "source": source,
+                        "lines_requested": lines,
+                        "tail": tail,
+                    }
+                )
+                return
+            rel = str(source.get("relative_path", "") or "")
+            resolved = _normalize_and_validate_relative_path(self.app_root, rel)
+            if resolved is None or not resolved.is_file():
+                self._write_json({"error": "file log source no longer exists", "source": source}, status=404)
+                return
+            self._write_json(
+                {
+                    "generated_at_utc": _iso_now(),
+                    "source": source,
+                    "lines_requested": lines,
+                    "tail": _read_tail_lines(resolved, lines=lines),
+                }
+            )
             return
 
         if path == "/api/coord/state":

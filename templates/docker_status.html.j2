@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docker Status</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 8px; }
+    .meta { margin-bottom: 12px; color: #475569; font-size: 13px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0 16px; flex-wrap: wrap; }
+    input { padding: 6px 8px; border: 1px solid #94a3b8; border-radius: 6px; min-width: 260px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: white; }
+    .muted { color: #64748b; }
+    .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 14px; }
+    .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+    .k { font-size: 12px; color: #64748b; }
+    .v { font-size: 18px; font-weight: 700; margin-top: 4px; }
+    .section { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+    .table-wrap { max-height: 520px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
+    th { background: #e2e8f0; position: sticky; top: 0; z-index: 3; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <h1>Docker Status</h1>
+  <div class="meta">Live container status for this deployment. <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/view-logs">View Logs</a></div>
+  <div class="toolbar">
+    <input id="token" type="password" placeholder="Coordinator token">
+    <input id="containerSearch" type="text" placeholder="Search containers table">
+    <button class="primary" onclick="refreshDockerStatus()">Refresh</button>
+    <span id="msg" class="muted"></span>
+  </div>
+  <div id="cards" class="cards"></div>
+  <div class="section">
+    <strong>Application Containers</strong>
+    <div class="table-wrap">
+      <table id="appContainersTable">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Image</th>
+            <th>Status</th>
+            <th>Running For</th>
+            <th>Ports</th>
+            <th>Container ID</th>
+          </tr>
+        </thead>
+        <tbody id="appRows"><tr><td colspan="6">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="section">
+    <strong>Compose Status</strong>
+    <div id="composeRows" class="muted">Loading...</div>
+  </div>
+  <div class="section">
+    <strong>All Running Containers</strong>
+    <div class="table-wrap">
+      <table id="allContainersTable">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Image</th>
+            <th>Status</th>
+            <th>Running For</th>
+            <th>Ports</th>
+            <th>Application</th>
+            <th>Container ID</th>
+          </tr>
+        </thead>
+        <tbody id="allRows"><tr><td colspan="7">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  {% include '_grid_controls.html.j2' %}
+  <script>
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    let appGrid = null;
+    let allGrid = null;
+
+    function esc(v){ return String(v ?? "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch])); }
+    function readCookie(name) {
+      const needle = `${name}=`;
+      for (const part of String(document.cookie || "").split(";")) {
+        const item = part.trim();
+        if (item.startsWith(needle)) return decodeURIComponent(item.slice(needle.length));
+      }
+      return "";
+    }
+    function writeCookie(name, value, days) {
+      const maxAge = Math.max(1, Number(days || 30)) * 24 * 60 * 60;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}`;
+    }
+    function deleteCookie(name) {
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+    }
+    function persistTokenCookie() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      else deleteCookie(TOKEN_COOKIE_NAME);
+    }
+    function hydrateTokenFromCookie() {
+      const token = readCookie(TOKEN_COOKIE_NAME);
+      if (token) document.getElementById("token").value = token;
+    }
+    function authHeaders() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    async function apiGet(path) {
+      const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
+      if (!rsp.ok) throw new Error(await rsp.text());
+      return rsp.json();
+    }
+    function card(k, v) {
+      return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`;
+    }
+    function renderContainerRows(targetId, rows, includeFlag) {
+      const target = document.getElementById(targetId);
+      if (!Array.isArray(rows) || !rows.length) {
+        target.innerHTML = includeFlag ? "<tr><td colspan='7'>No containers found.</td></tr>" : "<tr><td colspan='6'>No containers found.</td></tr>";
+        return;
+      }
+      target.innerHTML = rows.map((item) => `
+        <tr>
+          <td>${esc(item.name)}</td>
+          <td>${esc(item.image)}</td>
+          <td>${esc(item.status)}</td>
+          <td>${esc(item.running_for)}</td>
+          <td>${esc(item.ports)}</td>
+          ${includeFlag ? `<td>${item.is_application ? "yes" : "no"}</td>` : ""}
+          <td><code>${esc(item.id)}</code></td>
+        </tr>
+      `).join("");
+    }
+    function renderCompose(composeRows) {
+      const target = document.getElementById("composeRows");
+      if (!Array.isArray(composeRows) || !composeRows.length) {
+        target.innerHTML = "<span class='muted'>No compose files found under deploy/.</span>";
+        return;
+      }
+      target.innerHTML = composeRows.map((entry) => {
+        const file = esc(entry.compose_file || "");
+        const cmd = esc((entry.command || []).join(" "));
+        if (!entry.ok) {
+          return `<div style="margin-bottom:12px;"><strong>${file}</strong><br><span class="muted">Command: ${cmd}</span><pre>${esc(entry.error || "compose query failed")}</pre></div>`;
+        }
+        const rows = Array.isArray(entry.rows) ? entry.rows : [];
+        const table = rows.length
+          ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Service</th><th>State</th><th>Status</th><th>Image</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.service)}</td><td>${esc(r.state)}</td><td>${esc(r.status)}</td><td>${esc(r.image)}</td></tr>`).join("")}</tbody></table></div>`
+          : "<div class='muted'>No services in compose status output.</div>";
+        return `<div style="margin-bottom:12px;"><strong>${file}</strong><br><span class="muted">Command: ${cmd}</span>${table}</div>`;
+      }).join("");
+    }
+    function render(data) {
+      const summary = data.summary || {};
+      document.getElementById("cards").innerHTML = [
+        card("All Containers", summary.container_count || 0),
+        card("Application Containers", summary.application_container_count || 0),
+        card("Compose Files Checked", summary.compose_files_checked || 0),
+        card("Compose Files OK", summary.compose_files_ok || 0),
+      ].join("");
+      renderContainerRows("appRows", data.application_containers || [], false);
+      const allRows = (data.docker && Array.isArray(data.docker.containers)) ? data.docker.containers : [];
+      renderContainerRows("allRows", allRows, true);
+      renderCompose(data.compose || []);
+      if (!appGrid) {
+        appGrid = window.NightmareGridControls.enhance({
+          table: "appContainersTable",
+          page: "docker_status",
+          prefKey: "app_containers_table_v1",
+          tokenInputId: "token",
+          mode: "columnsOnly",
+        });
+      } else {
+        appGrid.refresh();
+      }
+      if (!allGrid) {
+        allGrid = window.NightmareGridControls.enhance({
+          table: "allContainersTable",
+          page: "docker_status",
+          prefKey: "all_containers_table_v1",
+          tokenInputId: "token",
+          mode: "full",
+          globalSearchInputId: "containerSearch",
+        });
+      } else {
+        allGrid.refresh();
+      }
+      document.getElementById("msg").textContent = `Updated ${esc(data.generated_at_utc || "")}`;
+    }
+    async function refreshDockerStatus() {
+      const msg = document.getElementById("msg");
+      msg.textContent = "Loading...";
+      try {
+        render(await apiGet("/api/coord/docker-status"));
+      } catch (e) {
+        msg.textContent = `Load failed: ${e.message || e}`;
+      }
+    }
+    hydrateTokenFromCookie();
+    document.getElementById("token").addEventListener("change", persistTokenCookie);
+    document.getElementById("token").addEventListener("blur", persistTokenCookie);
+    refreshDockerStatus();
+    setInterval(refreshDockerStatus, 10000);
+  </script>
+</body>
+</html>

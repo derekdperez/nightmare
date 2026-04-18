@@ -99,3 +99,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Added modular deterministic fuzz response-analysis subsystem under fozzy_app/response_analysis (normalizer, feature extractor, baseline manager, diff engine, detector registry, scorer, summarizer, clusterer, pipeline).
 - Integration boundary: fuzz_group now analyzes each live mutation against its baseline and records one structured analysis document per fuzz response to <domain>.fozzy.response_analysis.jsonl; anomaly/reflection artifacts embed response_analysis for downstream UI/reporting.
 - Baseline model boundary: baseline profiles are keyed by method + normalized route pattern + MIME + parameter layout, then updated incrementally during run to keep comparison endpoint-scoped and noise-resistant.
+- Ops UI observability boundary extension:
+  - Docker/container and log-tail visibility now lives in `server.py` HTTP layer with template pages (`docker_status.html.j2`, `view_logs.html.j2`).
+  - Data collection is host-runtime driven (docker CLI + filesystem log discovery) and exposed through coordinator-authenticated read-only APIs.
+  - Log-tail endpoint resolves source IDs against enumerated sources each request, reducing arbitrary-path exposure risk.
