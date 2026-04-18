@@ -23,6 +23,7 @@ AWS_IAM_INSTANCE_PROFILE=""
 AWS_REGION=""
 REPO_URL=""
 REPO_BRANCH="main"
+LOG_DATABASE_URL=""
 COMPOSE_CMD=""
 DOCKER_USE_SUDO=0
 
@@ -39,6 +40,7 @@ What it does:
   - generates self-signed TLS cert/key (unless already present)
   - writes deploy/.env
   - writes deploy/worker.env.generated (for worker VMs)
+  - ensures a dedicated log/reporting Postgres VM exists and writes LOG_DATABASE_URL
   - installs Python 3, pip, and pip install -r requirements.txt on this host (for client.py, etc.)
   - rebuilds and starts central docker compose stack
   - optionally launches worker EC2 instances and auto-configures them via cloud-init
@@ -480,6 +482,7 @@ if [[ -f "$ENV_FILE" && "$FORCE_REGEN" -ne 1 ]]; then
   existing_api_token="$(read_env_value "$ENV_FILE" COORDINATOR_API_TOKEN)"
   existing_base_url="$(read_env_value "$ENV_FILE" COORDINATOR_BASE_URL)"
   existing_insecure_tls="$(read_env_value "$ENV_FILE" COORDINATOR_INSECURE_TLS)"
+  existing_log_database_url="$(read_env_value "$ENV_FILE" LOG_DATABASE_URL)"
 
   if [[ -n "$existing_postgres_db" ]]; then
     POSTGRES_DB="$existing_postgres_db"
@@ -495,6 +498,9 @@ if [[ -f "$ENV_FILE" && "$FORCE_REGEN" -ne 1 ]]; then
   fi
   if [[ -n "$existing_insecure_tls" ]]; then
     COORDINATOR_INSECURE_TLS="$existing_insecure_tls"
+  fi
+  if [[ -n "$existing_log_database_url" ]]; then
+    LOG_DATABASE_URL="$existing_log_database_url"
   fi
   if [[ -z "$BASE_URL_OVERRIDE" && -n "$existing_base_url" ]]; then
     COORDINATOR_BASE_URL="$existing_base_url"
@@ -552,6 +558,7 @@ COORDINATOR_INSECURE_TLS=${COORDINATOR_INSECURE_TLS}
 TLS_CERT_FILE=${TLS_CERT_FILE}
 TLS_KEY_FILE=${TLS_KEY_FILE}
 COORDINATOR_BASE_URL=${COORDINATOR_BASE_URL}
+LOG_DATABASE_URL=${LOG_DATABASE_URL}
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -591,6 +598,39 @@ if [[ -n "${HOME:-}" ]]; then
 fi
 
 cd "$DEPLOY_DIR"
+
+if [[ -z "$LOG_DATABASE_URL" ]]; then
+  LOG_DB_PROVISION_SCRIPT="${DEPLOY_DIR}/provision-log-db-aws.sh"
+  if [[ ! -x "$LOG_DB_PROVISION_SCRIPT" ]]; then
+    echo "Missing executable ${LOG_DB_PROVISION_SCRIPT}" >&2
+    exit 1
+  fi
+  if [[ -z "$AWS_AMI_ID" || -z "$AWS_SUBNET_ID" || -z "$AWS_SECURITY_GROUP_IDS" ]]; then
+    echo "LOG_DATABASE_URL is not set and log DB VM must be provisioned." >&2
+    echo "Provide AWS provisioning parameters: --aws-ami-id, --aws-subnet-id, --aws-security-group-ids" >&2
+    exit 2
+  fi
+  log_db_cmd=(
+    "$LOG_DB_PROVISION_SCRIPT"
+    --ami-id "$AWS_AMI_ID"
+    --instance-type "$AWS_INSTANCE_TYPE"
+    --subnet-id "$AWS_SUBNET_ID"
+    --security-group-ids "$AWS_SECURITY_GROUP_IDS"
+    --env-file "$ENV_FILE"
+    --skip-rebuild-central
+  )
+  if [[ -n "$AWS_KEY_NAME" ]]; then
+    log_db_cmd+=(--key-name "$AWS_KEY_NAME")
+  fi
+  if [[ -n "$AWS_IAM_INSTANCE_PROFILE" ]]; then
+    log_db_cmd+=(--iam-instance-profile "$AWS_IAM_INSTANCE_PROFILE")
+  fi
+  if [[ -n "$AWS_REGION" ]]; then
+    log_db_cmd+=(--region "$AWS_REGION")
+  fi
+  "${log_db_cmd[@]}"
+fi
+
 run_compose -f docker-compose.central.yml --env-file .env up -d --build
 
 echo "Central stack is running."
