@@ -356,11 +356,44 @@
       if (tableWrap && tableWrap.parentElement) {
         tableWrap.parentElement.insertBefore(toolbar, tableWrap);
       }
-      btn.addEventListener("click", (ev) => { ev.preventDefault(); menu.classList.toggle("open"); });
-      document.addEventListener("click", (ev) => { if (!buttonWrap.contains(ev.target)) menu.classList.remove("open"); });
+      function positionColumnMenu() {
+        if (!menu.classList.contains("open")) return;
+        const btnRect = btn.getBoundingClientRect();
+        const viewportW = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 1024);
+        const viewportH = Math.max(240, window.innerHeight || document.documentElement.clientHeight || 768);
+        const margin = 8;
+        menu.style.position = "fixed";
+        menu.style.right = "auto";
+        menu.style.left = "0px";
+        menu.style.top = "0px";
+        const menuRect = menu.getBoundingClientRect();
+        const menuW = Math.max(280, Math.ceil(menuRect.width || 380));
+        const menuH = Math.max(120, Math.ceil(menuRect.height || 260));
+        let left = Math.round(btnRect.right - menuW);
+        if (left < margin) left = margin;
+        if (left + menuW > viewportW - margin) left = Math.max(margin, viewportW - menuW - margin);
+        let top = Math.round(btnRect.bottom + 4);
+        if (top + menuH > viewportH - margin) {
+          const above = Math.round(btnRect.top - menuH - 4);
+          top = above >= margin ? above : Math.max(margin, viewportH - menuH - margin);
+        }
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+      }
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        menu.classList.toggle("open");
+        if (menu.classList.contains("open")) positionColumnMenu();
+      });
+      document.addEventListener("click", (ev) => {
+        if (!buttonWrap.contains(ev.target)) menu.classList.remove("open");
+      });
+      window.addEventListener("resize", positionColumnMenu);
+      window.addEventListener("scroll", positionColumnMenu, true);
       state.menuWrap = buttonWrap;
       state.menu = menu;
       state.toolbar = toolbar;
+      state.positionColumnMenu = positionColumnMenu;
     }
 
     function renderColumnMenu() {
@@ -409,6 +442,7 @@
       });
     }
     renderColumnMenu();
+    if (state.positionColumnMenu) state.positionColumnMenu();
 
     if (mode === "full" && !state.filterRow) {
       const fr = document.createElement("tr");
