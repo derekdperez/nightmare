@@ -173,3 +173,4 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Reflection signal convention (Fozzy): reflection detection should ignore configurable low-signal values via eflection_alert_ignore_exact; defaults should include common ambient tokens (0/1, true/false, null-like values) to reduce false positives.
 
 - Fuzzing UI convention: action-oriented grid with per-row View Response and View Diff buttons. Response modal should show headers and body in separate stacked text panes; diff modal should be side-by-side with synchronized scrolling.
+- Fuzzing zip-file convention: result_file values may be basename-only while zip entries are nested. File-serving endpoints should support exact-path lookup plus safe unique basename/suffix fallback before returning 404.

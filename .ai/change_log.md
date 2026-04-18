@@ -537,3 +537,4 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - 2026-04-17: Expanded Fozzy eflection_alert_ignore_exact defaults and normalization to suppress low-signal reflection values (e.g., 0/1, true/false, null-like/common tokens). Updated config/fozzy.json defaults to match.
 
 - 2026-04-17: Reworked /fuzzing grid to operator layout (URL, Parameter, Payload, Code, Response/Diff actions, Size Diff, Time Diff, Notes placeholder). Added full-screen response modal (stacked headers/body) and side-by-side diff modal with synchronized scrolling and line-level highlighting.
+- 2026-04-17: Fixed /api/coord/fuzzing/file lookup for zip members when rows contain basename-only result_file values. Endpoint now resolves by exact path first, then unique basename/suffix fallback to avoid false 'file not found in zip' failures from UI View Response/View Diff actions.

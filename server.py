@@ -1979,7 +1979,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if zip_index is None:
                 self._write_json({"error": "fozzy_results_zip not found"}, status=404)
                 return
-            real_name = str((zip_index.get("normalized_names") or {}).get(member_path, "") or "")
+            normalized_names = zip_index.get("normalized_names") if isinstance(zip_index.get("normalized_names"), dict) else {}
+            normalized_names = normalized_names if isinstance(normalized_names, dict) else {}
+            real_name = str(normalized_names.get(member_path, "") or "")
+            if not real_name and normalized_names:
+                member_lower = member_path.lower()
+                base_lower = Path(member_path).name.lower()
+                exact_basename_matches = [
+                    str(original or "")
+                    for norm, original in normalized_names.items()
+                    if Path(str(norm or "")).name.lower() == base_lower
+                ]
+                if len(exact_basename_matches) == 1:
+                    real_name = exact_basename_matches[0]
+                if not real_name:
+                    suffix = f"/{member_lower}"
+                    suffix_matches = [
+                        str(original or "")
+                        for norm, original in normalized_names.items()
+                        if str(norm or "").lower().endswith(suffix)
+                    ]
+                    if len(suffix_matches) == 1:
+                        real_name = suffix_matches[0]
             if not real_name:
                 self._write_json({"error": "file not found in zip"}, status=404)
                 return
