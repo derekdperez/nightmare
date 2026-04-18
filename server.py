@@ -438,7 +438,7 @@ def _candidate_compose_specs(app_root: Path) -> list[tuple[Path, Optional[Path]]
     if not deploy_dir.is_dir():
         return out
     env_file = (deploy_dir / ".env").resolve() if (deploy_dir / ".env").is_file() else None
-    for name in ("docker-compose.central.yml", "docker-compose.local.yml", "docker-compose.worker.yml"):
+    for name in ("docker-compose.central.yml", "docker-compose.local.yml", "docker-compose.worker.yml", "docker-compose.log-store.yml"):
         compose_file = (deploy_dir / name).resolve()
         if compose_file.is_file():
             out.append((compose_file, env_file))
@@ -1033,7 +1033,7 @@ def _collect_docker_status(app_root: Path, *, include_logs: bool = False, log_li
     if include_logs:
         for row in local_containers:
             name = str(row.get("name", "") or "").strip()
-            ok, tail, error = _read_docker_log_tail(name, max(1, int(log_lines)))
+            ok, tail, error = _read_docker_log_tail(name, max(1, int(log_lines)), app_root=app_root)
             row["log_tail"] = tail if ok else ""
             if not ok:
                 row["log_error"] = error
@@ -1367,25 +1367,133 @@ def _resolve_view_log_source(source_id: str, app_root: Path, output_root: Path) 
     return None
 
 
-def _read_docker_log_tail(container_name: str, lines: int) -> tuple[bool, str, str]:
-    cmd = ["docker", "logs", "--tail", str(max(1, int(lines or DEFAULT_VIEW_LOG_LINES))), str(container_name or "").strip()]
+def _compose_log_candidates_for_container(app_root: Path, container_name: str) -> list[tuple[Path, Optional[Path], str]]:
+    name = str(container_name or "").strip()
+    if not name:
+        return []
+    normalized = name.lower()
+    spec_map: dict[str, tuple[Path, Optional[Path]]] = {
+        compose_file.name.lower(): (compose_file, env_file)
+        for compose_file, env_file in _candidate_compose_specs(app_root)
+    }
+    out: list[tuple[Path, Optional[Path], str]] = []
+
+    def add(file_name: str, service: str) -> None:
+        spec = spec_map.get(file_name.lower())
+        if spec is not None:
+            out.append((spec[0], spec[1], service))
+
+    if normalized == "nightmare-coordinator-server":
+        add("docker-compose.central.yml", "server")
+        add("docker-compose.local.yml", "server")
+    elif normalized == "nightmare-postgres":
+        add("docker-compose.central.yml", "postgres")
+        add("docker-compose.local.yml", "postgres")
+    elif normalized == "nightmare-log-postgres":
+        add("docker-compose.log-store.yml", "log_postgres")
+
+    if out:
+        return out
+
+    guessed_service = normalized
+    default_name_match = re.match(r"^[^-]+-([a-z0-9_]+)-\d+$", normalized)
+    if default_name_match:
+        guessed_service = str(default_name_match.group(1) or normalized).strip() or normalized
+    for compose_file, env_file in _candidate_compose_specs(app_root):
+        out.append((compose_file, env_file, guessed_service))
+    return out
+
+
+def _run_compose_logs_for_service(
+    compose_file: Path,
+    env_file: Optional[Path],
+    service: str,
+    *,
+    lines: int,
+    full: bool,
+) -> tuple[bool, str, str]:
+    variants: list[list[str]] = []
+    for prefix in _compose_command_prefixes():
+        base = [*prefix, "-f", str(compose_file)]
+        cmd_without_env = [*base, "logs", "--no-color"]
+        if not full:
+            cmd_without_env.extend(["--tail", str(max(1, int(lines or DEFAULT_VIEW_LOG_LINES)))])
+        cmd_without_env.append(service)
+        variants.append(cmd_without_env)
+
+        if env_file is not None:
+            cmd_with_env = [*base, "--env-file", str(env_file), "logs", "--no-color"]
+            if not full:
+                cmd_with_env.extend(["--tail", str(max(1, int(lines or DEFAULT_VIEW_LOG_LINES)))])
+            cmd_with_env.append(service)
+            variants.insert(0, cmd_with_env)
+
+    errors: list[str] = []
+    timeout_seconds = 60 if full else 30
+    for cmd in variants:
+        ok, stdout, stderr, exit_code = _run_command(cmd, cwd=compose_file.parent, timeout_seconds=timeout_seconds)
+        if not ok:
+            msg = stderr.strip() or f"exit={exit_code}"
+            errors.append(f"{' '.join(cmd)} -> {msg}")
+            continue
+        text = "\n".join([part for part in [stdout.strip(), stderr.strip()] if part]).strip()
+        if full:
+            text = text[:MAX_LOG_DOWNLOAD_BYTES]
+        return True, text, ""
+    return False, "", " | ".join(errors) if errors else "compose logs command failed"
+
+
+def _read_docker_log_tail(container_name: str, lines: int, *, app_root: Optional[Path] = None) -> tuple[bool, str, str]:
+    container = str(container_name or "").strip()
+    cmd = ["docker", "logs", "--tail", str(max(1, int(lines or DEFAULT_VIEW_LOG_LINES))), container]
     ok, stdout, stderr, exit_code = _run_command(cmd, timeout_seconds=30)
     if ok:
         # docker logs often writes output to stderr.
         text = "\n".join([part for part in [stdout.strip(), stderr.strip()] if part]).strip()
         return True, text, ""
-    error = stderr.strip() or f"docker logs failed with exit code {exit_code}"
-    return False, "", error
+    docker_error = stderr.strip() or f"docker logs failed with exit code {exit_code}"
+    errors: list[str] = [docker_error]
+
+    root = (app_root or BASE_DIR).resolve()
+    for compose_file, env_file, service in _compose_log_candidates_for_container(root, container):
+        c_ok, c_text, c_error = _run_compose_logs_for_service(
+            compose_file,
+            env_file,
+            service,
+            lines=lines,
+            full=False,
+        )
+        if c_ok:
+            return True, c_text, ""
+        if c_error:
+            errors.append(c_error)
+    return False, "", " | ".join([e for e in errors if str(e).strip()])
 
 
-def _read_docker_log_full(container_name: str) -> tuple[bool, str, str]:
-    cmd = ["docker", "logs", str(container_name or "").strip()]
+def _read_docker_log_full(container_name: str, *, app_root: Optional[Path] = None) -> tuple[bool, str, str]:
+    container = str(container_name or "").strip()
+    cmd = ["docker", "logs", container]
     ok, stdout, stderr, exit_code = _run_command(cmd, timeout_seconds=60)
     if ok:
         text = "\n".join([part for part in [stdout.strip(), stderr.strip()] if part]).strip()
         return True, text[:MAX_LOG_DOWNLOAD_BYTES], ""
-    error = stderr.strip() or f"docker logs failed with exit code {exit_code}"
-    return False, "", error
+    docker_error = stderr.strip() or f"docker logs failed with exit code {exit_code}"
+    errors: list[str] = [docker_error]
+
+    root = (app_root or BASE_DIR).resolve()
+    for compose_file, env_file, service in _compose_log_candidates_for_container(root, container):
+        c_ok, c_text, c_error = _run_compose_logs_for_service(
+            compose_file,
+            env_file,
+            service,
+            lines=DEFAULT_VIEW_LOG_LINES,
+            full=True,
+        )
+        if c_ok:
+            return True, c_text, ""
+        if c_error:
+            errors.append(c_error)
+    return False, "", " | ".join([e for e in errors if str(e).strip()])
 
 
 def _read_worker_vm_docker_log_tail(instance_id: str, container_name: str, lines: int) -> tuple[bool, str, str]:
@@ -1447,8 +1555,8 @@ def _read_log_source_text(
                 return _read_worker_vm_docker_log_full(instance_id, container_name)
             return _read_worker_vm_docker_log_tail(instance_id, container_name, lines)
         if full:
-            return _read_docker_log_full(container_name)
-        return _read_docker_log_tail(container_name, lines)
+            return _read_docker_log_full(container_name, app_root=app_root)
+        return _read_docker_log_tail(container_name, lines, app_root=app_root)
     if source_type == "ec2_console":
         instance_id = str(source.get("instance_id", "") or "").strip()
         ok, text, error = _read_ec2_console_output(instance_id)

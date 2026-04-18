@@ -109,10 +109,18 @@ else
     fi
   fi
   echo "Existing worker VMs found. Rolling out latest code + docker rebuild on workers..."
-  run_as_invoking_user python3 client.py rollout \
-    --aws-region "$AWS_REGION" \
-    --ssm-target-key "tag:Name" \
-    --ssm-target-values "$WORKER_TAG_FILTER" \
-    --repo-dir "/opt/nightmare" \
+  rollout_cmd=(
+    python3 client.py rollout
+    --server-base-url "${COORDINATOR_BASE_URL}"
+    --api-token "${COORDINATOR_API_TOKEN}"
+    --aws-region "$AWS_REGION"
+    --ssm-target-key "tag:Name"
+    --ssm-target-values "$WORKER_TAG_FILTER"
+    --repo-dir "/opt/nightmare"
     --branch "$REPO_BRANCH"
+  )
+  if [[ "${COORDINATOR_INSECURE_TLS:-}" == "true" ]]; then
+    rollout_cmd+=(--insecure-tls)
+  fi
+  run_as_invoking_user "${rollout_cmd[@]}"
 fi

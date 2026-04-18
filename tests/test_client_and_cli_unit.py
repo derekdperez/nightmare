@@ -198,3 +198,49 @@ def test_http_queue_cli_main_requeue(monkeypatch: pytest.MonkeyPatch, capsys: py
     out = capsys.readouterr().out
     assert rc == 0
     assert '"requeued": 5' in out
+
+
+def test_client_rollout_updates_worker_env_before_compose(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    def fake_run_aws_text(args: list[str]) -> str:
+        captured["send_args"] = args
+        return "cmd-123"
+
+    def fake_run_aws_json(args: list[str]) -> dict[str, object]:
+        return {
+            "CommandInvocations": [
+                {
+                    "InstanceId": "i-abc",
+                    "Status": "Success",
+                    "CommandPlugins": [{"ResponseCode": 0, "Output": "[]"}],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_run_aws_text", fake_run_aws_text)
+    monkeypatch.setattr(client, "_run_aws_json", fake_run_aws_json)
+    monkeypatch.setattr(client.shutil, "which", lambda _: "/usr/bin/aws")
+
+    rc = client._run_ssm_rollout(
+        region="us-east-1",
+        target_key="tag:Name",
+        target_values="nightmare-worker*",
+        timeout_seconds=30,
+        repo_dir="/opt/nightmare",
+        branch="main",
+        coordinator_base_url="https://coord.example.com",
+        api_token="token-abc",
+        coordinator_insecure_tls=True,
+    )
+    assert rc == 0
+    send_args = captured.get("send_args")
+    assert isinstance(send_args, list)
+    assert "--parameters" in send_args
+    payload = str(send_args[send_args.index("--parameters") + 1])
+    parsed = json.loads(payload)
+    script = str(parsed["commands"][0])
+    assert "COORDINATOR_BASE_URL=https://coord.example.com" in script
+    assert "COORDINATOR_API_TOKEN=token-abc" in script
+    assert "COORDINATOR_INSECURE_TLS=true" in script
+    assert " > .env;" in script

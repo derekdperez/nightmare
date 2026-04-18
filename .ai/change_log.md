@@ -800,3 +800,25 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - recovers `LOG_DATABASE_URL` from existing coordinator container env and writes it to `.env` when missing;
   - detects existing log DB instances by tag (`${INSTANCE_NAME_PREFIX}*`) and refuses to provision duplicates when URL is missing.
 - Why: reruns were trying to create another VM and failing with `VcpuLimitExceeded` even though fleet was already up.
+## 2026-04-18
+
+- Fixed worker 401 unauthorized loops after redeploy by syncing coordinator credentials during rollout.
+- `client.py` `_run_ssm_rollout(...)` now accepts and propagates coordinator connection settings:
+  - `coordinator_base_url`
+  - `api_token`
+  - `coordinator_insecure_tls`
+- Rollout SSM script now rewrites worker `deploy/.env` with current coordinator URL/token/TLS mode before `docker compose up -d --build`.
+- `deploy/full_deploy_command.sh` now invokes `client.py rollout` with explicit coordinator URL/token and `--insecure-tls` when configured.
+- Added regression test `test_client_rollout_updates_worker_env_before_compose` to validate worker `.env` rewrite is included in SSM rollout payload.
+- Validation: `python -m pytest -q tests/test_client_and_cli_unit.py` -> 12 passed.
+- Why: workers kept stale tokens across central token changes and repeatedly received `401 unauthorized` on coordinator endpoints.
+## 2026-04-18
+
+- Fixed coordinator/local DB log-source failures when `docker` CLI is unavailable in server runtime (`[Errno 2] No such file or directory: 'docker'`).
+- `server.py` local docker log readers now fallback to compose-service logs:
+  - Added container->compose service candidate mapping for core services (`nightmare-coordinator-server`, `nightmare-postgres`, `nightmare-log-postgres`).
+  - Added compose log execution helper that tries both `docker compose` and `docker-compose`, with/without `--env-file`.
+  - Log read paths (`_read_docker_log_tail`, `_read_docker_log_full`) now try `docker logs` first, then compose fallback candidates.
+- Expanded compose spec discovery to include `deploy/docker-compose.log-store.yml` so log-store service fallback resolves.
+- Validation: `python -m pytest -q tests/test_client_and_cli_unit.py tests/test_reporting_and_store_helpers.py` -> 38 passed.
+- Why: View Logs entries for coordinator + DB containers should remain readable even when only compose client is present.

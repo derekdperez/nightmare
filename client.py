@@ -278,6 +278,9 @@ def _run_ssm_rollout(
     timeout_seconds: int,
     repo_dir: str,
     branch: str,
+    coordinator_base_url: str = "",
+    api_token: str = "",
+    coordinator_insecure_tls: bool = False,
 ) -> int:
     if not shutil.which("aws"):
         print("[rollout]")
@@ -286,8 +289,16 @@ def _run_ssm_rollout(
 
     safe_repo_dir = str(repo_dir or "").strip() or "/opt/nightmare"
     safe_branch = str(branch or "").strip() or "main"
+    safe_coordinator_base_url = str(coordinator_base_url or "").strip()
+    safe_api_token = str(api_token or "").strip()
+    safe_insecure_tls = "true" if bool(coordinator_insecure_tls) else "false"
     repo_dir_q = shlex.quote(safe_repo_dir)
     branch_q = shlex.quote(safe_branch)
+    coord_url_q = shlex.quote(safe_coordinator_base_url)
+    api_token_q = shlex.quote(safe_api_token)
+    env_line_base_q = shlex.quote(f"COORDINATOR_BASE_URL={safe_coordinator_base_url}")
+    env_line_token_q = shlex.quote(f"COORDINATOR_API_TOKEN={safe_api_token}")
+    env_line_tls_q = shlex.quote(f"COORDINATOR_INSECURE_TLS={safe_insecure_tls}")
     rollout_script = (
         f"set -e; "
         f"cd {repo_dir_q}; "
@@ -295,6 +306,9 @@ def _run_ssm_rollout(
         f"git checkout {branch_q}; "
         f"git pull --ff-only origin {branch_q}; "
         f"cd deploy; "
+        f"if [ -n {coord_url_q} ] && [ -n {api_token_q} ]; then "
+        f"printf '%s\\n' {env_line_base_q} {env_line_token_q} {env_line_tls_q} > .env; "
+        f"fi; "
         f"if docker compose version >/dev/null 2>&1; then COMPOSE_CMD='docker compose'; elif command -v docker-compose >/dev/null 2>&1; then COMPOSE_CMD='docker-compose'; else echo 'docker compose not found'; exit 1; fi; "
         f"$COMPOSE_CMD -f docker-compose.worker.yml --env-file .env up -d --build; "
         f"$COMPOSE_CMD -f docker-compose.worker.yml --env-file .env ps --format json"
@@ -478,6 +492,9 @@ def main(argv: Optional[list[str] ] = None) -> int:
             timeout_seconds=max(10, int(args.ssm_timeout_seconds or 60)),
             repo_dir=str(args.repo_dir or "/opt/nightmare"),
             branch=str(args.branch or "main"),
+            coordinator_base_url=str(conn.server_base_url or ""),
+            api_token=str(conn.api_token or ""),
+            coordinator_insecure_tls=bool(conn.insecure_tls),
         )
     return 0
 

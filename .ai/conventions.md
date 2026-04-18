@@ -240,3 +240,7 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - User-shell integration convention: when scripts update shell startup files, target invoking user's home (`getent passwd $SUDO_USER`) rather than inherited root HOME from sudo context.
 - Log DB provisioning convention: before launching a new log DB VM, scripts must attempt to recover `LOG_DATABASE_URL` from existing coordinator container config and must check for existing tagged log-DB instances to avoid duplicate provisioning.
 - Rerunnable deploy convention: missing local `.env` values should be reconstructed from live container configuration when possible, rather than interpreted as a request to create new infrastructure.
+- Worker rollout credential-sync convention: SSM rollout must rewrite worker `deploy/.env` with the current coordinator URL/token/TLS settings before restarting worker containers to prevent token drift and 401 claim/poll failures.
+- Full deploy wrapper convention: pass coordinator URL/token explicitly to `client.py rollout` instead of relying only on local default env discovery.
+- Log reader resilience convention: local container log collection should not depend solely on `docker logs`; always include fallback to compose service logs (`docker compose` and `docker-compose`) for known coordinator/DB services.
+- Compose spec convention for observability: include `docker-compose.log-store.yml` in compose-spec discovery used by Docker status/log APIs.
