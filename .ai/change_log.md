@@ -755,3 +755,13 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `deploy/full_deploy_command.sh` and `full_deploy_command.sh` now run `register_targets.py` via `run_as_invoking_user`.
   - When invoked with sudo, this forces the Python registration step to run as `$SUDO_USER` instead of root.
 - Why: `httpx` was installed in user site-packages, but wrapper executed `register_targets.py` as root and failed with `ModuleNotFoundError: No module named 'httpx'`.
+## 2026-04-18
+
+- Made full deploy flow idempotent/re-runnable for AWS fleet updates.
+- `deploy/full_deploy_command.sh` now reconciles workers instead of always provisioning new ones:
+  - Always updates/rebuilds central stack via `bootstrap-central-auto.sh` without DB reset.
+  - Registers targets after coordinator readiness.
+  - If no worker VMs exist (`tag:Name=nightmare-worker*`), provisions default worker count.
+  - If workers exist, starts stopped workers if needed, then runs `client.py rollout` to rebuild/redeploy worker docker stacks with latest code.
+- `full_deploy_command.sh` now delegates to `deploy/full_deploy_command.sh` to keep a single canonical implementation.
+- Why: repeated deploy runs were creating drift/failures by re-provisioning every time; expected behavior is reconcile + preserve Postgres data unless explicitly reset.

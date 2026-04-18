@@ -228,3 +228,7 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Deploy privilege convention: bootstrap scripts should run Python/pip dependency installs as the invoking non-root user (via `$SUDO_USER` when launched with sudo), while elevating only docker/system package-manager operations.
 - Deploy dependency convention: central bootstrap must auto-install `aws` CLI (`awscli` package) because auto-provisioning workers/log-db relies on EC2/STS commands.
 - Full deploy wrapper convention: any post-bootstrap Python steps (for example `register_targets.py`) must execute as the invoking non-root user when script is run with sudo; otherwise user-site dependencies become invisible to root Python.
+- AWS full-deploy convention: treat deploy as reconcile, not always-provision.
+  - Central compose should always rebuild/redeploy latest code while preserving existing Postgres volumes by default.
+  - Worker fleet handling should be conditional: provision only when no worker VMs exist; otherwise roll existing workers forward via SSM rollout + docker rebuild.
+  - Root `full_deploy_command.sh` should delegate to `deploy/full_deploy_command.sh` to avoid duplicate logic drift.
