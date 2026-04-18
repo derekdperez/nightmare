@@ -208,3 +208,6 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - View Logs convention: use explicit client-side request states and timeout-aware fetch wrappers so long backend calls show deterministic UI status (`loading`/`success`/`error`/`timeout`) instead of appearing stalled.
 - Grid preference convention update: persist `column_order` alongside `hidden_columns` and `column_widths` in `coordinator_ui_preferences` for grids using `_grid_controls.html.j2` in `columnsOnly` mode.
 - Log source discovery convention: avoid unbounded recursive file scans on source listing APIs; use bounded-depth targeted roots and short-lived server-side caching, with optional force-refresh when operators explicitly request a fresh probe.
+- Deployment convention: coordinator server startup is now hard-gated on both primary `database_url` and dedicated `log_database_url`; logging DB is no longer optional.
+- Database separation convention: `log_database_url` must not resolve to the same DB endpoint/name/user tuple as `database_url`.
+- Compose convention: central compose requires `LOG_DATABASE_URL` env var explicitly (fail-fast if missing).

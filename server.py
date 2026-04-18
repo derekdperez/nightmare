@@ -132,6 +132,29 @@ def _merged_value(cli_value: Any, cfg: dict[str, Any], key: str, default: Any) -
     return default
 
 
+def _urls_point_to_same_database(left: str, right: str) -> bool:
+    lhs = str(left or "").strip()
+    rhs = str(right or "").strip()
+    if not lhs or not rhs:
+        return False
+    if lhs == rhs:
+        return True
+    try:
+        l = urlparse(lhs)
+        r = urlparse(rhs)
+    except Exception:
+        return False
+    if not l.scheme or not r.scheme:
+        return False
+    return (
+        l.scheme.lower() == r.scheme.lower()
+        and (l.hostname or "").lower() == (r.hostname or "").lower()
+        and int(l.port or 0) == int(r.port or 0)
+        and (l.path or "").strip("/") == (r.path or "").strip("/")
+        and (l.username or "") == (r.username or "")
+    )
+
+
 def _find_all_domains_report_html(output_root: Path) -> Path | None:
     candidate = output_root / "all_domains.results_summary.html"
     if candidate.is_file():
@@ -3872,7 +3895,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cert-file", default=None, help="TLS certificate file for HTTPS listener")
     p.add_argument("--key-file", default=None, help="TLS private key file for HTTPS listener")
     p.add_argument("--database-url", default=None, help="Postgres DATABASE_URL for coordinator mode")
-    p.add_argument("--log-database-url", default=None, help="Optional dedicated Postgres URL for structured log events")
+    p.add_argument("--log-database-url", default=None, help="Dedicated Postgres URL for log/reporting data (must be separate from coordinator DB)")
     p.add_argument("--coordinator-api-token", default=None, help="Bearer token required for /api/coord/* endpoints")
     p.add_argument(
         "--reset-coordinator",
@@ -3984,16 +4007,38 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2), flush=True)
         return 0
 
-    coordinator_store: CoordinatorStore | None = None
-    if database_url:
-        coordinator_store = CoordinatorStore(database_url)
-    log_store: LogStore | None = None
-    if log_database_url:
-        try:
-            log_store = LogStore(log_database_url)
-        except Exception as exc:
-            print(f"[server] log store disabled (failed to initialize): {exc}", flush=True)
-            log_store = None
+    if not database_url:
+        print(
+            "[server] startup requires database_url (config, DATABASE_URL, or --database-url)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    if not log_database_url:
+        print(
+            "[server] startup requires log_database_url (config, LOG_DATABASE_URL, or --log-database-url)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    if _urls_point_to_same_database(database_url, log_database_url):
+        print(
+            "[server] log_database_url must point to a separate database/server from database_url",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+
+    coordinator_store: CoordinatorStore | None = CoordinatorStore(database_url)
+    try:
+        log_store: LogStore | None = LogStore(log_database_url)
+    except Exception as exc:
+        print(
+            f"[server] failed to initialize required log store at log_database_url: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
 
     def _prepare_server(port_value: int) -> ThreadingHTTPServer:
         srv = ThreadingHTTPServer((host, port_value), DashboardHandler)
@@ -4036,12 +4081,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[server] output_root={output_root}", flush=True)
     if coordinator_store is not None:
         print("[server] coordinator mode enabled (Postgres backend)", flush=True)
-    else:
-        print("[server] coordinator mode disabled (database_url not set)", flush=True)
     if log_store is not None:
-        print("[server] structured log store enabled", flush=True)
-    else:
-        print("[server] structured log store disabled (log_database_url not set)", flush=True)
+        print("[server] structured log store enabled (dedicated logging/reporting DB)", flush=True)
     all_domains_html = _find_all_domains_report_html(output_root)
     if all_domains_html is not None:
         print(f"[server] default route / serving all-domains report: {all_domains_html}", flush=True)

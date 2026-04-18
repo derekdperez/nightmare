@@ -654,3 +654,11 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Reduced worker source discovery stall risk by using a shorter SSM timeout in source discovery path.
   - Replaced broad recursive file-log discovery over entire app root with bounded-depth targeted directories.
 - Why: log source loading and layout usability were bottlenecks for operators; this keeps refreshes responsive and makes logs readable without repeated manual table setup.
+## 2026-04-18
+
+- Enforced mandatory dedicated logging/reporting DB for server startup.
+  - Server now exits with error unless both `database_url` and `log_database_url` are set.
+  - Server now exits with error if `log_database_url` appears to point to the same DB as `database_url`.
+  - Log store initialization failure is now fatal instead of silently disabling structured logging.
+- Updated central compose env contract so `LOG_DATABASE_URL` is required at deploy time.
+- Why: user requirement that logging/reporting always run on a separate secondary database VM with no optional/off mode.
