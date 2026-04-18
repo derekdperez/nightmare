@@ -743,3 +743,9 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Kept docker/package-manager elevation behavior intact (`sudo` only where needed for docker/system operations).
   - Pip install path now uses user context + `--user` when running from sudo to avoid root-owned package installs and permission conflicts.
 - Why: full deploy runs started with `sudo` were still executing pip in elevated context, causing failures and ownership issues.
+## 2026-04-18
+
+- Fixed deploy bootstrap dependency gap for AWS provisioning:
+  - `deploy/bootstrap-central-auto.sh` now treats `aws` CLI as a required dependency in `install_deps_if_missing()`.
+  - Added `awscli` package install for yum/dnf/apt flows.
+- Why: full deploy path provisions worker/log DB EC2 resources and was failing with `Missing required command: aws` on central VM.

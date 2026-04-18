@@ -226,3 +226,4 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Fleet coverage convention: include central coordinator, central DB, and dedicated log DB source entries regardless of dynamic discovery success.
 - Deploy script resilience convention: shell bootstrap/wrapper scripts must self-heal executable bits (`chmod +x`) for `deploy/*.sh` before invoking subordinate scripts, because some host checkout/copy paths drop mode bits and cause false `Missing executable` failures.
 - Deploy privilege convention: bootstrap scripts should run Python/pip dependency installs as the invoking non-root user (via `$SUDO_USER` when launched with sudo), while elevating only docker/system package-manager operations.
+- Deploy dependency convention: central bootstrap must auto-install `aws` CLI (`awscli` package) because auto-provisioning workers/log-db relies on EC2/STS commands.
