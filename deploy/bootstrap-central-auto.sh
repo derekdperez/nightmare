@@ -26,6 +26,9 @@ REPO_BRANCH="main"
 LOG_DATABASE_URL=""
 COMPOSE_CMD=""
 DOCKER_USE_SUDO=0
+INVOKING_USER="${SUDO_USER:-}"
+INVOKING_GROUP=""
+INVOKING_HOME="${HOME:-}"
 
 usage() {
   cat <<'USAGE'
@@ -72,10 +75,26 @@ run_as_python_user() {
   fi
 }
 
+resolve_invoking_identity() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    INVOKING_USER="${SUDO_USER}"
+    INVOKING_GROUP="$(id -gn "${INVOKING_USER}" 2>/dev/null || true)"
+    INVOKING_HOME="$(getent passwd "${INVOKING_USER}" 2>/dev/null | awk -F: '{print $6}' | head -n1 || true)"
+    if [[ -z "$INVOKING_HOME" ]]; then
+      INVOKING_HOME="/home/${INVOKING_USER}"
+    fi
+    return 0
+  fi
+  INVOKING_USER="$(id -un 2>/dev/null || true)"
+  INVOKING_GROUP="$(id -gn 2>/dev/null || true)"
+  INVOKING_HOME="${HOME:-}"
+}
+
 restore_invoking_user_ownership() {
   local target_path="$1"
-  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-    chown "${SUDO_USER}:${SUDO_USER}" "$target_path" 2>/dev/null || true
+  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${INVOKING_USER:-}" && "${INVOKING_USER}" != "root" ]]; then
+    local group_name="${INVOKING_GROUP:-${INVOKING_USER}}"
+    chown "${INVOKING_USER}:${group_name}" "$target_path" 2>/dev/null || true
   fi
 }
 
@@ -146,6 +165,8 @@ for deploy_script in "${DEPLOY_DIR}"/*.sh; do
   [[ -f "$deploy_script" ]] || continue
   chmod +x "$deploy_script" 2>/dev/null || true
 done
+
+resolve_invoking_identity
 
 if ! [[ "$AUTO_PROVISION_WORKERS" =~ ^[0-9]+$ ]]; then
   echo "--auto-provision-workers must be an integer >= 0" >&2
@@ -621,6 +642,8 @@ BASE_HOST="${BASE_HOST%%/*}"
 CERT_FILE="${TLS_DIR}/server.crt"
 KEY_FILE="${TLS_DIR}/server.key"
 generate_cert_if_needed "$CERT_FILE" "$KEY_FILE" "$BASE_HOST" "$(build_san "$BASE_HOST")"
+restore_invoking_user_ownership "$CERT_FILE"
+restore_invoking_user_ownership "$KEY_FILE"
 
 TLS_CERT_FILE="$(abs_path "$CERT_FILE")"
 TLS_KEY_FILE="$(abs_path "$KEY_FILE")"
@@ -661,10 +684,11 @@ chmod 755 "$HOST_ENV_SH"
 restore_invoking_user_ownership "$HOST_ENV_SH"
 
 HOST_ENV_SH_ABS="$(abs_path "$HOST_ENV_SH")"
-if [[ -n "${HOME:-}" ]]; then
-  BASHRC_FILE="${HOME}/.bashrc"
+if [[ -n "${INVOKING_HOME:-}" ]]; then
+  BASHRC_FILE="${INVOKING_HOME}/.bashrc"
   if [[ ! -f "$BASHRC_FILE" ]] && [[ -w "$(dirname "$BASHRC_FILE")" ]]; then
     touch "$BASHRC_FILE" 2>/dev/null || true
+    restore_invoking_user_ownership "$BASHRC_FILE"
   fi
   if [[ -f "$BASHRC_FILE" ]] && [[ -w "$BASHRC_FILE" ]] && ! grep -qF 'nightmare-coordinator-env' "$BASHRC_FILE" 2>/dev/null; then
     {
@@ -672,6 +696,7 @@ if [[ -n "${HOME:-}" ]]; then
       echo "# nightmare-coordinator-env (added by bootstrap-central-auto.sh)"
       printf '[[ -f %s ]] && source %s\n' "$(printf '%q' "$HOST_ENV_SH_ABS")" "$(printf '%q' "$HOST_ENV_SH_ABS")"
     } >>"$BASHRC_FILE"
+    restore_invoking_user_ownership "$BASHRC_FILE"
     echo "Appended coordinator env loader to ${BASHRC_FILE} (open a new shell or: source ${HOST_ENV_SH_ABS})"
   fi
 fi

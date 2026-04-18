@@ -236,3 +236,5 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Docker command convention in deploy scripts: use centralized docker access wrapper (sudo-aware) for container/volume introspection so reruns work in both docker-group and sudo-only environments.
 - File ownership convention for sudo-launched deploy scripts: any generated/updated repo env files intended for non-root Python tools (`deploy/.env`, `worker.env.generated`) must be chowned back to `$SUDO_USER` after write.
 - Env reader convention: `.env` loaders should fail-soft (return empty map) on permission/read errors rather than crashing CLI flows.
+- Sudo deploy ownership convention: any deploy-generated files that later need non-root access must be re-owned to invoking user (`$SUDO_USER`) with their primary group after write.
+- User-shell integration convention: when scripts update shell startup files, target invoking user's home (`getent passwd $SUDO_USER`) rather than inherited root HOME from sudo context.

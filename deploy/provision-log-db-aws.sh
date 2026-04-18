@@ -57,7 +57,12 @@ require_cmd() {
 restore_invoking_user_ownership() {
   local target_path="$1"
   if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-    chown "${SUDO_USER}:${SUDO_USER}" "$target_path" 2>/dev/null || true
+    local group_name
+    group_name="$(id -gn "${SUDO_USER}" 2>/dev/null || true)"
+    if [[ -z "$group_name" ]]; then
+      group_name="${SUDO_USER}"
+    fi
+    chown "${SUDO_USER}:${group_name}" "$target_path" 2>/dev/null || true
   fi
 }
 

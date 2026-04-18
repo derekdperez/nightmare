@@ -784,3 +784,11 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `nightmare_shared/config.py::read_env_file` now returns `{}` on read exceptions.
   - `client.py::_read_env_file` now returns `{}` on read exceptions.
 - Why: full deploy can run with sudo for docker/system actions, but post-bootstrap Python rollout executes as non-root user and must be able to read `deploy/.env`.
+## 2026-04-18
+
+- Fixed sudo deploy file-permission/ownership drift so non-root operator tools can read generated files.
+- `deploy/bootstrap-central-auto.sh` now resolves invoking user identity and re-owns generated artifacts when launched via sudo:
+  - `deploy/.env`, `deploy/worker.env.generated`, `deploy/coordinator-host-env.sh`, TLS cert/key, and appended `.bashrc` updates.
+  - `.bashrc` update target now uses invoking user home directory instead of root home.
+- `deploy/provision-log-db-aws.sh` now restores ownership of `.env` updates using invoking user + primary group (not username-assumed group).
+- Why: sudo-run deploys created root-only files that broke non-root rollout/status commands and normal operator workflows.
