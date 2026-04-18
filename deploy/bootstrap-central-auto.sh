@@ -62,6 +62,16 @@ ensure_executable() {
   fi
 }
 
+run_as_python_user() {
+  # Always run Python/pip commands as the original invoking user when script was launched with sudo.
+  # This prevents accidental root-owned site/user packages.
+  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    sudo -H -u "${SUDO_USER}" "$@"
+  else
+    "$@"
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base-url)
@@ -353,11 +363,11 @@ install_local_python_requirements() {
     return 1
   fi
 
-  if ! python3 -m pip --version >/dev/null 2>&1; then
+  if ! run_as_python_user python3 -m pip --version >/dev/null 2>&1; then
     echo "Bootstrapping pip via ensurepip..."
-    python3 -m ensurepip --upgrade --default-pip 2>/dev/null || "${sudo_cmd[@]}" python3 -m ensurepip --upgrade --default-pip 2>/dev/null || true
+    run_as_python_user python3 -m ensurepip --upgrade --default-pip 2>/dev/null || "${sudo_cmd[@]}" python3 -m ensurepip --upgrade --default-pip 2>/dev/null || true
   fi
-  if ! python3 -m pip --version >/dev/null 2>&1; then
+  if ! run_as_python_user python3 -m pip --version >/dev/null 2>&1; then
     echo "pip is not available for python3; install python3-pip manually." >&2
     return 1
   fi
@@ -370,13 +380,13 @@ install_local_python_requirements() {
 
   echo "Installing Python packages from ${req}..."
   local pip_user=()
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  if [[ "${EUID:-$(id -u)}" -ne 0 || -n "${SUDO_USER:-}" ]]; then
     pip_user=(--user)
   fi
   # Avoid upgrading distro-managed pip (common on Amazon Linux via rpm), which can fail with:
   # "Cannot uninstall pip ..., RECORD file not found".
-  python3 -m pip install "${pip_user[@]}" --disable-pip-version-check setuptools wheel
-  python3 -m pip install "${pip_user[@]}" --disable-pip-version-check -r "$req"
+  run_as_python_user python3 -m pip install "${pip_user[@]}" --disable-pip-version-check setuptools wheel
+  run_as_python_user python3 -m pip install "${pip_user[@]}" --disable-pip-version-check -r "$req"
   echo "Local Python ready: $(python3 --version 2>&1 | tr -d '\n')"
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     echo "If a command is not found, add ~/.local/bin to PATH (e.g. export PATH=\"\$HOME/.local/bin:\$PATH\")."

@@ -736,3 +736,10 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Added `ensure_executable()` guard used for `provision-log-db-aws.sh` and `provision-workers-aws.sh` so missing execute-bit no longer breaks reruns when file exists.
   - Added execute-bit self-heal in both full deploy wrappers (`deploy/full_deploy_command.sh`, `full_deploy_command.sh`) before invoking bootstrap.
 - Why: EC2 reruns failed with `Missing executable .../provision-log-db-aws.sh` after checkouts/copies that dropped script mode bits.
+## 2026-04-18
+
+- Updated deploy privilege model in `deploy/bootstrap-central-auto.sh`:
+  - Added `run_as_python_user()` so all Python/pip installs run as the invoking non-root user (`$SUDO_USER`) when script is started with sudo.
+  - Kept docker/package-manager elevation behavior intact (`sudo` only where needed for docker/system operations).
+  - Pip install path now uses user context + `--user` when running from sudo to avoid root-owned package installs and permission conflicts.
+- Why: full deploy runs started with `sudo` were still executing pip in elevated context, causing failures and ownership issues.
