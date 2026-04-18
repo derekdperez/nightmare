@@ -352,8 +352,10 @@ install_local_python_requirements() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     pip_user=(--user)
   fi
-  python3 -m pip install "${pip_user[@]}" --upgrade pip setuptools wheel
-  python3 -m pip install "${pip_user[@]}" -r "$req"
+  # Avoid upgrading distro-managed pip (common on Amazon Linux via rpm), which can fail with:
+  # "Cannot uninstall pip ..., RECORD file not found".
+  python3 -m pip install "${pip_user[@]}" --disable-pip-version-check setuptools wheel
+  python3 -m pip install "${pip_user[@]}" --disable-pip-version-check -r "$req"
   echo "Local Python ready: $(python3 --version 2>&1 | tr -d '\n')"
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     echo "If a command is not found, add ~/.local/bin to PATH (e.g. export PATH=\"\$HOME/.local/bin:\$PATH\")."

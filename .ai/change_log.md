@@ -723,3 +723,9 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Allowed source reader to handle `system=remote_vm` docker sources.
   - `/api/coord/log-events` now falls back to live source reads when log DB query returns zero rows.
 - Why: operators need immediate visibility into why a source is empty/failing and must always see coordinator + DB log sources.
+## 2026-04-18
+
+- Fixed bootstrap rerun failure on RPM-managed Python hosts (Amazon Linux):
+  - `deploy/bootstrap-central-auto.sh` no longer attempts `pip --upgrade pip`.
+  - Kept dependency install via pip but with `--disable-pip-version-check` and without self-uninstall path.
+- Why: reruns were failing with `Cannot uninstall pip ... RECORD file not found` when pip came from rpm.
