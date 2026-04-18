@@ -20,9 +20,10 @@
     .tableCard { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
     .tableHead { padding: 10px 12px; border-bottom: 1px solid #cbd5e1; background: #e2e8f0; }
     .tableBody { padding: 10px 12px; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #cbd5e1; margin-top: 10px; }
+    .table-wrap { max-height: 520px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
     th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
-    th { background: #f1f5f9; }
+    th { background: #f1f5f9; position: sticky; top: 0; z-index: 3; }
     pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
     .empty { padding: 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; }
   </style>
@@ -120,12 +121,14 @@
         const headerNames = (t.columns || []).map((c) => c.name);
         const tableHtml = rows.length
           ? `
-          <table>
-            <thead><tr>${headerNames.map((name) => `<th>${esc(name)}</th>`).join("")}</tr></thead>
-            <tbody>
-              ${rows.map((row) => `<tr>${headerNames.map((name) => `<td>${renderValue(row[name])}</td>`).join("")}</tr>`).join("")}
-            </tbody>
-          </table>`
+          <div class="table-wrap">
+            <table>
+              <thead><tr>${headerNames.map((name) => `<th>${esc(name)}</th>`).join("")}</tr></thead>
+              <tbody>
+                ${rows.map((row) => `<tr>${headerNames.map((name) => `<td>${renderValue(row[name])}</td>`).join("")}</tr>`).join("")}
+              </tbody>
+            </table>
+          </div>`
           : '<div class="empty">No rows.</div>';
         const tableError = String(t.table_error || "");
         const tableErrorHtml = tableError

@@ -15,9 +15,10 @@
     .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
     button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
     button.primary { background: #0ea5e9; border-color: #0284c7; color: white; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #cbd5e1; }
+    .table-wrap { max-height: 620px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
     th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
-    th { background: #e2e8f0; }
+    th { background: #e2e8f0; position: sticky; top: 0; z-index: 3; }
     .online { color: #15803d; font-weight: 600; }
     .stale { color: #b45309; font-weight: 600; }
     .muted { color: #64748b; }
@@ -37,21 +38,23 @@
     <button onclick="bulkCommand('stop')">Stop selected</button>
     <span id="msg" class="muted"></span>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th><input type="checkbox" id="selectAll"></th>
-        <th>Worker</th>
-        <th>Status</th>
-        <th>Current Targets</th>
-        <th>URLs Scanned (session)</th>
-        <th>Actions</th>
-        <th>Logs</th>
-        <th>Config</th>
-      </tr>
-    </thead>
-    <tbody id="rows"><tr><td colspan="8">Loading...</td></tr></tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="selectAll"></th>
+          <th>Worker</th>
+          <th>Status</th>
+          <th>Current Targets</th>
+          <th>URLs Scanned (session)</th>
+          <th>Actions</th>
+          <th>Logs</th>
+          <th>Config</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="8">Loading...</td></tr></tbody>
+    </table>
+  </div>
 
   <div id="configModal">
     <div class="panel">

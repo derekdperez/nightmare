@@ -167,3 +167,5 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 
 
 - Web UI preference convention: persist page-specific table settings (hidden columns, column widths) in DB using coordinator API /api/coord/ui-preferences keyed by (page, key) instead of localStorage-only state.
+
+- UI table convention: any scrollable table should use a dedicated .table-wrap container (overflow: auto) and sticky header cells (	h { position: sticky; top: 0; z-index: ... }) so headers remain visible while scrolling.

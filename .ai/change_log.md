@@ -531,3 +531,5 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 
 
 - 2026-04-17: Fuzzing table UX upgrade: added horizontal scrolling, per-column resize handles, and column hide/show menu with persisted prefs in Postgres via /api/coord/ui-preferences (GET/POST).
+
+- 2026-04-17: Standardized sticky/frozen headers for scrollable web tables (fuzzing, extractor matches, database, workers, crawl progress, dashboard). Added scroll containers to pages that previously had plain tables so header rows stay visible during scrolling.

@@ -12,9 +12,10 @@
     .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
     .k { font-size: 12px; color: #475569; }
     .v { font-size: 22px; font-weight: 700; margin-top: 4px; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #cbd5e1; }
+    .table-wrap { max-height: 680px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
     th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
-    th { background: #e2e8f0; }
+    th { background: #e2e8f0; position: sticky; top: 0; z-index: 3; }
     .log { white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; margin: 0; background: #0b1220; color: #c8d3f5; padding: 8px; border-radius: 6px; }
     .rowlinks a { margin-right: 8px; }
     .muted { color: #64748b; }
@@ -28,19 +29,21 @@
   <h2>Master Reports</h2>
   <div id="masters" class="muted">Loading...</div>
   <h2>Domains</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Domain</th>
-        <th>Status</th>
-        <th>URLs</th>
-        <th>Findings</th>
-        <th>Reports</th>
-        <th>Latest Log Tail</th>
-      </tr>
-    </thead>
-    <tbody id="rows"><tr><td colspan="6">Loading...</td></tr></tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Domain</th>
+          <th>Status</th>
+          <th>URLs</th>
+          <th>Findings</th>
+          <th>Reports</th>
+          <th>Latest Log Tail</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="6">Loading...</td></tr></tbody>
+    </table>
+  </div>
   <script>
     function esc(v) {
       return String(v || "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch]));
