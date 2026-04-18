@@ -1,17 +1,159 @@
--- Get env variables for this server
-cat deploy/.env
+USEFUL COMMANDS GUIDE
+=====================
 
--- Register targets
-python3 register_targets.py --server-base-url https://ec2-54-162-152-142.compute-1.amazonaws.com --api-token "a986f884602022a3ab5b188c8a4147f79fbd727977705332e74ade9e7eccd9b5201c67d9abbc6a094b2cbd9a8ce8e306" --targets-file targets.txt
+These commands assume you are in the repo root:
+  cd ~/nightmare
 
--- Get docker machine logs
-aws ec2 get-console-output --instance-id i-0a106f97947c75fba --latest --output text
+This project standard is `docker-compose` on central/worker Linux hosts.
 
--- Tear down workers:
-docker compose -f deploy/docker-compose.local.yml --env-file deploy/.env down --remove-orphans
 
--- Tear down DB (optional):
-docker compose -f deploy/docker-compose.local.yml --env-file deploy/.env down --volumes --remove-orphans
+1) AWS Cluster Launch / Provisioning
+------------------------------------
 
--- Run local (windows):
-.\deploy\run-local.ps1
+- Full central + worker deploy (single command wrapper):
+  ./deploy/full_deploy_command.sh
+  Description: Runs the project's scripted AWS provisioning flow for central + workers.
+
+- Direct central bootstrap with worker auto-provisioning:
+  ./deploy/bootstrap-central-auto.sh --auto-provision-workers 6 --aws-ami-id <ami-id> --aws-instance-type t3.micro --aws-subnet-id <subnet-id> --aws-security-group-ids <sg-id> --aws-iam-instance-profile <iam-profile> --aws-key-name <keypair> --aws-region us-east-1 --repo-url https://github.com/derekdperez/nightmare.git --repo-branch main
+  Description: Creates/bootstraps central server and can auto-create worker VMs.
+
+- Provision workers only:
+  ./deploy/provision-workers-aws.sh --count 6 --coordinator-base-url https://<central-host> --coordinator-api-token <token> --repo-url https://github.com/derekdperez/nightmare.git --repo-branch main --region us-east-1
+  Description: Adds worker EC2 instances and bootstraps worker containers.
+
+
+2) Central Server Deploy / Redeploy
+-----------------------------------
+
+- Rebuild + redeploy central server container:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env up -d --build server
+  Description: Pulls in code changes and restarts central server with new image.
+
+- Start full central stack:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env up -d
+  Description: Starts postgres + server services.
+
+- Stop central stack:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env down
+  Description: Stops and removes central stack containers/network.
+
+
+3) Worker VM Deploy / Restart
+-----------------------------
+
+- On a worker VM, rebuild + restart worker service:
+  sudo docker-compose -f deploy/docker-compose.worker.yml --env-file deploy/.env up -d --build worker
+  Description: Refreshes worker code/image and restarts processing loop.
+
+- Worker service status:
+  sudo docker-compose -f deploy/docker-compose.worker.yml --env-file deploy/.env ps
+  Description: Shows current worker container state on that VM.
+
+
+4) AWS VM Status / Fleet Checks
+-------------------------------
+
+- Show running worker instances by tag:
+  aws ec2 describe-instances --filters "Name=tag:Name,Values=nightmare-worker*" "Name=instance-state-name,Values=running,pending,stopped,stopping" --query "Reservations[].Instances[].{id:InstanceId,state:State.Name,public_ip:PublicIpAddress,private_ip:PrivateIpAddress,name:Tags[?Key=='Name']|[0].Value}" --output table
+  Description: Quick fleet inventory from EC2 API.
+
+- SSM command health check:
+  aws ssm describe-instance-information --query "InstanceInformationList[].{id:InstanceId,ping:PingStatus,last:LastPingDateTime,platform:PlatformName}" --output table
+  Description: Confirms workers are online in SSM and remotely reachable.
+
+- Central CLI worker/coordinator status:
+  python3 client.py status --insecure-tls
+  Description: Prints coordinator worker status and optional SSM worker container summary.
+
+- Central CLI crawl progress:
+  python3 client.py progress --insecure-tls
+  Description: Prints per-domain crawl progress snapshot from coordinator.
+
+
+5) Docker Logs / Runtime Diagnostics
+------------------------------------
+
+- Central server logs:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail=300 server
+  Description: Last 300 server log lines.
+
+- Follow central server logs live:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env logs -f server
+  Description: Streaming live central server logs.
+
+- Worker logs (on worker VM):
+  sudo docker-compose -f deploy/docker-compose.worker.yml --env-file deploy/.env logs --tail=300 worker
+  Description: Last 300 worker log lines.
+
+- Follow worker logs live:
+  sudo docker-compose -f deploy/docker-compose.worker.yml --env-file deploy/.env logs -f worker
+  Description: Streaming live worker logs.
+
+- Filter likely failures in worker logs:
+  sudo docker-compose -f deploy/docker-compose.worker.yml --env-file deploy/.env logs --tail=300 worker | egrep -i "error|exception|traceback|failed|claim|complete"
+  Description: Quick signal extraction for queue/processing failures.
+
+
+6) Database Access / Queries
+----------------------------
+
+- Open psql shell in central Postgres container:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env exec postgres psql -U "${POSTGRES_USER:-nightmare}" -d "${POSTGRES_DB:-nightmare}"
+  Description: Interactive SQL session against coordinator database.
+
+- Quick target pipeline counts:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env exec -T postgres psql -U "${POSTGRES_USER:-nightmare}" -d "${POSTGRES_DB:-nightmare}" -c "select status, count(*) from coordinator_targets group by status order by status;"
+  Description: See queue backlog and completion levels.
+
+- Stage task counts:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env exec -T postgres psql -U "${POSTGRES_USER:-nightmare}" -d "${POSTGRES_DB:-nightmare}" -c "select stage, status, count(*) from coordinator_stage_tasks group by stage, status order by stage, status;"
+  Description: See fozzy/extractor task health.
+
+- Recent worker heartbeat/activity:
+  sudo docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env exec -T postgres psql -U "${POSTGRES_USER:-nightmare}" -d "${POSTGRES_DB:-nightmare}" -c "select worker_id,last_seen_at_utc,last_activity from coordinator_worker_presence order by last_seen_at_utc desc limit 50;"
+  Description: Verifies workers are polling and active.
+
+
+7) Useful One-Off Ops
+---------------------
+
+- Show deployed env values:
+  cat deploy/.env
+  Description: Verify coordinator URL/token, DB creds, TLS paths, AWS region.
+
+- Register targets file:
+  python3 register_targets.py --server-base-url https://<central-host> --api-token "<token>" --targets-file targets.txt --insecure-tls
+  Description: Enqueue new scan targets into coordinator.
+
+- EC2 serial console output (boot/debug):
+  aws ec2 get-console-output --instance-id <instance-id> --latest --output text
+  Description: Useful for cloud-init/bootstrap failure diagnosis.
+
+- Local Windows run helper:
+  .\deploy\run-local.ps1
+  Description: Local dockerized run for development/testing.
+
+
+8) Watch-Style Monitors (Run Continuously)  [put at end]
+---------------------------------------------------------
+
+- Watch central service states:
+  watch -n 3 'docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env ps'
+  Description: Live container status for central stack.
+
+- Watch central server logs:
+  watch -n 5 'docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail=80 server'
+  Description: Rolling recent server log window.
+
+- Watch queue backlog + stage status:
+  watch -n 5 'docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env exec -T postgres psql -U "${POSTGRES_USER:-nightmare}" -d "${POSTGRES_DB:-nightmare}" -c "select status,count(*) from coordinator_targets group by status order by status; select stage,status,count(*) from coordinator_stage_tasks group by stage,status order by stage,status;"'
+  Description: Live DB-level pipeline health.
+
+- Watch worker heartbeats:
+  watch -n 5 'docker-compose -f deploy/docker-compose.central.yml --env-file deploy/.env exec -T postgres psql -U "${POSTGRES_USER:-nightmare}" -d "${POSTGRES_DB:-nightmare}" -c "select worker_id,last_seen_at_utc,last_activity from coordinator_worker_presence order by last_seen_at_utc desc limit 20;"'
+  Description: Shows whether workers are actively polling.
+
+- Watch EC2 instance states:
+  watch -n 10 'aws ec2 describe-instances --filters "Name=tag:Name,Values=nightmare-worker*" --query "Reservations[].Instances[].{id:InstanceId,state:State.Name,private_ip:PrivateIpAddress}" --output table'
+  Description: Live VM lifecycle visibility.

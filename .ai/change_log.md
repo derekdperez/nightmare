@@ -605,3 +605,14 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Updated Docker Status page UI to render host origin and per-container console output blocks.
 - Why: operators needed fleet-wide visibility, not just the coordinator host's local containers/logs.
 - Added `awscli` to `Dockerfile` base image packages so server-container fleet status/log APIs can execute SSM queries in central docker-compose deployments.
+
+## 2026-04-18
+
+- Replaced `command_cheatsheet.txt` with a structured "Useful Commands" runbook covering:
+  - AWS cluster launch/provisioning
+  - central/worker docker-compose deploy and status
+  - AWS EC2/SSM worker visibility
+  - central/worker docker logs
+  - Postgres access and operational SQL checks
+  - watch-style monitor commands (placed at end)
+- Why: provide one operator-facing reference for day-to-day deployment and troubleshooting workflows.
