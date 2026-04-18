@@ -103,3 +103,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - Docker/container and log-tail visibility now lives in `server.py` HTTP layer with template pages (`docker_status.html.j2`, `view_logs.html.j2`).
   - Data collection is host-runtime driven (docker CLI + filesystem log discovery) and exposed through coordinator-authenticated read-only APIs.
   - Log-tail endpoint resolves source IDs against enumerated sources each request, reducing arbitrary-path exposure risk.
+- Observability boundary expansion:
+  - `server.py` now includes an SSM-backed collector path for worker fleet container status/log tails.
+  - Fleet status APIs remain coordinator-auth protected and return merged central + worker container inventories.
+  - Remote execution uses AWS CLI (`ssm send-command` + `list-command-invocations`) so no new Python dependency was introduced.

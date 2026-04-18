@@ -34,6 +34,8 @@ import json
 import mimetypes
 import os
 import re
+import shlex
+import shutil
 import ssl
 import subprocess
 import sys
@@ -266,6 +268,72 @@ def _run_command(command: list[str], *, cwd: Optional[Path] = None, timeout_seco
     return completed.returncode == 0, str(completed.stdout or ""), str(completed.stderr or ""), int(completed.returncode or 0)
 
 
+def _run_aws_json(command: list[str], *, timeout_seconds: int = 60) -> tuple[bool, dict[str, Any], str]:
+    ok, stdout, stderr, exit_code = _run_command(command, timeout_seconds=timeout_seconds)
+    if not ok:
+        return False, {}, stderr.strip() or f"aws command failed ({exit_code})"
+    raw = str(stdout or "").strip() or "{}"
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        return False, {}, f"aws returned non-JSON output: {raw[:300]} ({exc})"
+    return True, (parsed if isinstance(parsed, dict) else {}), ""
+
+
+def _run_aws_text(command: list[str], *, timeout_seconds: int = 60) -> tuple[bool, str, str]:
+    ok, stdout, stderr, exit_code = _run_command(command, timeout_seconds=timeout_seconds)
+    if not ok:
+        return False, "", stderr.strip() or f"aws command failed ({exit_code})"
+    return True, str(stdout or "").strip(), ""
+
+
+def _extract_json_payload_from_text(raw: str) -> Any:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    for open_char, close_char in [("[", "]"), ("{", "}")]:
+        start = text.find(open_char)
+        end = text.rfind(close_char)
+        if start < 0 or end <= start:
+            continue
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    return None
+
+
+def _parse_compose_ps_json(raw: str) -> list[dict[str, Any]]:
+    parsed = _extract_json_payload_from_text(raw)
+    entries: list[Any]
+    if isinstance(parsed, list):
+        entries = parsed
+    elif isinstance(parsed, dict):
+        entries = [parsed]
+    else:
+        return []
+    out: list[dict[str, Any]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "name": str(item.get("Name", "") or item.get("name", "") or ""),
+                "service": str(item.get("Service", "") or item.get("service", "") or ""),
+                "state": str(item.get("State", "") or item.get("state", "") or ""),
+                "status": str(item.get("Status", "") or item.get("status", "") or ""),
+                "image": str(item.get("Image", "") or item.get("image", "") or ""),
+                "publishers": item.get("Publishers", item.get("publishers", [])),
+            }
+        )
+    return out
+
+
 def _load_docker_containers() -> dict[str, Any]:
     cmd = ["docker", "ps", "--no-trunc", "--format", "{{json .}}"]
     ok, stdout, stderr, exit_code = _run_command(cmd)
@@ -338,26 +406,7 @@ def _run_compose_ps(compose_file: Path, env_file: Optional[Path]) -> dict[str, A
             msg = stderr.strip() or f"exit={exit_code}"
             errors.append(f"{' '.join(cmd)} -> {msg}")
             continue
-        text = stdout.strip()
-        try:
-            parsed = json.loads(text) if text else []
-        except Exception:
-            parsed = []
-        rows: list[dict[str, Any]] = []
-        if isinstance(parsed, list):
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                rows.append(
-                    {
-                        "name": str(item.get("Name", "") or item.get("name", "") or ""),
-                        "service": str(item.get("Service", "") or item.get("service", "") or ""),
-                        "state": str(item.get("State", "") or item.get("state", "") or ""),
-                        "status": str(item.get("Status", "") or item.get("status", "") or ""),
-                        "image": str(item.get("Image", "") or item.get("image", "") or ""),
-                        "publishers": item.get("Publishers", item.get("publishers", [])),
-                    }
-                )
+        rows = _parse_compose_ps_json(stdout)
         rows.sort(key=lambda item: str(item.get("name", "")).lower())
         return {
             "ok": True,
@@ -377,21 +426,251 @@ def _run_compose_ps(compose_file: Path, env_file: Optional[Path]) -> dict[str, A
     }
 
 
-def _collect_docker_status(app_root: Path) -> dict[str, Any]:
+def _worker_ssm_settings_from_env() -> dict[str, Any]:
+    return {
+        "enabled": shutil.which("aws") is not None,
+        "region": str(os.getenv("AWS_REGION", "us-east-1") or "us-east-1").strip(),
+        "target_key": str(os.getenv("COORDINATOR_WORKER_SSM_TARGET_KEY", os.getenv("SSM_TARGET_KEY", "tag:Name")) or "tag:Name").strip(),
+        "target_values": str(
+            os.getenv(
+                "COORDINATOR_WORKER_SSM_TARGET_VALUES",
+                os.getenv("SSM_TARGET_VALUES", "nightmare-worker*"),
+            )
+            or "nightmare-worker*"
+        ).strip(),
+        "timeout_seconds": max(
+            15,
+            _safe_int(
+                os.getenv(
+                    "COORDINATOR_WORKER_SSM_TIMEOUT_SECONDS",
+                    os.getenv("SSM_TIMEOUT_SECONDS", "60"),
+                ),
+                60,
+            ),
+        ),
+    }
+
+
+def _run_ssm_shell(
+    command_text: str,
+    *,
+    settings: dict[str, Any],
+    instance_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    if not settings.get("enabled"):
+        return {"ok": False, "error": "aws CLI is not available on this host", "invocations": []}
+    region = str(settings.get("region", "us-east-1") or "us-east-1").strip()
+    timeout_seconds = max(15, _safe_int(settings.get("timeout_seconds", 60), 60))
+    send_cmd = [
+        "aws",
+        "ssm",
+        "send-command",
+        "--document-name",
+        "AWS-RunShellScript",
+        "--parameters",
+        json.dumps({"commands": [str(command_text or "").strip()]}, ensure_ascii=False, separators=(",", ":")),
+        "--comment",
+        "nightmare server docker/log status",
+        "--region",
+        region,
+        "--query",
+        "Command.CommandId",
+        "--output",
+        "text",
+    ]
+    instance_list = [str(x or "").strip() for x in (instance_ids or []) if str(x or "").strip()]
+    if instance_list:
+        send_cmd.extend(["--instance-ids", *instance_list])
+    else:
+        target_key = str(settings.get("target_key", "tag:Name") or "tag:Name").strip()
+        target_values = str(settings.get("target_values", "nightmare-worker*") or "nightmare-worker*").strip()
+        send_cmd.extend(["--targets", f"Key={target_key},Values={target_values}"])
+    ok, command_id, error = _run_aws_text(send_cmd, timeout_seconds=30)
+    if not ok or not command_id:
+        return {"ok": False, "error": error or "failed to start SSM command", "invocations": []}
+
+    list_cmd = [
+        "aws",
+        "ssm",
+        "list-command-invocations",
+        "--command-id",
+        str(command_id),
+        "--details",
+        "--region",
+        region,
+        "--output",
+        "json",
+    ]
+    terminal = {
+        "Success",
+        "Cancelled",
+        "TimedOut",
+        "Failed",
+        "Cancelling",
+        "Undeliverable",
+        "Terminated",
+        "InvalidPlatform",
+        "AccessDenied",
+        "Delivery Timed Out",
+        "Execution Timed Out",
+    }
+    invocations: list[dict[str, Any]] = []
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        list_ok, payload, list_error = _run_aws_json(list_cmd, timeout_seconds=30)
+        if not list_ok:
+            return {
+                "ok": False,
+                "error": list_error or "failed to list SSM invocations",
+                "command_id": command_id,
+                "invocations": [],
+            }
+        rows = payload.get("CommandInvocations", [])
+        invocations = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        if invocations and all(str(row.get("Status", "")) in terminal for row in invocations):
+            break
+        time.sleep(2.0)
+    return {
+        "ok": True,
+        "error": "",
+        "command_id": command_id,
+        "invocations": invocations,
+    }
+
+
+def _parse_docker_log_sections(raw: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current_name = ""
+    for line in str(raw or "").splitlines():
+        if line.startswith("###BEGIN_CONTAINER_LOG:"):
+            current_name = line.split(":", 1)[1].strip()
+            sections.setdefault(current_name, [])
+            continue
+        if line.startswith("###END_CONTAINER_LOG:"):
+            current_name = ""
+            continue
+        if current_name:
+            sections.setdefault(current_name, []).append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+
+
+def _list_worker_vm_docker_containers(*, log_lines: int = 0) -> dict[str, Any]:
+    settings = _worker_ssm_settings_from_env()
+    ps_cmd = (
+        "if docker compose version >/dev/null 2>&1; then COMPOSE_CMD='docker compose'; "
+        "elif command -v docker-compose >/dev/null 2>&1; then COMPOSE_CMD='docker-compose'; "
+        "else echo '[]'; exit 0; fi; "
+        "cd /opt/nightmare/deploy && $COMPOSE_CMD -f docker-compose.worker.yml --env-file .env ps --format json || echo '[]'"
+    )
+    ps_result = _run_ssm_shell(ps_cmd, settings=settings)
+    if not ps_result.get("ok"):
+        return {
+            "ok": False,
+            "error": ps_result.get("error", "SSM worker query failed"),
+            "command_id": ps_result.get("command_id"),
+            "instances": [],
+            "containers": [],
+        }
+    instances: list[dict[str, Any]] = []
+    containers: list[dict[str, Any]] = []
+    for inv in ps_result.get("invocations", []):
+        if not isinstance(inv, dict):
+            continue
+        instance_id = str(inv.get("InstanceId", "") or "").strip()
+        status = str(inv.get("Status", "") or "").strip()
+        output = ""
+        plugin_rows = inv.get("CommandPlugins", [])
+        if isinstance(plugin_rows, list) and plugin_rows and isinstance(plugin_rows[0], dict):
+            output = str(plugin_rows[0].get("Output", "") or "")
+        rows = _parse_compose_ps_json(output)
+        instances.append(
+            {
+                "instance_id": instance_id,
+                "status": status,
+                "container_count": len(rows),
+            }
+        )
+        for row in rows:
+            containers.append(
+                {
+                    **row,
+                    "host_type": "worker_vm",
+                    "host_label": instance_id,
+                    "instance_id": instance_id,
+                    "is_application": True,
+                }
+            )
+    if log_lines > 0 and containers:
+        log_cmd = (
+            f"for n in $(docker ps --format '{{{{.Names}}}}'); do "
+            f"echo \"###BEGIN_CONTAINER_LOG:$n\"; "
+            f"docker logs --tail {max(1, int(log_lines))} \"$n\" 2>&1 || true; "
+            f"echo \"###END_CONTAINER_LOG:$n\"; done"
+        )
+        log_result = _run_ssm_shell(log_cmd, settings=settings)
+        if log_result.get("ok"):
+            logs_by_instance: dict[str, dict[str, str]] = {}
+            for inv in log_result.get("invocations", []):
+                if not isinstance(inv, dict):
+                    continue
+                instance_id = str(inv.get("InstanceId", "") or "").strip()
+                output = ""
+                plugin_rows = inv.get("CommandPlugins", [])
+                if isinstance(plugin_rows, list) and plugin_rows and isinstance(plugin_rows[0], dict):
+                    output = str(plugin_rows[0].get("Output", "") or "")
+                logs_by_instance[instance_id] = _parse_docker_log_sections(output)
+            for row in containers:
+                iid = str(row.get("instance_id", "") or "")
+                name = str(row.get("name", "") or "")
+                row["log_tail"] = str(logs_by_instance.get(iid, {}).get(name, "") or "")
+    return {
+        "ok": True,
+        "error": "",
+        "command_id": ps_result.get("command_id"),
+        "instances": instances,
+        "containers": containers,
+        "settings": {
+            "region": settings.get("region"),
+            "target_key": settings.get("target_key"),
+            "target_values": settings.get("target_values"),
+        },
+    }
+
+
+def _collect_docker_status(app_root: Path, *, include_logs: bool = False, log_lines: int = 120) -> dict[str, Any]:
     docker = _load_docker_containers()
     compose_specs = _candidate_compose_specs(app_root)
     compose: list[dict[str, Any]] = [_run_compose_ps(compose_file, env_file) for compose_file, env_file in compose_specs]
-    containers = docker.get("containers", []) if isinstance(docker.get("containers"), list) else []
-    app_containers = [item for item in containers if bool(item.get("is_application"))]
+    local_containers = docker.get("containers", []) if isinstance(docker.get("containers"), list) else []
+    for row in local_containers:
+        row["host_type"] = "central_server"
+        row["host_label"] = "central_server"
+    if include_logs:
+        for row in local_containers:
+            name = str(row.get("name", "") or "").strip()
+            ok, tail, error = _read_docker_log_tail(name, max(1, int(log_lines)))
+            row["log_tail"] = tail if ok else ""
+            if not ok:
+                row["log_error"] = error
+
+    workers = _list_worker_vm_docker_containers(log_lines=(max(1, int(log_lines)) if include_logs else 0))
+    worker_containers = workers.get("containers", []) if isinstance(workers.get("containers"), list) else []
+    all_containers = [*local_containers, *worker_containers]
+    app_containers = [item for item in all_containers if bool(item.get("is_application"))]
     return {
         "generated_at_utc": _iso_now(),
         "docker": docker,
         "compose": compose,
+        "workers": workers,
+        "all_containers": all_containers,
         "summary": {
-            "container_count": len(containers),
+            "container_count": len(all_containers),
             "application_container_count": len(app_containers),
+            "central_container_count": len(local_containers),
+            "worker_vm_container_count": len(worker_containers),
             "compose_files_checked": len(compose),
             "compose_files_ok": sum(1 for item in compose if item.get("ok")),
+            "worker_vm_count": len(workers.get("instances", [])) if isinstance(workers.get("instances"), list) else 0,
         },
         "application_containers": app_containers,
     }
@@ -461,8 +740,34 @@ def _discover_view_log_docker_sources() -> list[dict[str, Any]]:
     return out
 
 
+def _discover_view_log_remote_docker_sources() -> list[dict[str, Any]]:
+    worker = _list_worker_vm_docker_containers(log_lines=0)
+    rows = worker.get("containers", []) if isinstance(worker.get("containers"), list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        container_name = str(row.get("name", "") or "").strip()
+        instance_id = str(row.get("instance_id", "") or "").strip()
+        if not container_name or not instance_id:
+            continue
+        out.append(
+            {
+                "source_id": f"ssm:{instance_id}:docker:{container_name}",
+                "source_type": "docker",
+                "system": "worker_vm",
+                "label": f"{instance_id}:{container_name}",
+                "container_name": container_name,
+                "instance_id": instance_id,
+                "status": str(row.get("status", "") or ""),
+                "image": str(row.get("image", "") or ""),
+                "is_application": True,
+            }
+        )
+    out.sort(key=lambda item: str(item.get("label", "")).lower())
+    return out
+
+
 def _collect_view_log_sources(app_root: Path, output_root: Path) -> list[dict[str, Any]]:
-    sources = _discover_view_log_docker_sources() + _discover_view_log_file_sources(app_root, output_root)
+    sources = _discover_view_log_docker_sources() + _discover_view_log_remote_docker_sources() + _discover_view_log_file_sources(app_root, output_root)
     sources.sort(key=lambda item: (str(item.get("source_type", "")), str(item.get("label", "")).lower()))
     return sources
 
@@ -471,6 +776,21 @@ def _resolve_view_log_source(source_id: str, app_root: Path, output_root: Path) 
     sid = str(source_id or "").strip()
     if not sid:
         return None
+    if sid.startswith("ssm:") and ":docker:" in sid:
+        parts = sid.split(":", 3)
+        if len(parts) == 4:
+            instance_id = str(parts[1] or "").strip()
+            container_name = str(parts[3] or "").strip()
+            if instance_id and container_name:
+                return {
+                    "source_id": sid,
+                    "source_type": "docker",
+                    "system": "worker_vm",
+                    "label": f"{instance_id}:{container_name}",
+                    "container_name": container_name,
+                    "instance_id": instance_id,
+                    "is_application": True,
+                }
     for source in _collect_view_log_sources(app_root, output_root):
         if str(source.get("source_id", "")).strip() == sid:
             return source
@@ -486,6 +806,27 @@ def _read_docker_log_tail(container_name: str, lines: int) -> tuple[bool, str, s
         return True, text, ""
     error = stderr.strip() or f"docker logs failed with exit code {exit_code}"
     return False, "", error
+
+
+def _read_worker_vm_docker_log_tail(instance_id: str, container_name: str, lines: int) -> tuple[bool, str, str]:
+    iid = str(instance_id or "").strip()
+    name = str(container_name or "").strip()
+    if not iid or not name:
+        return False, "", "instance_id and container_name are required"
+    settings = _worker_ssm_settings_from_env()
+    log_cmd = f"docker logs --tail {max(1, int(lines or DEFAULT_VIEW_LOG_LINES))} {shlex.quote(name)} 2>&1 || true"
+    result = _run_ssm_shell(log_cmd, settings=settings, instance_ids=[iid])
+    if not result.get("ok"):
+        return False, "", str(result.get("error", "SSM log command failed") or "SSM log command failed")
+    invocations = result.get("invocations", [])
+    if not isinstance(invocations, list) or not invocations:
+        return False, "", "no SSM invocation result received"
+    inv = invocations[0] if isinstance(invocations[0], dict) else {}
+    plugin_rows = inv.get("CommandPlugins", [])
+    output = ""
+    if isinstance(plugin_rows, list) and plugin_rows and isinstance(plugin_rows[0], dict):
+        output = str(plugin_rows[0].get("Output", "") or "")
+    return True, output.strip(), ""
 
 
 def collect_dashboard_data(output_root: Path, coordinator_store: CoordinatorStore | None = None) -> dict[str, Any]:
@@ -1759,7 +2100,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._is_coordinator_authorized():
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
-            payload = _collect_docker_status(self.app_root)
+            include_logs = str((query.get("include_logs") or ["1"])[0] or "1").strip().lower() in {"1", "true", "yes"}
+            log_lines = max(1, min(MAX_VIEW_LOG_LINES, _safe_int((query.get("log_lines") or [120])[0], 120)))
+            payload = _collect_docker_status(self.app_root, include_logs=include_logs, log_lines=log_lines)
             self._write_json(payload)
             return
         if path == "/api/coord/log-sources":
@@ -1799,8 +2142,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             source_type = str(source.get("source_type", "") or "")
             if source_type == "docker":
+                system = str(source.get("system", "") or "")
                 container_name = str(source.get("container_name", "") or "").strip()
-                ok, tail, error = _read_docker_log_tail(container_name, lines)
+                if system == "worker_vm":
+                    instance_id = str(source.get("instance_id", "") or "").strip()
+                    ok, tail, error = _read_worker_vm_docker_log_tail(instance_id, container_name, lines)
+                else:
+                    ok, tail, error = _read_docker_log_tail(container_name, lines)
                 if not ok:
                     self._write_json(
                         {

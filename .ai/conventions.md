@@ -189,3 +189,6 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - For log viewing, expose source enumeration first (`/api/coord/log-sources`) and fetch tails by stable source ID (`/api/coord/log-tail`) rather than accepting arbitrary file paths from the browser.
 - Docker status convention:
   - Prefer `docker-compose` command family in backend status probes; include compose-file scoped status plus raw `docker ps` container inventory.
+- Fleet observability convention: Docker/log status APIs should aggregate data from both the central server and worker VMs (via SSM) when AWS credentials and target selectors are configured.
+- Remote log source ID convention: `ssm:<instance_id>:docker:<container_name>` is used by `/api/coord/log-sources` and `/api/coord/log-tail`.
+- Docker status API convention: support optional expensive log collection (`include_logs`) and bounded tail size (`log_lines`) to keep UI refreshes responsive.

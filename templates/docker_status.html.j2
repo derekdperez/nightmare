@@ -27,10 +27,11 @@
 </head>
 <body>
   <h1>Docker Status</h1>
-  <div class="meta">Live container status for this deployment. <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/view-logs">View Logs</a></div>
+  <div class="meta">Live container status for central + worker VMs (via SSM when configured). <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/view-logs">View Logs</a></div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="containerSearch" type="text" placeholder="Search containers table">
+    <label><input id="includeLogs" type="checkbox" checked> Include console output</label>
     <button class="primary" onclick="refreshDockerStatus()">Refresh</button>
     <span id="msg" class="muted"></span>
   </div>
@@ -42,14 +43,16 @@
         <thead>
           <tr>
             <th>Name</th>
+            <th>Host</th>
             <th>Image</th>
             <th>Status</th>
             <th>Running For</th>
             <th>Ports</th>
             <th>Container ID</th>
+            <th>Console Output</th>
           </tr>
         </thead>
-        <tbody id="appRows"><tr><td colspan="6">Loading...</td></tr></tbody>
+        <tbody id="appRows"><tr><td colspan="8">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -64,15 +67,17 @@
         <thead>
           <tr>
             <th>Name</th>
+            <th>Host</th>
             <th>Image</th>
             <th>Status</th>
             <th>Running For</th>
             <th>Ports</th>
             <th>Application</th>
             <th>Container ID</th>
+            <th>Console Output</th>
           </tr>
         </thead>
-        <tbody id="allRows"><tr><td colspan="7">Loading...</td></tr></tbody>
+        <tbody id="allRows"><tr><td colspan="9">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -125,18 +130,20 @@
     function renderContainerRows(targetId, rows, includeFlag) {
       const target = document.getElementById(targetId);
       if (!Array.isArray(rows) || !rows.length) {
-        target.innerHTML = includeFlag ? "<tr><td colspan='7'>No containers found.</td></tr>" : "<tr><td colspan='6'>No containers found.</td></tr>";
+        target.innerHTML = includeFlag ? "<tr><td colspan='9'>No containers found.</td></tr>" : "<tr><td colspan='8'>No containers found.</td></tr>";
         return;
       }
       target.innerHTML = rows.map((item) => `
         <tr>
           <td>${esc(item.name)}</td>
+          <td>${esc(item.host_label || item.host_type || "")}</td>
           <td>${esc(item.image)}</td>
           <td>${esc(item.status)}</td>
           <td>${esc(item.running_for)}</td>
           <td>${esc(item.ports)}</td>
           ${includeFlag ? `<td>${item.is_application ? "yes" : "no"}</td>` : ""}
           <td><code>${esc(item.id)}</code></td>
+          <td><pre style="max-height:180px;overflow:auto;margin:0;white-space:pre-wrap;word-break:break-word;">${esc(item.log_tail || item.log_error || "")}</pre></td>
         </tr>
       `).join("");
     }
@@ -168,7 +175,7 @@
         card("Compose Files OK", summary.compose_files_ok || 0),
       ].join("");
       renderContainerRows("appRows", data.application_containers || [], false);
-      const allRows = (data.docker && Array.isArray(data.docker.containers)) ? data.docker.containers : [];
+      const allRows = Array.isArray(data.all_containers) ? data.all_containers : [];
       renderContainerRows("allRows", allRows, true);
       renderCompose(data.compose || []);
       if (!appGrid) {
@@ -200,7 +207,8 @@
       const msg = document.getElementById("msg");
       msg.textContent = "Loading...";
       try {
-        render(await apiGet("/api/coord/docker-status"));
+        const includeLogs = document.getElementById("includeLogs").checked ? "1" : "0";
+        render(await apiGet(`/api/coord/docker-status?include_logs=${includeLogs}&log_lines=300`));
       } catch (e) {
         msg.textContent = `Load failed: ${e.message || e}`;
       }

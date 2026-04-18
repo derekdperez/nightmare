@@ -592,3 +592,16 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Added template render helpers in `reporting/server_pages.py` for the two new pages.
 - Added/updated tests to cover template render and routing-module expectations for these new pages.
 - Why: provide in-app operational visibility for container health and logs without leaving the coordinator web UI.
+
+## 2026-04-18
+
+- Fixed Docker Status / View Logs data scope: APIs now aggregate central server + worker VM data instead of local-host-only lookups.
+- Added AWS SSM-backed worker VM collection in `server.py`:
+  - worker container discovery via remote `docker compose ... ps --format json`
+  - optional remote log-tail collection per container
+  - source IDs for remote logs: `ssm:<instance_id>:docker:<container_name>`
+- Updated `/api/coord/docker-status` to support `include_logs` and `log_lines` query controls and to return merged container rows (`all_containers`) across central and worker systems.
+- Updated `/api/coord/log-sources` and `/api/coord/log-tail` to include and resolve remote worker docker sources.
+- Updated Docker Status page UI to render host origin and per-container console output blocks.
+- Why: operators needed fleet-wide visibility, not just the coordinator host's local containers/logs.
+- Added `awscli` to `Dockerfile` base image packages so server-container fleet status/log APIs can execute SSM queries in central docker-compose deployments.
