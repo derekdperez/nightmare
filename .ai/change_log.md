@@ -765,3 +765,10 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - If workers exist, starts stopped workers if needed, then runs `client.py rollout` to rebuild/redeploy worker docker stacks with latest code.
 - `full_deploy_command.sh` now delegates to `deploy/full_deploy_command.sh` to keep a single canonical implementation.
 - Why: repeated deploy runs were creating drift/failures by re-provisioning every time; expected behavior is reconcile + preserve Postgres data unless explicitly reset.
+## 2026-04-18
+
+- Hardened central bootstrap DB credential recovery for reruns:
+  - `deploy/bootstrap-central-auto.sh` now attempts to recover `POSTGRES_PASSWORD` from the existing `nightmare-postgres` container config when `.env` is missing the password.
+  - Added `run_docker()` wrapper and switched existing-install detection to use docker access mode (direct vs sudo).
+  - Existing-install failure message now explicitly notes container-recovery attempt.
+- Why: full deploy reruns failed when Postgres data existed but `.env` lost `POSTGRES_PASSWORD`; rerunnable deploy should preserve DB access by recovering existing credentials when possible.

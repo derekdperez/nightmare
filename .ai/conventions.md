@@ -232,3 +232,5 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Central compose should always rebuild/redeploy latest code while preserving existing Postgres volumes by default.
   - Worker fleet handling should be conditional: provision only when no worker VMs exist; otherwise roll existing workers forward via SSM rollout + docker rebuild.
   - Root `full_deploy_command.sh` should delegate to `deploy/full_deploy_command.sh` to avoid duplicate logic drift.
+- Bootstrap DB-credential convention: when existing Postgres data/container is detected and `POSTGRES_PASSWORD` is absent from `.env`, bootstrap should attempt best-effort recovery from existing container env before refusing to continue.
+- Docker command convention in deploy scripts: use centralized docker access wrapper (sudo-aware) for container/volume introspection so reruns work in both docker-group and sudo-only environments.

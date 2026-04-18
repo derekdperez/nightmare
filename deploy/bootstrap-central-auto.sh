@@ -174,13 +174,11 @@ PY
 }
 
 detect_existing_postgres_data() {
-  local found=1
-
-  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq 'nightmare-postgres'; then
+  if run_docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq 'nightmare-postgres'; then
     return 0
   fi
 
-  if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -Eq '(^|[_-])postgres_data$'; then
+  if run_docker volume ls --format '{{.Name}}' 2>/dev/null | grep -Eq '(^|[_-])postgres_data$'; then
     return 0
   fi
 
@@ -236,6 +234,33 @@ run_compose() {
       docker-compose "$@"
     fi
   fi
+}
+
+run_docker() {
+  if [[ "$DOCKER_USE_SUDO" -eq 1 ]]; then
+    sudo docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
+recover_postgres_password_from_container() {
+  # Best-effort recovery for re-runs where deploy/.env lost POSTGRES_PASSWORD
+  # but the existing Postgres container still has the original env config.
+  local env_lines
+  env_lines="$(run_docker inspect nightmare-postgres --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null || true)"
+  if [[ -z "$env_lines" ]]; then
+    return 0
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      POSTGRES_PASSWORD=*)
+        echo "${line#POSTGRES_PASSWORD=}"
+        return 0
+        ;;
+    esac
+  done <<< "$env_lines"
+  return 0
 }
 
 install_standalone_compose_if_needed() {
@@ -546,7 +571,18 @@ fi
 
 if [[ -z "$POSTGRES_PASSWORD" ]]; then
   if [[ "$EXISTING_INSTALL_DETECTED" -eq 1 && "$FORCE_REGEN" -ne 1 ]]; then
+    recovered_postgres_password="$(recover_postgres_password_from_container)"
+    if [[ -n "$recovered_postgres_password" ]]; then
+      POSTGRES_PASSWORD="$recovered_postgres_password"
+      echo "Recovered existing POSTGRES_PASSWORD from nightmare-postgres container configuration."
+    fi
+  fi
+fi
+
+if [[ -z "$POSTGRES_PASSWORD" ]]; then
+  if [[ "$EXISTING_INSTALL_DETECTED" -eq 1 && "$FORCE_REGEN" -ne 1 ]]; then
     echo "Detected an existing Nightmare/Postgres installation, but could not find reusable POSTGRES_PASSWORD in ${ENV_FILE}." >&2
+    echo "Tried recovery from existing nightmare-postgres container config but no password was available." >&2
     echo "Refusing to generate a new database password automatically because that would break access to the existing database." >&2
     echo "Restore ${ENV_FILE}, or intentionally reset with --force after removing the old Postgres data volume." >&2
     exit 1
