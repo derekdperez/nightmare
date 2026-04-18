@@ -257,6 +257,13 @@
       if (!rsp.ok) throw new Error(await rsp.text());
       return rsp.json();
     }
+    function downloadWorkerLogs(workerId) {
+      const worker = String(workerId || "").trim();
+      if (!worker) return;
+      persistTokenCookie();
+      const href = `/api/coord/worker-log-download?worker_id=${encodeURIComponent(worker)}`;
+      window.open(href, "_blank", "noopener,noreferrer");
+    }
     function selectedWorkers() {
       const known = new Set((allWorkers || []).map((worker) => String(worker.worker_id || "")));
       return [...selectedWorkerIds].filter((workerId) => known.has(workerId));
@@ -324,7 +331,11 @@
       if (!rows.length) { document.getElementById("rows").innerHTML = "<tr><td colspan='8'>No workers discovered yet.</td></tr>"; _updateSelectAllState(); return; }
       if (!visibleWorkers.length) { document.getElementById("rows").innerHTML = "<tr><td colspan='8'>No workers match current filters.</td></tr>"; _updateSelectAllState(); return; }
       document.getElementById("rows").innerHTML = visibleWorkers.map((w) => {
-        const logs = (w.logs || []).map((l) => `<a href="/files/${encodeURIComponent(l.relative).replace(/%2F/g, "/")}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>`).join("<br>") || "<span class='muted'>none</span>";
+        const logsList = (w.logs || []).map((l) => `<a href="/files/${encodeURIComponent(l.relative).replace(/%2F/g, "/")}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>`).join("<br>") || "<span class='muted'>none</span>";
+        const logDownloadBtn = (Array.isArray(w.logs) && w.logs.length)
+          ? `<button onclick="downloadWorkerLogs('${escJs(w.worker_id)}')">Download Logs</button><br>`
+          : "";
+        const logs = `${logDownloadBtn}${logsList}`;
         const runningLike = new Set(["running", "idle"]);
         const statusClass = runningLike.has(String(w.status || "")) ? "online" : "stale";
         const targets = (w.current_targets || []).map(esc).join("<br>") || "<span class='muted'>none</span>";

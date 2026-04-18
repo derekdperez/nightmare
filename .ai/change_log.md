@@ -662,3 +662,28 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Log store initialization failure is now fatal instead of silently disabling structured logging.
 - Updated central compose env contract so `LOG_DATABASE_URL` is required at deploy time.
 - Why: user requirement that logging/reporting always run on a separate secondary database VM with no optional/off mode.
+## 2026-04-18
+
+- Added dedicated log DB VM provisioning script: `deploy/provision-log-db-aws.sh`.
+  - Provisions a single EC2 VM for Postgres log/reporting storage.
+  - Bootstraps Postgres in Docker via cloud-init.
+  - Writes `LOG_DATABASE_URL` into `deploy/.env`.
+  - Rebuilds central server container by default.
+- Updated `deploy/bootstrap-central-auto.sh` to enforce and automate dedicated logging DB setup:
+  - Reuses existing `LOG_DATABASE_URL` if present.
+  - If missing, auto-provisions log DB VM before central compose startup.
+  - Fails early when provisioning parameters are missing.
+- Added `deploy/deploy-central-with-logdb.sh` as a one-command wrapper for central + worker + log DB provisioning flow.
+- Updated `deploy/.env.example` with `LOG_DATABASE_URL` sample and updated `full_deploy_command.sh` default worker count to 5.
+- Why: logging/reporting DB is now a mandatory separate VM and should be automatically provisioned in bootstrap workflows.
+- Fixed log DB provision script compose target: use compose service name `server` (not container name `nightmare-coordinator-server`) when rebuilding central stack.
+## 2026-04-18
+
+- Added worker log bundle download endpoint: `GET /api/coord/worker-log-download?worker_id=<id>`.
+  - Auth required.
+  - Resolves worker log links and returns zipped log files (`<worker>.worker.logs.zip`).
+  - Applies existing max download byte cap when building bundle.
+- Updated Workers Control page Logs column:
+  - Added `Download Logs` button per worker row.
+  - Button opens worker log bundle endpoint and relies on coordinator token cookie auth.
+- Why: operators requested one-click worker log download from the worker control center.

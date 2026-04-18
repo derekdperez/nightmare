@@ -157,7 +157,7 @@ if [[ -n "$existing_log_db_url" ]]; then
       echo "docker compose/docker-compose is required to rebuild central server." >&2
       exit 1
     fi
-    run_compose "$compose_cmd" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build nightmare-coordinator-server
+    run_compose "$compose_cmd" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build server
   fi
   exit 0
 fi
@@ -249,7 +249,7 @@ if [[ "$SKIP_REBUILD_CENTRAL" -eq 0 ]]; then
     echo "docker compose/docker-compose is required to rebuild central server." >&2
     exit 1
   fi
-  run_compose "$compose_cmd" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build nightmare-coordinator-server
+  run_compose "$compose_cmd" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build server
   echo "Rebuilt central server with dedicated logging DB configuration."
 fi
 

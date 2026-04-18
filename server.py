@@ -3429,6 +3429,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json({"root_domain": root_domain, "artifacts": self.coordinator_store.list_artifacts(root_domain)})
             return
+        if path == "/api/coord/worker-log-download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            worker_id = str((query.get("worker_id") or [""])[0] or "").strip()
+            if not worker_id:
+                self._write_json({"error": "worker_id is required"}, status=400)
+                return
+            if not self._is_safe_worker_id(worker_id):
+                self._write_json({"error": "invalid worker_id"}, status=400)
+                return
+            links = self._discover_worker_log_links(worker_id)
+            if not links:
+                self._write_json({"error": "no log files found for worker", "worker_id": worker_id}, status=404)
+                return
+            zip_buffer = io.BytesIO()
+            total_bytes = 0
+            with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for idx, link in enumerate(links, start=1):
+                    rel = str(link.get("relative", "") or "").strip()
+                    if not rel:
+                        continue
+                    resolved = _normalize_and_validate_relative_path(self.app_root, rel)
+                    if resolved is None or not resolved.is_file():
+                        continue
+                    try:
+                        data = resolved.read_bytes()
+                    except Exception:
+                        continue
+                    if not data:
+                        continue
+                    if total_bytes >= MAX_LOG_DOWNLOAD_BYTES:
+                        break
+                    remaining = MAX_LOG_DOWNLOAD_BYTES - total_bytes
+                    chunk = bytes(data[:remaining])
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    entry_name = f"{idx:02d}_{Path(rel).name}"
+                    zf.writestr(entry_name, chunk)
+            payload = zip_buffer.getvalue()
+            if not payload:
+                self._write_json({"error": "no readable log content found for worker", "worker_id": worker_id}, status=404)
+                return
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", worker_id)
+            self._write_bytes(
+                payload,
+                content_type="application/zip",
+                download_name=f"{safe_name}.worker.logs.zip",
+            )
+            return
         if path.startswith("/files/"):
             rel = unquote(path[len("/files/"):])
             resolved = _normalize_and_validate_relative_path(self.app_root, rel)

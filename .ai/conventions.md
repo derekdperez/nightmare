@@ -211,3 +211,9 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Deployment convention: coordinator server startup is now hard-gated on both primary `database_url` and dedicated `log_database_url`; logging DB is no longer optional.
 - Database separation convention: `log_database_url` must not resolve to the same DB endpoint/name/user tuple as `database_url`.
 - Compose convention: central compose requires `LOG_DATABASE_URL` env var explicitly (fail-fast if missing).
+- AWS bootstrap convention: `bootstrap-central-auto.sh` must ensure `LOG_DATABASE_URL` exists before central compose startup. If absent, auto-provision a dedicated log DB VM and write the URL to `deploy/.env`.
+- Dedicated log DB provisioning convention: use `deploy/provision-log-db-aws.sh` for EC2 VM creation + cloud-init Postgres bootstrap + `.env` update + central server rebuild.
+- Deployment safety convention: central server startup should fail fast when mandatory log DB settings are missing; provisioning scripts should satisfy these requirements automatically.
+- Compose operation convention: `docker compose up ... <service>` must use service keys from compose YAML (`server`, `postgres`), not container_name values.
+- Worker control convention: Logs column should include direct file links and a one-click per-worker log bundle download action.
+- Worker log download API convention: use `/api/coord/worker-log-download?worker_id=...` with coordinator auth and zip response payload.
