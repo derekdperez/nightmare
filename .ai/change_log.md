@@ -729,3 +729,10 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `deploy/bootstrap-central-auto.sh` no longer attempts `pip --upgrade pip`.
   - Kept dependency install via pip but with `--disable-pip-version-check` and without self-uninstall path.
 - Why: reruns were failing with `Cannot uninstall pip ... RECORD file not found` when pip came from rpm.
+## 2026-04-18
+
+- Hardened deploy script executability handling:
+  - `deploy/bootstrap-central-auto.sh` now auto-applies `chmod +x` across `deploy/*.sh` at startup.
+  - Added `ensure_executable()` guard used for `provision-log-db-aws.sh` and `provision-workers-aws.sh` so missing execute-bit no longer breaks reruns when file exists.
+  - Added execute-bit self-heal in both full deploy wrappers (`deploy/full_deploy_command.sh`, `full_deploy_command.sh`) before invoking bootstrap.
+- Why: EC2 reruns failed with `Missing executable .../provision-log-db-aws.sh` after checkouts/copies that dropped script mode bits.

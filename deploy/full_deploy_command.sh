@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+chmod +x ./deploy/*.sh 2>/dev/null || true
+chmod +x ./deploy/bootstrap-central-auto.sh 2>/dev/null || true
+
 ./deploy/bootstrap-central-auto.sh \
   --auto-provision-workers 5 \
   --aws-ami-id ami-098e39bafa7e7303d \

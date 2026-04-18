@@ -47,6 +47,21 @@ What it does:
 USAGE
 }
 
+ensure_executable() {
+  local script_path="$1"
+  if [[ ! -f "$script_path" ]]; then
+    echo "Missing script ${script_path}" >&2
+    exit 1
+  fi
+  if [[ ! -x "$script_path" ]]; then
+    chmod +x "$script_path" 2>/dev/null || true
+  fi
+  if [[ ! -x "$script_path" ]]; then
+    echo "Missing executable ${script_path}" >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base-url)
@@ -107,6 +122,12 @@ while [[ $# -gt 0 ]]; do
       exit 2
       ;;
   esac
+done
+
+# Some environments/checkouts drop executable bits; self-heal deploy scripts up-front.
+for deploy_script in "${DEPLOY_DIR}"/*.sh; do
+  [[ -f "$deploy_script" ]] || continue
+  chmod +x "$deploy_script" 2>/dev/null || true
 done
 
 if ! [[ "$AUTO_PROVISION_WORKERS" =~ ^[0-9]+$ ]]; then
@@ -603,10 +624,7 @@ cd "$DEPLOY_DIR"
 
 if [[ -z "$LOG_DATABASE_URL" ]]; then
   LOG_DB_PROVISION_SCRIPT="${DEPLOY_DIR}/provision-log-db-aws.sh"
-  if [[ ! -x "$LOG_DB_PROVISION_SCRIPT" ]]; then
-    echo "Missing executable ${LOG_DB_PROVISION_SCRIPT}" >&2
-    exit 1
-  fi
+  ensure_executable "$LOG_DB_PROVISION_SCRIPT"
   if [[ -z "$AWS_AMI_ID" || -z "$AWS_SUBNET_ID" || -z "$AWS_SECURITY_GROUP_IDS" ]]; then
     echo "LOG_DATABASE_URL is not set and log DB VM must be provisioned." >&2
     echo "Provide AWS provisioning parameters: --aws-ami-id, --aws-subnet-id, --aws-security-group-ids" >&2
@@ -650,10 +668,7 @@ echo "Use ${WORKER_ENV_FILE} on each worker VM as deploy/.env."
 
 if [[ "$AUTO_PROVISION_WORKERS" -gt 0 ]]; then
   PROVISION_SCRIPT="${DEPLOY_DIR}/provision-workers-aws.sh"
-  if [[ ! -x "$PROVISION_SCRIPT" ]]; then
-    echo "Missing executable ${PROVISION_SCRIPT}" >&2
-    exit 1
-  fi
+  ensure_executable "$PROVISION_SCRIPT"
   provision_cmd=(
     "$PROVISION_SCRIPT"
     --count "$AUTO_PROVISION_WORKERS"

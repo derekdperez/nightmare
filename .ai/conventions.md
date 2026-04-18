@@ -224,3 +224,4 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - View Logs observability convention: expose per-source diagnostics (health/error/probe preview) via dedicated API and UI panel.
 - Log retrieval convention: structured log DB is preferred, but when query total=0, backend must fallback to live source reads to avoid false-empty dashboards.
 - Fleet coverage convention: include central coordinator, central DB, and dedicated log DB source entries regardless of dynamic discovery success.
+- Deploy script resilience convention: shell bootstrap/wrapper scripts must self-heal executable bits (`chmod +x`) for `deploy/*.sh` before invoking subordinate scripts, because some host checkout/copy paths drop mode bits and cause false `Missing executable` failures.
