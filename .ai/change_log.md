@@ -892,3 +892,7 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Added `install_aws_cli_if_missing()` to install AWS CLI v2 from the official AWS installer when `aws` is missing after apt installs.
   - Kept compose fallback behavior so missing `docker-compose-plugin` in apt repos does not block bootstrap.
 - Why: Ubuntu hosts with limited/default repos failed bootstrap due unavailable `awscli` and `docker-compose-plugin` packages.
+- Fixed Ubuntu PEP 668 bootstrap failure in `deploy/bootstrap-central-auto.sh`.
+  - Added conditional pip flag detection and automatic `--break-system-packages` usage for dependency installs when supported.
+  - Preserved existing `--user` install behavior and distro-managed pip safety approach.
+- Why: Ubuntu 24+ marked Python as externally managed and blocked previous pip install path.

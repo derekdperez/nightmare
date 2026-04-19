@@ -255,3 +255,4 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Debug default fleet size convention: deploy wrappers should default to 2 worker VMs during active debugging.
 - Script permission convention: tracked shell scripts (`*.sh`) must be committed with executable mode (`100755`) so Linux hosts can run them immediately after pull without manual chmod.
 - Ubuntu bootstrap dependency convention: when apt repositories do not provide `awscli` or `docker-compose-plugin`, bootstrap should still proceed by installing core docker/curl/openssl/git packages, then installing AWS CLI v2 via the official installer and Compose via existing standalone fallback.
+- Ubuntu Python packaging convention: bootstrap pip installs should include `--break-system-packages` when pip supports it, so PEP 668 externally-managed environments do not block user-scoped dependency installation.

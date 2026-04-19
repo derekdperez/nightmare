@@ -552,13 +552,18 @@ install_local_python_requirements() {
 
   echo "Installing Python packages from ${req}..."
   local pip_user=()
+  local pip_extra=()
   if [[ "${EUID:-$(id -u)}" -ne 0 || -n "${SUDO_USER:-}" ]]; then
     pip_user=(--user)
   fi
+  if run_as_python_user python3 -m pip help install 2>/dev/null | grep -q -- '--break-system-packages'; then
+    # Required on modern Debian/Ubuntu (PEP 668 externally-managed environments).
+    pip_extra=(--break-system-packages)
+  fi
   # Avoid upgrading distro-managed pip (common on Amazon Linux via rpm), which can fail with:
   # "Cannot uninstall pip ..., RECORD file not found".
-  run_as_python_user python3 -m pip install "${pip_user[@]}" --disable-pip-version-check setuptools wheel
-  run_as_python_user python3 -m pip install "${pip_user[@]}" --disable-pip-version-check -r "$req"
+  run_as_python_user python3 -m pip install "${pip_user[@]}" "${pip_extra[@]}" --disable-pip-version-check setuptools wheel
+  run_as_python_user python3 -m pip install "${pip_user[@]}" "${pip_extra[@]}" --disable-pip-version-check -r "$req"
   echo "Local Python ready: $(python3 --version 2>&1 | tr -d '\n')"
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     echo "If a command is not found, add ~/.local/bin to PATH (e.g. export PATH=\"\$HOME/.local/bin:\$PATH\")."
