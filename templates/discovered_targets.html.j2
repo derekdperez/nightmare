@@ -172,21 +172,23 @@
     function bindGridControls() {
       if (!window.NightmareGridControls) return;
       if (!domainGridCtrl) {
-        domainGridCtrl = window.NightmareGridControls.attach({
-          tableId: "discoveredTargetsTable",
+        domainGridCtrl = window.NightmareGridControls.enhance({
+          table: "discoveredTargetsTable",
           page: "discovered_targets",
           prefKey: DOMAIN_PAGE_KEY,
           tokenInputId: "token",
-          searchInputId: "searchText"
+          mode: "full",
+          globalSearchInputId: "searchText"
         });
       }
       if (!sitemapGridCtrl) {
-        sitemapGridCtrl = window.NightmareGridControls.attach({
-          tableId: "discoveredTargetSitemapTable",
+        sitemapGridCtrl = window.NightmareGridControls.enhance({
+          table: "discoveredTargetSitemapTable",
           page: "discovered_targets",
           prefKey: SITEMAP_PAGE_KEY,
           tokenInputId: "token",
-          searchInputId: "sitemapSearchText"
+          mode: "full",
+          globalSearchInputId: "sitemapSearchText"
         });
       }
       domainGridCtrl?.refresh?.();
