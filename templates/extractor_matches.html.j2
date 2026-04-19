@@ -134,6 +134,10 @@
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
     const DEFAULT_LIMIT = 250;
+    const EXTRACTOR_DOMAINS_CACHE_KEY = "nightmare_extractor_domains_cache_v1";
+    const EXTRACTOR_MATCHES_CACHE_PREFIX = "nightmare_extractor_matches_cache_v1";
+    const EXTRACTOR_DOMAINS_CACHE_TTL_MS = 10 * 60 * 1000;
+    const EXTRACTOR_MATCHES_CACHE_TTL_MS = 2 * 60 * 1000;
     let extractorTopGridCtrl = null;
     let extractorFilesGridCtrl = null;
     let extractorMatchesGridCtrl = null;
@@ -187,6 +191,52 @@
       const token = document.getElementById("token").value.trim();
       if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore local cache write failures.
+      }
+    }
+    function saveTimedCache(key, payload) {
+      writeLocalJson(key, {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
+    }
+    function loadTimedCache(key, ttlMs) {
+      const row = readLocalJson(key);
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > Math.max(1000, Number(ttlMs || 0))) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function loadCachedDomainsPayload() {
+      const payload = loadTimedCache(EXTRACTOR_DOMAINS_CACHE_KEY, EXTRACTOR_DOMAINS_CACHE_TTL_MS);
+      return payload && Array.isArray(payload.domains) ? payload : null;
+    }
+    function saveCachedDomainsPayload(payload) {
+      saveTimedCache(EXTRACTOR_DOMAINS_CACHE_KEY, payload);
+    }
+    function loadCachedMatchesPayload(cacheKey) {
+      const payload = loadTimedCache(`${EXTRACTOR_MATCHES_CACHE_PREFIX}:${cacheKey}`, EXTRACTOR_MATCHES_CACHE_TTL_MS);
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function saveCachedMatchesPayload(cacheKey, payload) {
+      saveTimedCache(`${EXTRACTOR_MATCHES_CACHE_PREFIX}:${cacheKey}`, payload);
     }
     async function apiGet(path) {
       const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
@@ -415,14 +465,29 @@
       updateDownloadLink();
       return domains.length;
     }
-    async function loadDomains() {
-      const payload = await apiGet("/api/coord/extractor-matches/domains?limit=20000");
-      currentDomainStats = Array.isArray(payload.domains) ? payload.domains : [];
-      return renderDomainOptions();
+    async function loadDomains(options) {
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedDomainsPayload();
+        if (cached) {
+          currentDomainStats = Array.isArray(cached.domains) ? cached.domains : [];
+          renderDomainOptions();
+          showedCached = true;
+        }
+      }
+      try {
+        const payload = await apiGet("/api/coord/extractor-matches/domains?limit=20000");
+        currentDomainStats = Array.isArray(payload.domains) ? payload.domains : [];
+        saveCachedDomainsPayload(payload);
+        return renderDomainOptions();
+      } catch (e) {
+        if (!showedCached) throw e;
+        return renderDomainOptions();
+      }
     }
-    async function loadMatches() {
+    function buildMatchesRequest() {
       const msg = document.getElementById("msg");
-      msg.textContent = "Loading...";
       const domain = selectedDomain();
       const q = String(document.getElementById("searchText").value || "").trim();
       const limit = Math.max(1, Math.min(2000, Number(document.getElementById("limit").value || DEFAULT_LIMIT)));
@@ -437,33 +502,71 @@
       Object.entries(columnFilters).forEach(([key, val]) => {
         if (val) params.set(`f_${key}`, val);
       });
-      const path = `/api/coord/extractor-matches?${params.toString()}`;
+      return {
+        domain,
+        path: `/api/coord/extractor-matches?${params.toString()}`,
+        cacheKey: JSON.stringify({
+          domain,
+          q,
+          limit,
+          offset: Math.max(0, currentOffset),
+          sort_key: sortKey,
+          sort_dir: sortDir,
+          filters: columnFilters,
+        }),
+      };
+    }
+    function applyMatchesPayload(payload, domain) {
+      currentRows = Array.isArray(payload.rows) ? payload.rows : [];
+      currentTopFilters = Array.isArray(payload.top_filters) ? payload.top_filters : [];
+      currentTotalRows = Number(payload.total_rows || 0);
+      currentOffset = Number(payload.offset || 0);
+      const filesByDomain = payload.files_by_domain || {};
+      currentFiles = domain && domain !== "__all__" && Array.isArray(filesByDomain[domain]) ? filesByDomain[domain] : [];
+      renderCards(payload);
+      renderTopFilters(currentTopFilters);
+      renderRows(currentRows);
+      renderFiles(currentFiles);
+      updatePager(payload);
+      setSortIndicators();
+    }
+    async function loadMatches(options) {
+      const msg = document.getElementById("msg");
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      const request = buildMatchesRequest();
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedMatchesPayload(request.cacheKey);
+        if (cached) {
+          applyMatchesPayload(cached, request.domain);
+          msg.textContent = `Loaded ${cached.rows_returned || rowsCount(cached.rows)} cached row(s). Refreshing...`;
+          showedCached = true;
+        }
+      }
+      if (!showedCached) msg.textContent = "Loading...";
       try {
-        const payload = await apiGet(path);
-        currentRows = Array.isArray(payload.rows) ? payload.rows : [];
-        currentTopFilters = Array.isArray(payload.top_filters) ? payload.top_filters : [];
-        currentTotalRows = Number(payload.total_rows || 0);
-        currentOffset = Number(payload.offset || 0);
-        const filesByDomain = payload.files_by_domain || {};
-        currentFiles = domain && domain !== "__all__" && Array.isArray(filesByDomain[domain]) ? filesByDomain[domain] : [];
-        renderCards(payload);
-        renderTopFilters(currentTopFilters);
-        renderRows(currentRows);
-        renderFiles(currentFiles);
-        updatePager(payload);
-        setSortIndicators();
+        const payload = await apiGet(request.path);
+        applyMatchesPayload(payload, request.domain);
+        saveCachedMatchesPayload(request.cacheKey, payload);
         msg.textContent = `Loaded ${payload.rows_returned || 0} row(s) from offset ${payload.offset || 0}.`;
       } catch (e) {
-        document.getElementById("rows").innerHTML = `<tr><td colspan="10">Failed to load extractor matches: ${esc(e.message)}</td></tr>`;
-        document.getElementById("topFiltersRows").innerHTML = "<tr><td colspan='2'>Load failed.</td></tr>";
-        document.getElementById("filesRows").innerHTML = "<tr><td colspan='4'>Load failed.</td></tr>";
-        msg.textContent = "Load failed.";
+        if (!showedCached) {
+          document.getElementById("rows").innerHTML = `<tr><td colspan="10">Failed to load extractor matches: ${esc(e.message)}</td></tr>`;
+          document.getElementById("topFiltersRows").innerHTML = "<tr><td colspan='2'>Load failed.</td></tr>";
+          document.getElementById("filesRows").innerHTML = "<tr><td colspan='4'>Load failed.</td></tr>";
+          msg.textContent = "Load failed.";
+        } else {
+          msg.textContent = "Refresh failed. Showing cached extractor results.";
+        }
       }
     }
-    async function refreshDomainsAndMatches() {
-      try { await loadDomains(); } catch (_) {}
+    function rowsCount(rows) {
+      return Array.isArray(rows) ? rows.length : 0;
+    }
+    async function refreshDomainsAndMatches(options) {
+      try { await loadDomains(options); } catch (_) {}
       currentOffset = 0;
-      await loadMatches();
+      await loadMatches(options);
     }
 
     hydrateTokenFromCookie();
@@ -545,7 +648,7 @@
     document.getElementById("filesSearch").addEventListener("input", () => renderFiles(currentFiles));
     document.getElementById("filesPathFilter").addEventListener("input", () => renderFiles(currentFiles));
     setSortIndicators();
-    refreshDomainsAndMatches();
+    refreshDomainsAndMatches({ useCacheFirst: true });
   </script>
 </body>
 </html>

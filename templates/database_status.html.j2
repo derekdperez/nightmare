@@ -41,6 +41,8 @@
   {% include '_grid_controls.html.j2' %}
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    const DB_STATUS_CACHE_KEY = "nightmare_database_status_cache_v1";
+    const DB_STATUS_CACHE_TTL_MS = 60 * 1000;
     const dbGridControllers = {};
 
     function readCookie(name) {
@@ -85,6 +87,38 @@
       const token = document.getElementById("token").value.trim();
       if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore local cache write issues.
+      }
+    }
+    function loadCachedDbStatus() {
+      const row = readLocalJson(DB_STATUS_CACHE_KEY);
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > DB_STATUS_CACHE_TTL_MS) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function saveCachedDbStatus(payload) {
+      writeLocalJson(DB_STATUS_CACHE_KEY, {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
     }
     async function apiGet(path) {
       const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
@@ -165,23 +199,39 @@
         }
       });
     }
-    async function refresh() {
+    async function refresh(options) {
       const msg = document.getElementById("msg");
-      msg.textContent = "Loading...";
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedDbStatus();
+        if (cached) {
+          renderCards(cached);
+          renderTables(cached);
+          msg.textContent = `Loaded ${cached.table_count || 0} cached table(s). Refreshing...`;
+          showedCached = true;
+        }
+      }
+      if (!showedCached) msg.textContent = "Loading...";
       try {
         const data = await apiGet("/api/coord/database-status");
         renderCards(data);
         renderTables(data);
+        saveCachedDbStatus(data);
         msg.textContent = `Loaded ${data.table_count || 0} table(s).`;
       } catch (e) {
-        document.getElementById("tables").innerHTML = `<div class="empty">Failed to load database status: ${esc(e.message)}</div>`;
-        msg.textContent = "Load failed.";
+        if (!showedCached) {
+          document.getElementById("tables").innerHTML = `<div class="empty">Failed to load database status: ${esc(e.message)}</div>`;
+          msg.textContent = "Load failed.";
+        } else {
+          msg.textContent = "Refresh failed. Showing cached data.";
+        }
       }
     }
     hydrateTokenFromCookie();
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
-    refresh();
+    refresh({ useCacheFirst: true });
   </script>
 </body>
 </html>

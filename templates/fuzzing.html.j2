@@ -133,6 +133,10 @@
     const PREFS_PAGE = "fuzzing";
     const PREFS_KEY = "table_columns_v2";
     const DEFAULT_LIMIT = 250;
+    const FUZZING_DOMAINS_CACHE_KEY = "nightmare_fuzzing_domains_cache_v1";
+    const FUZZING_ROWS_CACHE_PREFIX = "nightmare_fuzzing_rows_cache_v1";
+    const FUZZING_DOMAINS_CACHE_TTL_MS = 10 * 60 * 1000;
+    const FUZZING_ROWS_CACHE_TTL_MS = 2 * 60 * 1000;
     const DEFAULT_COLUMN_WIDTHS = { url: 420, mutated_parameter: 140, mutated_value: 320, new_status: 90, response_actions: 260, size_difference: 140, duration_difference_ms: 140, notes_placeholder: 200 };
     const ALL_COLUMN_KEYS = ["url", "mutated_parameter", "mutated_value", "new_status", "response_actions", "size_difference", "duration_difference_ms", "notes_placeholder"];
     let columnPrefs = { hidden_columns: [], column_widths: { ...DEFAULT_COLUMN_WIDTHS } };
@@ -151,6 +155,48 @@
     function hydrateTokenFromCookie() { const token = readCookie(TOKEN_COOKIE_NAME); if (token) document.getElementById("token").value = token; }
     function esc(v) { return String(v ?? "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch])); }
     function authHeaders() { const token = document.getElementById("token").value.trim(); if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30); return token ? { Authorization: `Bearer ${token}` } : {}; }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore cache write failures.
+      }
+    }
+    function saveTimedCache(key, payload) {
+      writeLocalJson(key, { cached_at_epoch_ms: Date.now(), payload: payload || {} });
+    }
+    function loadTimedCache(key, ttlMs) {
+      const row = readLocalJson(key);
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > Math.max(1000, Number(ttlMs || 0))) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function loadCachedFuzzDomains() {
+      const payload = loadTimedCache(FUZZING_DOMAINS_CACHE_KEY, FUZZING_DOMAINS_CACHE_TTL_MS);
+      return payload && Array.isArray(payload.domains) ? payload : null;
+    }
+    function saveCachedFuzzDomains(payload) {
+      saveTimedCache(FUZZING_DOMAINS_CACHE_KEY, payload);
+    }
+    function loadCachedFuzzRows(cacheKey) {
+      return loadTimedCache(`${FUZZING_ROWS_CACHE_PREFIX}:${cacheKey}`, FUZZING_ROWS_CACHE_TTL_MS);
+    }
+    function saveCachedFuzzRows(cacheKey, payload) {
+      saveTimedCache(`${FUZZING_ROWS_CACHE_PREFIX}:${cacheKey}`, payload);
+    }
     async function apiGet(path) { const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() }); if (!rsp.ok) throw new Error(await rsp.text()); const ct = String(rsp.headers.get("content-type") || ""); if (ct.includes("application/json")) return rsp.json(); return rsp.text(); }
 
     function selectedDomain() { return String(document.getElementById("domainSelect").value || "__all__"); }
@@ -277,8 +323,7 @@
       }).join("");
       applyColumnPrefs();
     }
-    async function loadDomains() {
-      const payload = await apiGet("/api/coord/fuzzing/domains?limit=20000");
+    function applyDomainsPayload(payload) {
       const domains = Array.isArray(payload.domains) ? payload.domains : [];
       const select = document.getElementById("domainSelect");
       const current = String(select.value || "__all__");
@@ -286,22 +331,86 @@
       if ([...select.options].some((o) => o.value === current)) select.value = current;
       updateDownloadLink();
     }
-    async function loadRows() {
-      const msg = document.getElementById("msg"); msg.textContent = "Loading...";
-      const domain = selectedDomain(); const q = String(document.getElementById("searchText").value || "").trim(); const limit = Math.max(1, Math.min(2000, Number(document.getElementById("limit").value || DEFAULT_LIMIT)));
-      const params = new URLSearchParams(); params.set("limit", String(limit)); params.set("offset", String(Math.max(0, currentOffset))); params.set("sort_key", sortKey); params.set("sort_dir", sortDir); if (domain && domain !== "__all__") params.set("root_domain", domain); if (q) params.set("q", q);
+    async function loadDomains(options) {
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedFuzzDomains();
+        if (cached) {
+          applyDomainsPayload(cached);
+          showedCached = true;
+        }
+      }
       try {
-        const payload = await apiGet(`/api/coord/fuzzing?${params.toString()}`);
-        currentRows = Array.isArray(payload.rows) ? payload.rows : [];
-        currentOffset = Number(payload.offset || 0);
-        renderCards(payload); renderRows(currentRows); setSortIndicators();
-        msg.textContent = `Loaded ${payload.rows_returned || 0} row(s) from offset ${payload.offset || 0}.`;
+        const payload = await apiGet("/api/coord/fuzzing/domains?limit=20000");
+        applyDomainsPayload(payload);
+        saveCachedFuzzDomains(payload);
       } catch (e) {
-        document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load fuzzing results: ${esc(e.message)}</td></tr>`;
-        msg.textContent = "Load failed.";
+        if (!showedCached) throw e;
       }
     }
-    async function refreshDomainsAndRows() { try { await loadDomains(); } catch (_) {} currentOffset = 0; await loadRows(); }
+    function buildRowsRequest() {
+      const domain = selectedDomain();
+      const q = String(document.getElementById("searchText").value || "").trim();
+      const limit = Math.max(1, Math.min(2000, Number(document.getElementById("limit").value || DEFAULT_LIMIT)));
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      params.set("offset", String(Math.max(0, currentOffset)));
+      params.set("sort_key", sortKey);
+      params.set("sort_dir", sortDir);
+      if (domain && domain !== "__all__") params.set("root_domain", domain);
+      if (q) params.set("q", q);
+      return {
+        path: `/api/coord/fuzzing?${params.toString()}`,
+        cacheKey: JSON.stringify({
+          domain,
+          q,
+          limit,
+          offset: Math.max(0, currentOffset),
+          sort_key: sortKey,
+          sort_dir: sortDir,
+        }),
+      };
+    }
+    function applyRowsPayload(payload) {
+      currentRows = Array.isArray(payload.rows) ? payload.rows : [];
+      currentOffset = Number(payload.offset || 0);
+      renderCards(payload);
+      renderRows(currentRows);
+      setSortIndicators();
+    }
+    function rowsCount(rows) {
+      return Array.isArray(rows) ? rows.length : 0;
+    }
+    async function loadRows(options) {
+      const msg = document.getElementById("msg");
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      const request = buildRowsRequest();
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedFuzzRows(request.cacheKey);
+        if (cached) {
+          applyRowsPayload(cached);
+          msg.textContent = `Loaded ${cached.rows_returned || rowsCount(cached.rows)} cached row(s). Refreshing...`;
+          showedCached = true;
+        }
+      }
+      if (!showedCached) msg.textContent = "Loading...";
+      try {
+        const payload = await apiGet(request.path);
+        applyRowsPayload(payload);
+        saveCachedFuzzRows(request.cacheKey, payload);
+        msg.textContent = `Loaded ${payload.rows_returned || 0} row(s) from offset ${payload.offset || 0}.`;
+      } catch (e) {
+        if (!showedCached) {
+          document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load fuzzing results: ${esc(e.message)}</td></tr>`;
+          msg.textContent = "Load failed.";
+        } else {
+          msg.textContent = "Refresh failed. Showing cached fuzzing data.";
+        }
+      }
+    }
+    async function refreshDomainsAndRows(options) { try { await loadDomains(options); } catch (_) {} currentOffset = 0; await loadRows(options); }
 
     function normalizeResponseRecord(payload) {
       const baseline = (payload && typeof payload.baseline === "object" && payload.baseline) ? payload.baseline : {};
@@ -469,7 +578,7 @@
 
     installColumnResizers();
     setSortIndicators();
-    loadColumnPrefs().then(() => { buildColumnMenu(); applyColumnPrefs(); }).finally(() => refreshDomainsAndRows());
+    loadColumnPrefs().then(() => { buildColumnMenu(); applyColumnPrefs(); }).finally(() => refreshDomainsAndRows({ useCacheFirst: true }));
   </script>
 </body>
 </html>

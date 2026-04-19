@@ -154,6 +154,34 @@ def test_register_targets_post_json_uses_auth_header(monkeypatch: pytest.MonkeyP
     assert captured["verify"] is False
 
 
+def test_register_targets_parse_args_reads_deploy_env_defaults(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("COORDINATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("COORDINATOR_API_TOKEN", raising=False)
+
+    def fake_load_env(path, override=False):
+        monkeypatch.setenv("COORDINATOR_BASE_URL", "https://coord.example.com")
+        monkeypatch.setenv("COORDINATOR_API_TOKEN", "token-123")
+        return {
+            "COORDINATOR_BASE_URL": "https://coord.example.com",
+            "COORDINATOR_API_TOKEN": "token-123",
+        }
+
+    monkeypatch.setattr(register_targets, "load_env_file_into_os", fake_load_env)
+    args = register_targets.parse_args([])
+    assert args.server_base_url == "https://coord.example.com"
+    assert args.api_token == "token-123"
+
+
+def test_register_targets_main_requires_server_base_url(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        register_targets,
+        "parse_args",
+        lambda *_: argparse.Namespace(server_base_url="", api_token="x", targets_file="targets.txt"),
+    )
+    with pytest.raises(ValueError, match="server base URL is required"):
+        register_targets.main()
+
+
 def test_http_queue_cli_main_stats(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     class FakeQueue:
         def __init__(self, *args, **kwargs):

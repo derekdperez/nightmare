@@ -90,6 +90,8 @@
     let workerGridCtrl = null;
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
     const WORKER_SELECTION_COOKIE_NAME = "nightmare_worker_selection_v1";
+    const WORKER_CONTROL_CACHE_KEY = "nightmare_worker_control_cache_v1";
+    const WORKER_CONTROL_CACHE_TTL_MS = 20 * 1000;
     let allWorkers = [];
     let visibleWorkers = [];
     let selectedWorkerIds = new Set();
@@ -132,6 +134,38 @@
       const token = document.getElementById("token").value.trim();
       if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { "Authorization": `Bearer ${token}` } : {};
+    }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore local cache write failures.
+      }
+    }
+    function loadCachedWorkerControl() {
+      const row = readLocalJson(WORKER_CONTROL_CACHE_KEY);
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > WORKER_CONTROL_CACHE_TTL_MS) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function saveCachedWorkerControl(payload) {
+      writeLocalJson(WORKER_CONTROL_CACHE_KEY, {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
     }
     function _parseWorkerSelectionCookie() {
       try {
@@ -376,9 +410,28 @@
         workerGridCtrl.refresh();
       }
     }
-    async function refresh() {
-      try { render(await apiGet("/api/coord/worker-control")); }
-      catch (e) { document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load worker state: ${esc(e.message)}</td></tr>`; }
+    async function refresh(options) {
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedWorkerControl();
+        if (cached) {
+          render(cached);
+          showedCached = true;
+          document.getElementById("msg").textContent = "Loaded cached worker state. Refreshing...";
+        }
+      }
+      try {
+        const payload = await apiGet("/api/coord/worker-control");
+        render(payload);
+        saveCachedWorkerControl(payload);
+      } catch (e) {
+        if (!showedCached) {
+          document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load worker state: ${esc(e.message)}</td></tr>`;
+        } else {
+          document.getElementById("msg").textContent = `Refresh failed. Showing cached worker state. (${e.message || e})`;
+        }
+      }
     }
     hydrateTokenFromCookie();
     selectedWorkerIds = new Set(_parseWorkerSelectionCookie());
@@ -417,8 +470,8 @@
       window.__lastCounts = (data && typeof data.counts === "object" && data.counts) ? data.counts : {};
       return originalRender(data);
     };
-    refresh();
-    setInterval(refresh, 3000);
+    refresh({ useCacheFirst: true });
+    setInterval(() => refresh(), 3000);
   </script>
 </body>
 </html>

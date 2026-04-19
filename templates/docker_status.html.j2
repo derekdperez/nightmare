@@ -88,6 +88,8 @@
   {% include '_grid_controls.html.j2' %}
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    const DOCKER_STATUS_CACHE_PREFIX = "nightmare_docker_status_cache_v1";
+    const DOCKER_STATUS_CACHE_TTL_MS = 30 * 1000;
     let appGrid = null;
     let allGrid = null;
 
@@ -122,6 +124,41 @@
       const token = document.getElementById("token").value.trim();
       if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore cache write failures.
+      }
+    }
+    function cacheKeyForDockerStatus(includeLogs) {
+      return `${DOCKER_STATUS_CACHE_PREFIX}:${includeLogs ? "logs" : "no_logs"}`;
+    }
+    function loadCachedDockerStatus(includeLogs) {
+      const row = readLocalJson(cacheKeyForDockerStatus(includeLogs));
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > DOCKER_STATUS_CACHE_TTL_MS) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function saveCachedDockerStatus(includeLogs, payload) {
+      writeLocalJson(cacheKeyForDockerStatus(includeLogs), {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
     }
     async function apiGet(path) {
       const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
@@ -217,21 +254,38 @@
       }
       document.getElementById("msg").textContent = `Updated ${esc(data.generated_at_utc || "")}`;
     }
-    async function refreshDockerStatus() {
+    async function refreshDockerStatus(options) {
       const msg = document.getElementById("msg");
-      msg.textContent = "Loading...";
+      const includeLogs = document.getElementById("includeLogs").checked;
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedDockerStatus(includeLogs);
+        if (cached) {
+          render(cached);
+          msg.textContent = "Loaded cached docker status. Refreshing...";
+          showedCached = true;
+        }
+      }
+      if (!showedCached) msg.textContent = "Loading...";
       try {
-        const includeLogs = document.getElementById("includeLogs").checked ? "1" : "0";
-        render(await apiGet(`/api/coord/docker-status?include_logs=${includeLogs}&log_lines=300`));
+        const includeLogsFlag = includeLogs ? "1" : "0";
+        const payload = await apiGet(`/api/coord/docker-status?include_logs=${includeLogsFlag}&log_lines=300`);
+        render(payload);
+        saveCachedDockerStatus(includeLogs, payload);
       } catch (e) {
-        msg.textContent = `Load failed: ${e.message || e}`;
+        if (!showedCached) {
+          msg.textContent = `Load failed: ${e.message || e}`;
+        } else {
+          msg.textContent = `Refresh failed. Showing cached docker status. (${e.message || e})`;
+        }
       }
     }
     hydrateTokenFromCookie();
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
-    refreshDockerStatus();
-    setInterval(refreshDockerStatus, 10000);
+    refreshDockerStatus({ useCacheFirst: true });
+    setInterval(() => refreshDockerStatus(), 10000);
   </script>
 </body>
 </html>

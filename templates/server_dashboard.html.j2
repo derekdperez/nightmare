@@ -48,8 +48,42 @@
   {% include '_grid_controls.html.j2' %}
   <script>
     let dashboardGridCtrl = null;
+    const DASHBOARD_CACHE_KEY = "nightmare_dashboard_summary_cache_v1";
+    const DASHBOARD_CACHE_TTL_MS = 2 * 60 * 1000;
     function esc(v) {
       return String(v || "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch]));
+    }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore cache write failures; live fetch is still authoritative.
+      }
+    }
+    function loadCachedDashboard() {
+      const row = readLocalJson(DASHBOARD_CACHE_KEY);
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > DASHBOARD_CACHE_TTL_MS) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function saveCachedDashboard(payload) {
+      writeLocalJson(DASHBOARD_CACHE_KEY, {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
     }
     function fileLink(relPath, label) {
       if (!relPath) return "";
@@ -112,21 +146,31 @@
         dashboardGridCtrl.refresh();
       }
     }
-    async function refresh() {
+    async function refresh(options) {
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedDashboard();
+        if (cached) {
+          render(cached);
+          showedCached = true;
+        }
+      }
       try {
         const rsp = await fetch("/api/summary", { cache: "no-store" });
         if (!rsp.ok) {
-          showLoadError(`HTTP ${rsp.status}`);
+          if (!showedCached) showLoadError(`HTTP ${rsp.status}`);
           return;
         }
         const data = await rsp.json();
         render(data);
+        saveCachedDashboard(data);
       } catch (e) {
-        showLoadError(e && e.message ? e.message : "request failed");
+        if (!showedCached) showLoadError(e && e.message ? e.message : "request failed");
       }
     }
-    refresh();
-    setInterval(refresh, 5000);
+    refresh({ useCacheFirst: true });
+    setInterval(() => refresh(), 5000);
   </script>
 </body>
 </html>

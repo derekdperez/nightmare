@@ -62,6 +62,8 @@
   <script>
     let crawlGridCtrl = null;
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    const CRAWL_PROGRESS_CACHE_PREFIX = "nightmare_crawl_progress_cache_v1";
+    const CRAWL_PROGRESS_CACHE_TTL_MS = 30 * 1000;
 
     function readCookie(name) {
       const needle = `${name}=`;
@@ -105,6 +107,41 @@
       const token = document.getElementById("token").value.trim();
       if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore local cache failures.
+      }
+    }
+    function cacheKeyForLimit(limitValue) {
+      return `${CRAWL_PROGRESS_CACHE_PREFIX}:${Math.max(1, Number(limitValue || 2000))}`;
+    }
+    function loadCachedCrawlProgress(limitValue) {
+      const row = readLocalJson(cacheKeyForLimit(limitValue));
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      if ((Date.now() - cachedAt) > CRAWL_PROGRESS_CACHE_TTL_MS) return null;
+      const payload = row.payload;
+      return payload && typeof payload === "object" ? payload : null;
+    }
+    function saveCachedCrawlProgress(limitValue, payload) {
+      writeLocalJson(cacheKeyForLimit(limitValue), {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
     }
     function formatEstTime(value) {
       const raw = String(value || "").trim();
@@ -182,19 +219,35 @@
         crawlGridCtrl.refresh();
       }
     }
-    async function refresh() {
+    async function refresh(options) {
       const msg = document.getElementById("msg");
-      msg.textContent = "Loading...";
+      const limitInput = document.getElementById("limit");
+      const limitValue = Math.max(1, Number(limitInput.value || 2000));
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadCachedCrawlProgress(limitValue);
+        if (cached) {
+          renderCards(cached);
+          renderRows(cached);
+          msg.textContent = `Loaded cached crawl snapshot. Refreshing...`;
+          showedCached = true;
+        }
+      }
+      if (!showedCached) msg.textContent = "Loading...";
       try {
-        const limitInput = document.getElementById("limit");
-        const limitValue = Math.max(1, Number(limitInput.value || 2000));
         const payload = await apiGet(`/api/coord/crawl-progress?limit=${encodeURIComponent(limitValue)}`);
         renderCards(payload);
         renderRows(payload);
+        saveCachedCrawlProgress(limitValue, payload);
         msg.textContent = `Loaded ${Number((payload.counts || {}).total_domains || 0)} domain(s).`;
       } catch (e) {
-        msg.textContent = "Load failed.";
-        document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load crawl progress: ${esc(e.message)}</td></tr>`;
+        if (!showedCached) {
+          msg.textContent = "Load failed.";
+          document.getElementById("rows").innerHTML = `<tr><td colspan='8'>Failed to load crawl progress: ${esc(e.message)}</td></tr>`;
+        } else {
+          msg.textContent = "Refresh failed. Showing cached crawl snapshot.";
+        }
       }
     }
 
@@ -203,8 +256,8 @@
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
     document.getElementById("filter").addEventListener("input", refresh);
     document.getElementById("limit").addEventListener("change", refresh);
-    refresh();
-    setInterval(refresh, 3000);
+    refresh({ useCacheFirst: true });
+    setInterval(() => refresh(), 3000);
   </script>
 </body>
 </html>

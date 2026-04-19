@@ -115,3 +115,6 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - Server can operate with or without log DB; query path falls back to live source reads when log DB is absent.
 - Deployment boundary for container introspection:
   - Central server container now needs Docker socket mount + docker CLI to introspect central containers from inside the app container.
+- Frontend resilience boundary:
+  - UI templates now implement cache-first hydration (`localStorage`) on page entry, with live API fetch as reconciliation layer.
+  - Backend API contract remains unchanged; caching is a client-side concern and should not alter route/store boundaries.

@@ -111,7 +111,11 @@
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
     const SOURCE_PREF_KEY = "nightmare_view_logs_source_v2";
+    const SOURCES_CACHE_KEY = "nightmare_view_logs_sources_cache_v1";
+    const EVENTS_CACHE_KEY = "nightmare_view_logs_events_cache_v1";
     const LOG_LINES = 300;
+    const SOURCES_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+    const EVENTS_CACHE_TTL_MS = 3 * 60 * 1000;
     const SOURCE_LOAD_TIMEOUT_MS = 30000;
     const EVENTS_LOAD_TIMEOUT_MS = 45000;
     const DIAG_LOAD_TIMEOUT_MS = 90000;
@@ -155,11 +159,105 @@
     function loadSelectedSource() {
       return localStorage.getItem(SOURCE_PREF_KEY) || "";
     }
+    function readLocalJson(key) {
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function writeLocalJson(key, value) {
+      try {
+        localStorage.setItem(String(key || ""), JSON.stringify(value ?? {}));
+      } catch (_e) {
+        // Ignore quota/serialization issues and continue with live fetches.
+      }
+    }
+    function readFreshCache(key, ttlMs) {
+      const row = readLocalJson(key);
+      if (!row) return null;
+      const cachedAt = Number(row.cached_at_epoch_ms || 0);
+      if (!Number.isFinite(cachedAt) || cachedAt <= 0) return null;
+      const ttl = Math.max(1000, Number(ttlMs || 0));
+      if ((Date.now() - cachedAt) > ttl) return null;
+      return row;
+    }
+    function saveSourcesCache(payload) {
+      writeLocalJson(SOURCES_CACHE_KEY, {
+        cached_at_epoch_ms: Date.now(),
+        payload: payload || {},
+      });
+    }
+    function loadSourcesCache() {
+      const row = readFreshCache(SOURCES_CACHE_KEY, SOURCES_CACHE_TTL_MS);
+      if (!row || !row.payload || typeof row.payload !== "object") return null;
+      const payload = row.payload;
+      return Array.isArray(payload.sources) ? payload : null;
+    }
+    function saveEventsCache(queryKey, payload) {
+      writeLocalJson(EVENTS_CACHE_KEY, {
+        cached_at_epoch_ms: Date.now(),
+        query_key: String(queryKey || ""),
+        payload: payload || {},
+      });
+    }
+    function loadEventsCache(queryKey) {
+      const row = readFreshCache(EVENTS_CACHE_KEY, EVENTS_CACHE_TTL_MS);
+      if (!row) return null;
+      if (String(row.query_key || "") !== String(queryKey || "")) return null;
+      if (!row.payload || typeof row.payload !== "object") return null;
+      const payload = row.payload;
+      return Array.isArray(payload.events) ? payload : null;
+    }
     function buildSourceLabel(source) {
       const type = String(source.source_type || "");
       if (type === "docker") return `[docker/${source.system || "local"}] ${source.label || source.container_name || "unknown"} (${source.status || "unknown"})`;
       if (type === "ec2_console") return `[ec2-console] ${source.label || source.instance_id || "unknown"} (${source.status || "unknown"})`;
       return `[file] ${source.relative_path || source.label || "unknown"}`;
+    }
+    function renderSources(payload) {
+      const select = document.getElementById("sourceSelect");
+      const sources = Array.isArray(payload && payload.sources) ? payload.sources : [];
+      const prior = loadSelectedSource();
+      const allOption = { source_id: "__all__", source_type: "virtual", label: "All Sources" };
+      const options = [allOption, ...sources];
+      select.innerHTML = options.map((source) => `<option value="${esc(source.source_id)}">${esc(source.source_id === "__all__" ? "[all] All Sources" : buildSourceLabel(source))}</option>`).join("");
+      if (prior && options.some((source) => String(source.source_id || "") === prior)) select.value = prior;
+      if (!select.value && options.length) select.value = String(options[0].source_id || "__all__");
+      if (select.value) saveSelectedSource(select.value);
+      return sources.length;
+    }
+    function buildEventsQuery(sourceId) {
+      const params = new URLSearchParams();
+      params.set("source_id", sourceId);
+      params.set("lines", String(LOG_LINES));
+      const searchText = String(document.getElementById("searchText").value || "").trim();
+      const severity = String(document.getElementById("severityFilter").value || "").trim();
+      const machine = String(document.getElementById("machineFilter").value || "").trim();
+      const sortKey = String(document.getElementById("sortKey").value || "event_time_utc").trim();
+      const sortDir = String(document.getElementById("sortDir").value || "desc").trim();
+      if (searchText) params.set("search", searchText);
+      if (severity) params.set("severity", severity);
+      if (machine) params.set("machine", machine);
+      params.set("sort_key", sortKey);
+      params.set("sort_dir", sortDir);
+      params.set("limit", "1000");
+      return {
+        params,
+        cacheKey: JSON.stringify({
+          source_id: sourceId,
+          lines: LOG_LINES,
+          search: searchText,
+          severity,
+          machine,
+          sort_key: sortKey,
+          sort_dir: sortDir,
+          limit: 1000,
+        }),
+      };
     }
     function setLoadState(state, text) {
       const pill = document.getElementById("loadState");
@@ -186,27 +284,39 @@
       if (!rsp.ok) throw new Error(await rsp.text());
       return rsp.json();
     }
-    async function refreshSources(forceRefresh) {
+    async function refreshSources(forceRefresh, options) {
       const msg = document.getElementById("msg");
-      setLoadState("loading", "Loading log sources...");
-      msg.textContent = "Loading sources...";
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadSourcesCache();
+        if (cached) {
+          const count = renderSources(cached);
+          setLoadState("loading", "Refreshing log sources...");
+          msg.textContent = `Loaded ${count} cached source(s). Refreshing...`;
+          showedCached = true;
+        }
+      }
+      if (!showedCached) {
+        setLoadState("loading", "Loading log sources...");
+        msg.textContent = "Loading sources...";
+      }
       try {
         const force = Boolean(forceRefresh);
         const payload = await apiGet(`/api/coord/log-sources?force_refresh=${force ? "1" : "0"}`, SOURCE_LOAD_TIMEOUT_MS);
-        const select = document.getElementById("sourceSelect");
-        const sources = Array.isArray(payload.sources) ? payload.sources : [];
-        const prior = loadSelectedSource();
-        const allOption = { source_id: "__all__", source_type: "virtual", label: "All Sources" };
-        const options = [allOption, ...sources];
-        select.innerHTML = options.map((source) => `<option value="${esc(source.source_id)}">${esc(source.source_id === "__all__" ? "[all] All Sources" : buildSourceLabel(source))}</option>`).join("");
-        if (prior && options.some((source) => String(source.source_id || "") === prior)) select.value = prior;
-        if (!select.value && options.length) select.value = String(options[0].source_id || "__all__");
-        if (select.value) saveSelectedSource(select.value);
-        msg.textContent = `Loaded ${sources.length} sources.`;
-        setLoadState("success", `Loaded ${sources.length} source(s)`);
+        const count = renderSources(payload);
+        saveSourcesCache(payload);
+        msg.textContent = `Loaded ${count} source(s).`;
+        setLoadState("success", `Loaded ${count} source(s)`);
       } catch (e) {
         const isTimeout = String(e && (e.name || "")).toLowerCase() === "aborterror";
-        msg.textContent = isTimeout ? "Source load timed out." : `Source load failed: ${e.message || e}`;
+        if (showedCached) {
+          msg.textContent = isTimeout
+            ? "Source refresh timed out. Showing cached sources."
+            : `Source refresh failed. Showing cached sources. (${e.message || e})`;
+        } else {
+          msg.textContent = isTimeout ? "Source load timed out." : `Source load failed: ${e.message || e}`;
+        }
         setLoadState(isTimeout ? "timeout" : "error", isTimeout ? "Source load timed out" : "Source load failed");
       }
     }
@@ -292,35 +402,44 @@
         </tr>`;
       }).join("");
     }
-    async function loadEvents() {
+    async function loadEvents(options) {
       const msg = document.getElementById("msg");
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
       const sourceId = String(document.getElementById("sourceSelect").value || "__all__").trim() || "__all__";
       saveSelectedSource(sourceId);
-      setLoadState("loading", "Loading log events...");
-      msg.textContent = "Loading log events...";
+      const query = buildEventsQuery(sourceId);
+      let showedCached = false;
+      if (useCacheFirst) {
+        const cached = loadEventsCache(query.cacheKey);
+        if (cached) {
+          renderEvents(cached);
+          setLoadState("loading", "Refreshing log events...");
+          msg.textContent = `Loaded ${rowsCount(cached.events)} cached log event(s). Refreshing...`;
+          showedCached = true;
+        }
+      }
+      if (!showedCached) {
+        setLoadState("loading", "Loading log events...");
+        msg.textContent = "Loading log events...";
+      }
       try {
-        const params = new URLSearchParams();
-        params.set("source_id", sourceId);
-        params.set("lines", String(LOG_LINES));
-        const searchText = String(document.getElementById("searchText").value || "").trim();
-        const severity = String(document.getElementById("severityFilter").value || "").trim();
-        const machine = String(document.getElementById("machineFilter").value || "").trim();
-        const sortKey = String(document.getElementById("sortKey").value || "event_time_utc").trim();
-        const sortDir = String(document.getElementById("sortDir").value || "desc").trim();
-        if (searchText) params.set("search", searchText);
-        if (severity) params.set("severity", severity);
-        if (machine) params.set("machine", machine);
-        params.set("sort_key", sortKey);
-        params.set("sort_dir", sortDir);
-        params.set("limit", "1000");
-        const payload = await apiGet(`/api/coord/log-events?${params.toString()}`, EVENTS_LOAD_TIMEOUT_MS);
+        const payload = await apiGet(`/api/coord/log-events?${query.params.toString()}`, EVENTS_LOAD_TIMEOUT_MS);
         renderEvents(payload);
+        saveEventsCache(query.cacheKey, payload);
         msg.textContent = `Loaded ${rowsCount(payload.events)} / ${payload.total || 0} log event(s).`;
         setLoadState("success", `Loaded ${rowsCount(payload.events)} event(s)`);
       } catch (e) {
-        document.getElementById("eventsRows").innerHTML = `<tr><td colspan="7">Failed to load events: ${esc(e.message || e)}</td></tr>`;
         const isTimeout = String(e && (e.name || "")).toLowerCase() === "aborterror";
-        msg.textContent = isTimeout ? "Event load timed out." : `Event load failed: ${e.message || e}`;
+        if (!showedCached) {
+          document.getElementById("eventsRows").innerHTML = `<tr><td colspan="7">Failed to load events: ${esc(e.message || e)}</td></tr>`;
+        }
+        if (showedCached) {
+          msg.textContent = isTimeout
+            ? "Event refresh timed out. Showing cached events."
+            : `Event refresh failed. Showing cached events. (${e.message || e})`;
+        } else {
+          msg.textContent = isTimeout ? "Event load timed out." : `Event load failed: ${e.message || e}`;
+        }
         setLoadState(isTimeout ? "timeout" : "error", isTimeout ? "Event load timed out" : "Event load failed");
       }
     }
@@ -358,15 +477,15 @@
     hydrateTokenFromCookie();
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
-    document.getElementById("sourceSelect").addEventListener("change", () => { saveSelectedSource(document.getElementById("sourceSelect").value); loadEvents(); });
-    document.getElementById("searchText").addEventListener("keydown", (e) => { if (e.key === "Enter") loadEvents(); });
-    document.getElementById("severityFilter").addEventListener("change", loadEvents);
-    document.getElementById("machineFilter").addEventListener("keydown", (e) => { if (e.key === "Enter") loadEvents(); });
-    document.getElementById("sortKey").addEventListener("change", loadEvents);
-    document.getElementById("sortDir").addEventListener("change", loadEvents);
+    document.getElementById("sourceSelect").addEventListener("change", () => { saveSelectedSource(document.getElementById("sourceSelect").value); loadEvents({ useCacheFirst: true }); });
+    document.getElementById("searchText").addEventListener("keydown", (e) => { if (e.key === "Enter") loadEvents({ useCacheFirst: true }); });
+    document.getElementById("severityFilter").addEventListener("change", () => loadEvents({ useCacheFirst: true }));
+    document.getElementById("machineFilter").addEventListener("keydown", (e) => { if (e.key === "Enter") loadEvents({ useCacheFirst: true }); });
+    document.getElementById("sortKey").addEventListener("change", () => loadEvents({ useCacheFirst: true }));
+    document.getElementById("sortDir").addEventListener("change", () => loadEvents({ useCacheFirst: true }));
     (async () => {
-      await refreshSources();
-      await loadEvents();
+      await refreshSources(false, { useCacheFirst: true });
+      await loadEvents({ useCacheFirst: true });
       await runDiagnostics(false);
     })();
   </script>

@@ -896,3 +896,36 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Added conditional pip flag detection and automatic `--break-system-packages` usage for dependency installs when supported.
   - Preserved existing `--user` install behavior and distro-managed pip safety approach.
 - Why: Ubuntu 24+ marked Python as externally managed and blocked previous pip install path.
+
+## 2026-04-19
+
+- Added cache-first initial page hydration across all coordinator web UI pages, while preserving live API refresh behavior.
+- Updated templates:
+  - `templates/server_dashboard.html.j2`
+  - `templates/worker_control.html.j2`
+  - `templates/database_status.html.j2`
+  - `templates/crawl_progress.html.j2`
+  - `templates/docker_status.html.j2`
+  - `templates/extractor_matches.html.j2`
+  - `templates/fuzzing.html.j2`
+  - `templates/view_logs.html.j2`
+- Behavior changes:
+  - Pages now attempt to render recent local cache (`localStorage`, TTL-bounded) before waiting on network calls.
+  - Successful live responses overwrite cache and refresh the UI as before.
+  - If live fetch fails after cached render, pages retain cached data and surface a refresh-failed message.
+  - Extractor and fuzzing table caches are query-scoped (filters/sort/paging/domain) to avoid mismatched stale renders.
+- Validation: `python -m pytest -q tests/test_reporting_and_store_helpers.py tests/test_refactor_modules.py tests/test_server_auth_cookie.py tests/test_server_disconnect_handling.py` -> 47 passed.
+- Why: improve first-paint responsiveness and keep operator pages useful during transient API latency or errors.
+
+## 2026-04-19
+
+- Updated `register_targets.py` to auto-load coordinator connection defaults from `deploy/.env`.
+  - `--server-base-url` now defaults to `COORDINATOR_BASE_URL` (from env / `deploy/.env`).
+  - `--api-token` now defaults to `COORDINATOR_API_TOKEN` (from env / `deploy/.env`).
+  - Script now raises a clear error when base URL is still missing after env/default resolution.
+  - Base URL is normalized via shared config helper for consistency with other CLIs.
+- Added tests in `tests/test_client_and_cli_unit.py`:
+  - env-default loading for `register_targets.parse_args([])`
+  - missing base URL validation path in `register_targets.main()`
+- Validation: `python -m pytest -q tests/test_client_and_cli_unit.py` -> 14 passed.
+- Why: remove repetitive manual argument passing during deploy workflows and align target-registration behavior with existing deploy env conventions.
