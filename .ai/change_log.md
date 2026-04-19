@@ -794,6 +794,16 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Why: sudo-run deploys created root-only files that broke non-root rollout/status commands and normal operator workflows.
 ## 2026-04-18
 
+- Reduced log-viewer noise when coordinator runtime lacks docker CLI binaries.
+- `server.py` updates:
+  - `_compose_command_prefixes()` no longer injects fake fallback commands when binaries are missing.
+  - view-log local docker source discovery now skips local docker sources if neither `docker` nor `docker-compose` is available.
+  - compose status/log helpers now return explicit `"docker compose commands are not available in this runtime"` when unavailable.
+  - mandatory local docker source injection (`nightmare-coordinator-server`, `nightmare-postgres`, `nightmare-log-postgres`) is now gated on actual local docker/compose command availability.
+- Why: prevent repeated `[Errno 2] No such file or directory: 'docker'` synthetic error events in View Logs when running inside minimal app containers.
+
+## 2026-04-18
+
 - Removed noisy unauthorized UI-preference calls on pages without tokens.
 - `templates/_grid_controls.html.j2` now calls `/api/coord/ui-preferences` only when an Authorization token is available; otherwise it uses localStorage-only preference load/save.
 - Why: dashboard and other tokenless pages were emitting browser-console `401 Unauthorized` for preference fetches.

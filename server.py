@@ -304,9 +304,6 @@ def _compose_command_prefixes() -> list[list[str]]:
         prefixes.append(["docker", "compose"])
     if has_docker_compose:
         prefixes.append(["docker-compose"])
-    if not prefixes:
-        # Keep deterministic fallback order for better error reporting.
-        prefixes = [["docker", "compose"], ["docker-compose"]]
     return prefixes
 
 
@@ -452,6 +449,15 @@ def _run_compose_ps(compose_file: Path, env_file: Optional[Path]) -> dict[str, A
         if env_file is not None:
             variants.append([*prefix, "-f", compose_file_arg, "--env-file", str(env_file), "ps", "--format", "json"])
         variants.append([*prefix, "-f", compose_file_arg, "ps", "--format", "json"])
+    if not variants:
+        return {
+            "ok": False,
+            "command": [],
+            "compose_file": str(compose_file),
+            "env_file": str(env_file) if env_file is not None else None,
+            "rows": [],
+            "error": "docker compose commands are not available in this runtime",
+        }
     errors: list[str] = []
     for cmd in variants:
         ok, stdout, stderr, exit_code = _run_command(cmd, cwd=compose_file.parent)
@@ -1137,6 +1143,8 @@ def _discover_view_log_file_sources(app_root: Path, output_root: Path) -> list[d
 
 
 def _discover_view_log_docker_sources() -> list[dict[str, Any]]:
+    if shutil.which("docker") is None and not _compose_command_prefixes():
+        return []
     docker = _load_docker_containers()
     rows = docker.get("containers", []) if isinstance(docker.get("containers"), list) else []
     out: list[dict[str, Any]] = []
@@ -1228,28 +1236,29 @@ def _collect_view_log_sources(app_root: Path, output_root: Path) -> list[dict[st
         + _discover_view_log_ec2_console_sources()
         + _discover_view_log_file_sources(app_root, output_root)
     )
-    must_have = [
-        ("nightmare-coordinator-server", True),
-        ("nightmare-postgres", True),
-        ("nightmare-log-postgres", False),
-    ]
-    existing_ids = {str(item.get("source_id", "") or "").strip() for item in sources if isinstance(item, dict)}
-    for container_name, app_flag in must_have:
-        sid = f"docker:{container_name}"
-        if sid in existing_ids:
-            continue
-        sources.append(
-            {
-                "source_id": sid,
-                "source_type": "docker",
-                "system": "docker",
-                "label": container_name,
-                "container_name": container_name,
-                "status": "unknown",
-                "image": "",
-                "is_application": app_flag,
-            }
-        )
+    if shutil.which("docker") is not None or _compose_command_prefixes():
+        must_have = [
+            ("nightmare-coordinator-server", True),
+            ("nightmare-postgres", True),
+            ("nightmare-log-postgres", False),
+        ]
+        existing_ids = {str(item.get("source_id", "") or "").strip() for item in sources if isinstance(item, dict)}
+        for container_name, app_flag in must_have:
+            sid = f"docker:{container_name}"
+            if sid in existing_ids:
+                continue
+            sources.append(
+                {
+                    "source_id": sid,
+                    "source_type": "docker",
+                    "system": "docker",
+                    "label": container_name,
+                    "container_name": container_name,
+                    "status": "unknown",
+                    "image": "",
+                    "is_application": app_flag,
+                }
+            )
     sources.sort(key=lambda item: (str(item.get("source_type", "")), str(item.get("label", "")).lower()))
     return sources
 
@@ -1437,6 +1446,9 @@ def _run_compose_logs_for_service(
                 cmd_with_env.extend(["--tail", str(max(1, int(lines or DEFAULT_VIEW_LOG_LINES)))])
             cmd_with_env.append(service)
             variants.insert(0, cmd_with_env)
+
+    if not variants:
+        return False, "", "docker compose commands are not available in this runtime"
 
     errors: list[str] = []
     timeout_seconds = 60 if full else 30
