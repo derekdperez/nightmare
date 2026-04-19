@@ -271,3 +271,7 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - View Logs UI convention: long `description`/`raw_line`/diagnostic cells should use fixed-size scrollable controls, and copy interactions should expose full underlying text.
 - Nightmare startup resilience convention: non-critical auxiliary config parse failures (page existence criteria) should degrade to defaults with explicit warnings rather than crash worker runs.
 - Worker subprocess convention: `run_subprocess` should persist startup failures into coordinator per-domain log files, and python command invocation should tolerate missing `python` aliases by retrying with `sys.executable`.
+- Provisioning convention: `deploy/provision-workers-aws.sh` should default missing required infra/coordinator parameters from `deploy/.env` (and worker env fallback) before treating them as required CLI errors.
+- Target registration convention: fleet re-registration from `register_targets.py` is authoritative full-replace, not additive upsert; API payload includes `replace_existing=true` and store truncates `coordinator_targets` before insert.
+- Column-configuration convention: all page column modals must use shared `templates/_grid_controls.html.j2` (`NightmareGridControls`) rather than page-local implementations.
+- Grid-controls convention update: column reorder controls are enabled for every mode (`full` and `columnsOnly`) unless explicitly disabled via `allowReorder: false`.

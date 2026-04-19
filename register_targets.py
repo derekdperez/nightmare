@@ -70,7 +70,7 @@ def main() -> int:
         base_url,
         args.api_token,
         "/api/coord/register-targets",
-        {"targets": targets},
+        {"targets": targets, "replace_existing": True},
     )
     print(json.dumps(rsp, indent=2, ensure_ascii=False))
     return 0

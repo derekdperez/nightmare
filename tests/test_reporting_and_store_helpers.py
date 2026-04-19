@@ -55,7 +55,8 @@ def test_render_fuzzing_html_contains_expected_heading():
     assert "/api/coord/fuzzing/domains" in html
     assert "/api/coord/fuzzing?" in html
     assert "/api/coord/ui-preferences" in html
-    assert "columnToggleBtn" in html
+    assert "NightmareGridControls" in html
+    assert "fuzzing_findings_table_v1" in html
 
 
 def test_render_docker_status_html_contains_expected_heading():

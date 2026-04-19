@@ -112,7 +112,7 @@
     const defaultWidths = (options.defaultWidths && typeof options.defaultWidths === "object") ? options.defaultWidths : {};
     const maxWidths = (options.maxWidths && typeof options.maxWidths === "object") ? options.maxWidths : {};
     const allowReorder = options.allowReorder !== false;
-    const reorderEnabled = mode === "columnsOnly" && allowReorder;
+    const reorderEnabled = allowReorder;
     const headerRow = table.tHead.rows[0];
     if (!headerRow) return null;
     const headers = Array.from(headerRow.cells).map((th, index) => {

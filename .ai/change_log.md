@@ -979,3 +979,24 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `python nightmare.py --status --config config/nightmare.json`
   - `python -m pytest -q tests/test_runtime_unit.py tests/test_client_and_cli_unit.py tests/test_reporting_and_store_helpers.py tests/test_refactor_modules.py` -> 62 passed.
 - Why: workers were claiming targets then failing before artifacts were produced; malformed criteria config was causing fatal startup exceptions.
+- Updated worker provisioning defaults in `deploy/provision-workers-aws.sh`:
+  - Script now auto-loads required provisioning params from `deploy/.env`/`deploy/worker.env.generated` when CLI flags are omitted.
+  - Added env-backed resolution for `AWS_AMI_ID`, `AWS_SUBNET_ID`, `AWS_SECURITY_GROUP_IDS`, `REPO_URL`, plus related defaults (`AWS_INSTANCE_TYPE`, `AWS_KEY_NAME`, `AWS_IAM_INSTANCE_PROFILE`, `AWS_REGION`, `REPO_BRANCH`, `AUTO_PROVISION_WORKERS`).
+  - CLI flags remain highest priority.
+- Updated target registration to full-replace semantics:
+  - `register_targets.py` now always posts `replace_existing=true`.
+  - `/api/coord/register-targets` accepts `replace_existing` and passes through to store.
+  - `CoordinatorStore.register_targets(..., replace_existing=True)` truncates `coordinator_targets` before insert.
+- Added test coverage for register-target replacement payload in `tests/test_client_and_cli_unit.py`.
+- Validation: `python -m py_compile register_targets.py server.py server_app/store.py`; `python -m pytest -q tests/test_client_and_cli_unit.py tests/test_server_auth_cookie.py tests/test_reporting_and_store_helpers.py tests/test_refactor_modules.py` -> 60 passed.
+- Unified column configuration UI across web pages by removing custom fuzzing column modal code and reusing shared `templates/_grid_controls.html.j2`.
+- Updated shared grid control behavior so column reordering is available in all modes (not only `columnsOnly`).
+- `templates/fuzzing.html.j2` now uses `NightmareGridControls.enhance(...)` with shared hide/show + reorder controls and shared preference persistence.
+- Updated template assertions in:
+  - `tests/test_refactor_modules.py`
+  - `tests/test_reporting_and_store_helpers.py`
+  to validate shared grid-controls markers instead of legacy `columnToggleBtn`.
+- Validation:
+  - `python -m pytest -q tests/test_refactor_modules.py tests/test_reporting_and_store_helpers.py` -> 39 passed.
+  - `python -m pytest -q tests/test_server_auth_cookie.py tests/test_client_and_cli_unit.py` -> 21 passed.
+- Why: ensure one column-config code path and consistent hide/show/reorder behavior across all pages.

@@ -401,7 +401,7 @@ SET last_seen_at_utc = NOW(),
 """
         cur.execute(sql, (wid, act[:64]))
 
-    def register_targets(self, targets: list[str]) -> dict[str, Any]:
+    def register_targets(self, targets: list[str], *, replace_existing: bool = False) -> dict[str, Any]:
         inserted = 0
         skipped = 0
         rows: list[tuple[str, int, str, str, str]] = []
@@ -416,8 +416,8 @@ SET last_seen_at_utc = NOW(),
                 skipped += 1
                 continue
             rows.append((_make_target_entry_id(line_no, text), line_no, text, start_url, root_domain))
-        if not rows:
-            return {"inserted": 0, "skipped": skipped}
+        if not rows and not bool(replace_existing):
+            return {"inserted": 0, "skipped": skipped, "replaced_existing": False}
         upsert_sql = """
 INSERT INTO coordinator_targets(entry_id, line_number, raw, start_url, root_domain, status, updated_at_utc)
 VALUES (%s, %s, %s, %s, %s, 'pending', NOW())
@@ -430,10 +430,13 @@ SET line_number = EXCLUDED.line_number,
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.executemany(upsert_sql, rows)
+                if bool(replace_existing):
+                    cur.execute("TRUNCATE TABLE coordinator_targets;")
+                if rows:
+                    cur.executemany(upsert_sql, rows)
             conn.commit()
         inserted = len(rows)
-        return {"inserted": inserted, "skipped": skipped}
+        return {"inserted": inserted, "skipped": skipped, "replaced_existing": bool(replace_existing)}
 
     def claim_target(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
         worker = str(worker_id or "").strip()

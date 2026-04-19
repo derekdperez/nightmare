@@ -182,6 +182,36 @@ def test_register_targets_main_requires_server_base_url(monkeypatch: pytest.Monk
         register_targets.main()
 
 
+def test_register_targets_main_replaces_existing_targets(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        register_targets,
+        "parse_args",
+        lambda *_: argparse.Namespace(
+            server_base_url="https://coord.example.com",
+            api_token="secret",
+            targets_file="targets.txt",
+        ),
+    )
+    monkeypatch.setattr(register_targets, "_read_targets", lambda _p: ["https://a.example.com"])
+    captured: dict[str, object] = {}
+
+    def fake_post_json(base_url, token, path, payload):
+        captured["base_url"] = base_url
+        captured["token"] = token
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"ok": True, "inserted": 1, "skipped": 0, "replaced_existing": True}
+
+    monkeypatch.setattr(register_targets, "_post_json", fake_post_json)
+    rc = register_targets.main()
+    assert rc == 0
+    assert captured["path"] == "/api/coord/register-targets"
+    assert captured["payload"] == {
+        "targets": ["https://a.example.com"],
+        "replace_existing": True,
+    }
+
+
 def test_http_queue_cli_main_stats(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     class FakeQueue:
         def __init__(self, *args, **kwargs):

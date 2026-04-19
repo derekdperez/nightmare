@@ -36,12 +36,6 @@
     .mini-btn { padding: 4px 8px; font-size: 12px; }
     .diff-pos { color: #15803d; font-weight: 700; }
     .diff-neg { color: #b91c1c; font-weight: 700; }
-    .col-resize-handle { position: absolute; right: -1px; top: 0; width: 8px; height: 100%; cursor: col-resize; user-select: none; touch-action: none; background: transparent; }
-    .col-resize-handle:hover { background: rgba(14, 165, 233, 0.15); }
-    .colmenu-wrap { position: relative; display: inline-block; }
-    .colmenu { position: absolute; right: 0; top: calc(100% + 4px); width: 300px; max-height: 340px; overflow: auto; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); padding: 8px; z-index: 20; display: none; }
-    .colmenu.open { display: block; }
-    .colmenu-row { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.55); display: none; align-items: center; justify-content: center; z-index: 50; }
     .modal-backdrop.open { display: flex; }
     .modal-window { width: 94vw; height: 90vh; max-width: 1700px; background: #fff; border: 1px solid #94a3b8; border-radius: 10px; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.28); display: flex; flex-direction: column; overflow: hidden; }
@@ -71,10 +65,6 @@
     <input id="searchText" type="text" placeholder="Global search">
     <input id="limit" type="number" min="1" max="2000" value="250" title="Rows per page">
     <button class="primary" onclick="refreshDomainsAndRows()">Refresh</button>
-    <div class="colmenu-wrap">
-      <button id="columnToggleBtn" type="button">Columns</button>
-      <div id="columnMenu" class="colmenu"></div>
-    </div>
     <a id="downloadZip" href="#" target="_blank" rel="noopener noreferrer"><button type="button">Download Results Zip</button></a>
     <span id="msg" class="muted"></span>
   </div>
@@ -82,10 +72,6 @@
   <div class="panel">
     <div class="table-wrap">
       <table id="findingsTable">
-        <colgroup>
-          <col id="col_url"><col id="col_mutated_parameter"><col id="col_mutated_value"><col id="col_new_status">
-          <col id="col_response_actions"><col id="col_size_difference"><col id="col_duration_difference_ms"><col id="col_notes_placeholder">
-        </colgroup>
         <thead>
           <tr>
             <th data-key="url" data-col-key="url" class="col-url">URL <span class="sort-ind" id="sort_url"></span></th>
@@ -128,24 +114,21 @@
       </div>
     </div>
   </div>
+  {% include '_grid_controls.html.j2' %}
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
-    const PREFS_PAGE = "fuzzing";
-    const PREFS_KEY = "table_columns_v2";
     const DEFAULT_LIMIT = 250;
     const FUZZING_DOMAINS_CACHE_KEY = "nightmare_fuzzing_domains_cache_v1";
     const FUZZING_ROWS_CACHE_PREFIX = "nightmare_fuzzing_rows_cache_v1";
     const FUZZING_DOMAINS_CACHE_TTL_MS = 10 * 60 * 1000;
     const FUZZING_ROWS_CACHE_TTL_MS = 2 * 60 * 1000;
     const DEFAULT_COLUMN_WIDTHS = { url: 420, mutated_parameter: 140, mutated_value: 320, new_status: 90, response_actions: 260, size_difference: 140, duration_difference_ms: 140, notes_placeholder: 200 };
-    const ALL_COLUMN_KEYS = ["url", "mutated_parameter", "mutated_value", "new_status", "response_actions", "size_difference", "duration_difference_ms", "notes_placeholder"];
-    let columnPrefs = { hidden_columns: [], column_widths: { ...DEFAULT_COLUMN_WIDTHS } };
-    let prefsSaveHandle = null;
     let debounceHandle = null;
     let currentRows = [];
     let currentOffset = 0;
     let sortKey = "size_difference";
     let sortDir = "desc";
+    let fuzzingGridCtrl = null;
     const resultPayloadCache = new Map();
 
     function readCookie(name) { const needle = `${name}=`; const cookies = String(document.cookie || "").split(";"); for (const part of cookies) { const item = part.trim(); if (item.startsWith(needle)) return decodeURIComponent(item.slice(needle.length)); } return ""; }
@@ -216,93 +199,6 @@
     }
     function formatSignedInt(value) { const n = Number(value || 0); if (!Number.isFinite(n) || n === 0) return { text: "0", cls: "" }; return { text: (n > 0 ? `+${Math.round(n)}` : String(Math.round(n))), cls: n > 0 ? "diff-pos" : "diff-neg" }; }
 
-    function applyColumnPrefs() {
-      const hidden = new Set(columnPrefs.hidden_columns || []);
-      ALL_COLUMN_KEYS.forEach((key) => {
-        const width = Number((columnPrefs.column_widths || {})[key] || DEFAULT_COLUMN_WIDTHS[key] || 140);
-        const col = document.getElementById(`col_${key}`);
-        if (col) { col.style.width = `${width}px`; col.style.minWidth = `${width}px`; }
-        const hide = hidden.has(key);
-        document.querySelectorAll(`[data-col-key="${key}"]`).forEach((el) => { el.style.display = hide ? "none" : ""; });
-      });
-    }
-    function buildColumnMenu() {
-      const menu = document.getElementById("columnMenu");
-      menu.innerHTML = ALL_COLUMN_KEYS.map((key) => { const checked = !(columnPrefs.hidden_columns || []).includes(key); return `<label class="colmenu-row"><input type="checkbox" data-colmenu-key="${esc(key)}" ${checked ? "checked" : ""}>${esc(key)}</label>`; }).join("");
-      menu.querySelectorAll("input[data-colmenu-key]").forEach((input) => {
-        input.addEventListener("change", () => {
-          const key = String(input.getAttribute("data-colmenu-key") || "");
-          const hidden = new Set(columnPrefs.hidden_columns || []);
-          if (input.checked) hidden.delete(key); else hidden.add(key);
-          columnPrefs.hidden_columns = ALL_COLUMN_KEYS.filter((k) => hidden.has(k));
-          applyColumnPrefs();
-          scheduleSaveColumnPrefs();
-        });
-      });
-    }
-    function autoFitColumnWidth(key) {
-      const th = document.querySelector(`th[data-col-key="${key}"]`);
-      if (!th) return;
-      const col = document.getElementById(`col_${key}`);
-      const headerWidth = Math.ceil(th.getBoundingClientRect().width);
-      const rows = Array.from(document.querySelectorAll("#rows tr")).slice(0, 250);
-      const sampleCells = rows.map((row) => row.querySelector(`td[data-col-key="${key}"]`)).filter(Boolean);
-      let maxWidth = headerWidth;
-      sampleCells.forEach((cell) => {
-        const value = String(cell.textContent || "").replace(/\s+/g, " ").trim().slice(0, 320);
-        const canvas = autoFitColumnWidth._canvas || (autoFitColumnWidth._canvas = document.createElement("canvas"));
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        const style = getComputedStyle(cell);
-        ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-        const measured = Math.ceil(ctx.measureText(value).width) + 28;
-        if (measured > maxWidth) maxWidth = measured;
-      });
-      const next = Math.max(80, Math.min(1600, maxWidth));
-      columnPrefs.column_widths[key] = next;
-      applyColumnPrefs();
-      scheduleSaveColumnPrefs();
-    }
-    function installColumnResizers() {
-      document.querySelectorAll("th[data-col-key]").forEach((th) => {
-        if (th.querySelector(".col-resize-handle")) return;
-        const key = String(th.getAttribute("data-col-key") || "");
-        if (!key) return;
-        const handle = document.createElement("span");
-        handle.className = "col-resize-handle";
-        th.appendChild(handle);
-        handle.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); });
-        handle.addEventListener("dblclick", (ev) => { ev.preventDefault(); ev.stopPropagation(); autoFitColumnWidth(key); });
-        handle.addEventListener("mousedown", (ev) => {
-          ev.preventDefault(); ev.stopPropagation();
-          const startX = Number(ev.clientX || 0);
-          const col = document.getElementById(`col_${key}`);
-          const startW = Number((columnPrefs.column_widths || {})[key] || (col ? col.getBoundingClientRect().width : DEFAULT_COLUMN_WIDTHS[key] || 140));
-          const onMove = (mv) => { const next = Math.max(80, Math.min(1600, Math.round(startW + (Number(mv.clientX || 0) - startX)))); columnPrefs.column_widths[key] = next; applyColumnPrefs(); };
-          const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); scheduleSaveColumnPrefs(); };
-          window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", onUp);
-        });
-      });
-    }
-    async function loadColumnPrefs() {
-      try {
-        const payload = await apiGet(`/api/coord/ui-preferences?page=${encodeURIComponent(PREFS_PAGE)}&key=${encodeURIComponent(PREFS_KEY)}`);
-        const value = (payload && typeof payload.pref_value === "object" && payload.pref_value) ? payload.pref_value : {};
-        const hidden = Array.isArray(value.hidden_columns) ? value.hidden_columns.map((v) => String(v || "").trim()).filter(Boolean) : [];
-        const widthsRaw = (value && typeof value.column_widths === "object" && value.column_widths) ? value.column_widths : {};
-        const widths = { ...DEFAULT_COLUMN_WIDTHS };
-        Object.entries(widthsRaw).forEach(([key, raw]) => {
-          const w = Number(raw || 0);
-          if (ALL_COLUMN_KEYS.includes(key) && Number.isFinite(w) && w >= 80 && w <= 1600) widths[key] = Math.round(w);
-        });
-        columnPrefs = { hidden_columns: hidden.filter((k) => ALL_COLUMN_KEYS.includes(k)), column_widths: widths };
-      } catch (_) { columnPrefs = { hidden_columns: [], column_widths: { ...DEFAULT_COLUMN_WIDTHS } }; }
-    }
-    async function saveColumnPrefs() {
-      const body = { page: PREFS_PAGE, key: PREFS_KEY, value: { hidden_columns: columnPrefs.hidden_columns.slice(), column_widths: { ...columnPrefs.column_widths } } };
-      try { await fetch("/api/coord/ui-preferences", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify(body) }); } catch (_) {}
-    }
-    function scheduleSaveColumnPrefs() { if (prefsSaveHandle) clearTimeout(prefsSaveHandle); prefsSaveHandle = setTimeout(() => { prefsSaveHandle = null; saveColumnPrefs(); }, 250); }
     function scheduleLoad(resetOffset = true) { if (debounceHandle) clearTimeout(debounceHandle); debounceHandle = setTimeout(() => { debounceHandle = null; if (resetOffset) currentOffset = 0; loadRows(); }, 220); }
 
     function renderRows(rows) {
@@ -321,7 +217,21 @@
           <td data-col-key="notes_placeholder" class="col-notes"></td>
         </tr>`;
       }).join("");
-      applyColumnPrefs();
+      if (!fuzzingGridCtrl) {
+        fuzzingGridCtrl = window.NightmareGridControls.enhance({
+          table: "findingsTable",
+          page: "fuzzing",
+          prefKey: "fuzzing_findings_table_v1",
+          tokenInputId: "token",
+          mode: "columnsOnly",
+          allowReorder: true,
+          minColumnWidth: 80,
+          maxColumnWidth: 1600,
+          defaultWidths: DEFAULT_COLUMN_WIDTHS,
+        });
+      } else {
+        fuzzingGridCtrl.refresh();
+      }
     }
     function applyDomainsPayload(payload) {
       const domains = Array.isArray(payload.domains) ? payload.domains : [];
@@ -573,12 +483,8 @@
     document.getElementById("diffModalCloseBtn").addEventListener("click", closeDiffModal);
     document.getElementById("responseModal").addEventListener("click", (ev) => { if (ev.target === document.getElementById("responseModal")) closeResponseModal(); });
     document.getElementById("diffModal").addEventListener("click", (ev) => { if (ev.target === document.getElementById("diffModal")) closeDiffModal(); });
-    document.getElementById("columnToggleBtn").addEventListener("click", (ev) => { ev.preventDefault(); const menu = document.getElementById("columnMenu"); menu.classList.toggle("open"); });
-    document.addEventListener("click", (ev) => { const wrap = document.querySelector(".colmenu-wrap"); const menu = document.getElementById("columnMenu"); if (!wrap || !menu) return; if (!wrap.contains(ev.target)) menu.classList.remove("open"); });
-
-    installColumnResizers();
     setSortIndicators();
-    loadColumnPrefs().then(() => { buildColumnMenu(); applyColumnPrefs(); }).finally(() => refreshDomainsAndRows({ useCacheFirst: true }));
+    refreshDomainsAndRows({ useCacheFirst: true });
   </script>
 </body>
 </html>

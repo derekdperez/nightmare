@@ -112,7 +112,8 @@ def test_fuzzing_template_renders():
     assert "/api/coord/fuzzing/domains" in html
     assert "/api/coord/fuzzing?" in html
     assert "/api/coord/ui-preferences" in html
-    assert "columnToggleBtn" in html
+    assert "NightmareGridControls" in html
+    assert "fuzzing_findings_table_v1" in html
     assert "nightmare_coord_token" in html
 
 

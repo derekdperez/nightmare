@@ -128,3 +128,10 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Crawl startup fault-tolerance refinement:
   - `nightmare.py` now treats page-existence criteria parse errors as recoverable configuration faults and continues with sanitized defaults.
   - Coordinator subprocess wrapper now records pre-exec failures in log artifacts and performs interpreter fallback for command-name portability.
+- Coordinator target ingestion boundary update:
+  - `register_targets.py` now requests replace semantics.
+  - HTTP layer (`/api/coord/register-targets`) parses `replace_existing` and delegates behavior to store.
+  - Store layer owns table replacement (`TRUNCATE coordinator_targets` + insert/upsert path).
+- UI controls boundary consolidation:
+  - Fuzzing table now delegates column hide/show/reorder and width persistence to shared grid-controls module.
+  - Shared grid-controls now exposes consistent reorder behavior regardless of table mode, reducing page-specific divergence and maintenance.

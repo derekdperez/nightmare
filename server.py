@@ -3839,7 +3839,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 targets = [str(item) for item in targets_payload if str(item or "").strip()]
             elif isinstance(targets_payload, str):
                 targets = [line for line in str(targets_payload).splitlines() if line.strip()]
-            result = self.coordinator_store.register_targets(targets)
+            replace_raw = body.get("replace_existing", False)
+            replace_existing = False
+            if isinstance(replace_raw, bool):
+                replace_existing = replace_raw
+            elif isinstance(replace_raw, (int, float)):
+                replace_existing = bool(replace_raw)
+            elif isinstance(replace_raw, str):
+                replace_existing = replace_raw.strip().lower() in {"1", "true", "yes", "on"}
+            result = self.coordinator_store.register_targets(targets, replace_existing=replace_existing)
             self._write_json({"ok": True, **result})
             return
 

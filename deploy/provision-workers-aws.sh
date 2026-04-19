@@ -20,6 +20,10 @@ API_TOKEN=""
 COORDINATOR_INSECURE_TLS=""
 INSTANCE_NAME_PREFIX="nightmare-worker"
 WAIT_FOR_RUNNING=1
+region_args=()
+
+CENTRAL_ENV_FILE="${DEPLOY_DIR}/.env"
+WORKER_ENV_FILE="${DEPLOY_DIR}/worker.env.generated"
 
 usage() {
   cat <<'USAGE'
@@ -40,6 +44,10 @@ This script launches worker EC2 instances and bootstraps each VM with cloud-init
   - clone the repo,
   - write deploy/.env with coordinator URL/token,
   - run docker compose worker stack.
+
+Most required values can be provided either as CLI flags or in deploy/.env
+(for example AWS_AMI_ID, AWS_SUBNET_ID, AWS_SECURITY_GROUP_IDS, REPO_URL,
+COORDINATOR_BASE_URL, COORDINATOR_API_TOKEN, AUTO_PROVISION_WORKERS).
 USAGE
 }
 
@@ -168,12 +176,62 @@ while [[ $# -gt 0 ]]; do
 done
 
 if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
-  echo "--count must be an integer >= 1" >&2
-  exit 2
+  env_count="$(load_key_from_env_files "AUTO_PROVISION_WORKERS" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+  if [[ -z "$env_count" ]]; then
+    env_count="$(load_key_from_env_files "WORKER_COUNT" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+  fi
+  if [[ -n "$env_count" ]]; then
+    COUNT="$env_count"
+  fi
 fi
-
-CENTRAL_ENV_FILE="${DEPLOY_DIR}/.env"
-WORKER_ENV_FILE="${DEPLOY_DIR}/worker.env.generated"
+if [[ -z "$AMI_ID" ]]; then
+  AMI_ID="$(load_key_from_env_files "AWS_AMI_ID" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$AMI_ID" ]]; then
+  AMI_ID="$(load_key_from_env_files "AMI_ID" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$INSTANCE_TYPE" || "$INSTANCE_TYPE" == "m7i-flex.large" ]]; then
+  env_instance_type="$(load_key_from_env_files "AWS_INSTANCE_TYPE" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+  if [[ -z "$env_instance_type" ]]; then
+    env_instance_type="$(load_key_from_env_files "INSTANCE_TYPE" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+  fi
+  if [[ -n "$env_instance_type" ]]; then
+    INSTANCE_TYPE="$env_instance_type"
+  fi
+fi
+if [[ -z "$SUBNET_ID" ]]; then
+  SUBNET_ID="$(load_key_from_env_files "AWS_SUBNET_ID" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$SUBNET_ID" ]]; then
+  SUBNET_ID="$(load_key_from_env_files "SUBNET_ID" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$SECURITY_GROUP_IDS" ]]; then
+  SECURITY_GROUP_IDS="$(load_key_from_env_files "AWS_SECURITY_GROUP_IDS" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$SECURITY_GROUP_IDS" ]]; then
+  SECURITY_GROUP_IDS="$(load_key_from_env_files "SECURITY_GROUP_IDS" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$KEY_NAME" ]]; then
+  KEY_NAME="$(load_key_from_env_files "AWS_KEY_NAME" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$KEY_NAME" ]]; then
+  KEY_NAME="$(load_key_from_env_files "KEY_NAME" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$IAM_INSTANCE_PROFILE" ]]; then
+  IAM_INSTANCE_PROFILE="$(load_key_from_env_files "AWS_IAM_INSTANCE_PROFILE" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$IAM_INSTANCE_PROFILE" ]]; then
+  IAM_INSTANCE_PROFILE="$(load_key_from_env_files "IAM_INSTANCE_PROFILE" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$REPO_URL" ]]; then
+  REPO_URL="$(load_key_from_env_files "REPO_URL" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+fi
+if [[ -z "$REPO_BRANCH" || "$REPO_BRANCH" == "main" ]]; then
+  env_repo_branch="$(load_key_from_env_files "REPO_BRANCH" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
+  if [[ -n "$env_repo_branch" ]]; then
+    REPO_BRANCH="$env_repo_branch"
+  fi
+fi
 if [[ -z "$COORDINATOR_BASE_URL" ]]; then
   COORDINATOR_BASE_URL="$(load_key_from_env_files "COORDINATOR_BASE_URL" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
 fi
@@ -201,6 +259,10 @@ esac
 if [[ -z "$REGION" ]]; then
   REGION="$(load_key_from_env_files "AWS_REGION" "$CENTRAL_ENV_FILE" "$WORKER_ENV_FILE")"
 fi
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
+  echo "--count must be an integer >= 1 (or set AUTO_PROVISION_WORKERS/WORKER_COUNT in ${CENTRAL_ENV_FILE})" >&2
+  exit 2
+fi
 if [[ -n "$COORDINATOR_BASE_URL" && -n "$API_TOKEN" ]]; then
   echo "Using coordinator settings from local env files."
 fi
@@ -208,22 +270,18 @@ fi
 for required in AMI_ID SUBNET_ID SECURITY_GROUP_IDS REPO_URL COORDINATOR_BASE_URL API_TOKEN; do
   if [[ -z "${!required}" ]]; then
     echo "Missing required option for provisioning: --$(echo "$required" | tr 'A-Z_' 'a-z-')" >&2
-    if [[ "$required" == "COORDINATOR_BASE_URL" || "$required" == "API_TOKEN" ]]; then
-      echo "Tip: expected one of these files with keys:" >&2
-      echo "  - ${CENTRAL_ENV_FILE}" >&2
-      echo "  - ${WORKER_ENV_FILE}" >&2
-    fi
+    echo "Tip: this value can be provided by CLI or by these files:" >&2
+    echo "  - ${CENTRAL_ENV_FILE}" >&2
+    echo "  - ${WORKER_ENV_FILE}" >&2
     exit 2
   fi
 done
 
 require_cmd aws
-ensure_aws_credentials
-
-region_args=()
 if [[ -n "$REGION" ]]; then
   region_args=(--region "$REGION")
 fi
+ensure_aws_credentials
 
 mkdir -p "$DEPLOY_DIR"
 USER_DATA_FILE="$(mktemp "${DEPLOY_DIR}/worker-user-data.XXXXXX.yaml")"
