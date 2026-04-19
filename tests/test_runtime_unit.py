@@ -135,6 +135,35 @@ def test_coordinator_client_worker_command_claim_and_complete(monkeypatch):
     assert calls[1][1] == "/api/coord/worker-command/complete"
 
 
+def test_coordinator_client_request_json_passes_logging_options(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_request_json(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setenv("COORDINATOR_HTTP_LOG_DETAILS", "true")
+    monkeypatch.setenv("COORDINATOR_HTTP_LOG_PAYLOADS", "true")
+    monkeypatch.setenv("COORDINATOR_HTTP_LOG_MAX_CHARS", "1234")
+    monkeypatch.setenv("COORDINATOR_HTTP_REDACT_AUTH_HEADER", "false")
+    monkeypatch.setattr(runtime, "request_json", fake_request_json)
+
+    client = runtime.CoordinatorClient("https://coord.example.com", "token")
+    out = client._request_json("POST", "/api/coord/claim", {"worker_id": "w1", "lease_seconds": 30})
+
+    assert out == {"ok": True}
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://coord.example.com/api/coord/claim"
+    assert captured["log_details"] is True
+    assert captured["include_payloads"] is True
+    assert captured["max_logged_body_chars"] == 1234
+    assert captured["redact_authorization_header"] is False
+    assert captured["verify"] is True
+    assert captured["headers"] == {"Content-Type": "application/json", "Authorization": "Bearer token"}
+
+
 def test_load_config_uses_env_for_insecure_tls_and_applies_minimums(tmp_path: Path, monkeypatch):
     config_path = tmp_path / "coordinator.json"
     config_path.write_text(

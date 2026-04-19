@@ -929,3 +929,31 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - missing base URL validation path in `register_targets.main()`
 - Validation: `python -m pytest -q tests/test_client_and_cli_unit.py` -> 14 passed.
 - Why: remove repetitive manual argument passing during deploy workflows and align target-registration behavior with existing deploy env conventions.
+
+## 2026-04-19
+
+- Expanded worker/coordinator observability to emit detailed structured logs (JSON) for both workflow actions and coordinator API traffic.
+- Updated files:
+  - `coordinator.py`
+  - `coordinator_app/runtime.py`
+  - `http_client.py`
+  - `nightmare_shared/logging_utils.py`
+  - `tests/test_http_client_unit.py`
+  - `tests/test_runtime_unit.py`
+- Worker runtime changes:
+  - Replaced worker-loop `print(...)` diagnostics with severity-aware structured logger events (`info`, `warning`, `error`) for claim/start/complete/subprocess/artifact/command lifecycle.
+  - Added explicit error logging where exceptions were previously swallowed (`worker command completion`, `fleet settings fetch`, `session restore`, stage enqueue failures, heartbeat tick failures, session upload failures).
+- HTTP detail logging changes:
+  - `request_json(...)` now supports structured request/response logging with method/url/headers/status/elapsed and payload/body fields.
+  - Coordinator client now enables detailed HTTP logs by default via env-driven controls:
+    - `COORDINATOR_HTTP_LOG_DETAILS` (default true)
+    - `COORDINATOR_HTTP_LOG_PAYLOADS` (default true)
+    - `COORDINATOR_HTTP_LOG_MAX_CHARS` (default 0 => no truncation)
+    - `COORDINATOR_HTTP_REDACT_AUTH_HEADER` (default false)
+  - Added optional auth-header redaction and response-body truncation controls for operational tuning.
+- Logging pipeline change:
+  - Suppressed default `httpx/httpcore` info chatter in `configure_logging()` so container logs are dominated by project-structured JSON entries instead of duplicate one-line transport summaries.
+- Validation:
+  - `python -m pytest -q tests/test_http_client_unit.py tests/test_runtime_unit.py tests/test_client_and_cli_unit.py` -> 31 passed.
+  - `py_compile` check on changed runtime files passed.
+- Why: operator needed substantially richer worker diagnostics (full request/response context + clear worker action state + explicit error severity) and direct compatibility with View Logs ingestion/search.

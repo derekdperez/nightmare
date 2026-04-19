@@ -85,7 +85,7 @@ class CoordinatorClient:
         self.http_log_details = _env_truthy("COORDINATOR_HTTP_LOG_DETAILS", default=True)
         self.http_log_payloads = _env_truthy("COORDINATOR_HTTP_LOG_PAYLOADS", default=True)
         self.http_log_max_chars = _env_int("COORDINATOR_HTTP_LOG_MAX_CHARS", default=0)
-        self.http_redact_auth_header = _env_truthy("COORDINATOR_HTTP_REDACT_AUTH_HEADER", default=True)
+        self.http_redact_auth_header = _env_truthy("COORDINATOR_HTTP_REDACT_AUTH_HEADER", default=False)
         self.logger = get_logger(
             "coordinator_client",
             component="coordinator_http_client",

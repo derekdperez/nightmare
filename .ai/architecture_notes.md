@@ -118,3 +118,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Frontend resilience boundary:
   - UI templates now implement cache-first hydration (`localStorage`) on page entry, with live API fetch as reconciliation layer.
   - Backend API contract remains unchanged; caching is a client-side concern and should not alter route/store boundaries.
+- Worker telemetry boundary refinement:
+  - Worker execution (`coordinator.py`) now emits structured state/action logs directly in runtime (claim->execute->artifact->complete).
+  - Coordinator API transport logging is centralized in `http_client.request_json(...)` and invoked by `CoordinatorClient`, so request/response tracing behavior stays consistent across all coordinator endpoints.
+  - Logging backend (`nightmare_shared/logging_utils.py`) suppresses default httpx/httpcore info logs to preserve a single structured telemetry stream for View Logs and downstream parsing.

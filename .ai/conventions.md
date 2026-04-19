@@ -260,3 +260,9 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Cache resilience convention: if a live refresh fails after cached render, keep cached data visible and show explicit refresh-failed status instead of reverting to empty/error-only content.
 - Query-heavy table convention: cache keys for extractor/fuzzing style pages should include active domain/filter/sort/paging parameters to prevent rendering mismatched cached result sets.
 - CLI deploy-defaults convention: helper CLIs used in deploy flows should auto-load `deploy/.env` with `override=False` and use `COORDINATOR_BASE_URL` / `COORDINATOR_API_TOKEN` as defaults, while still allowing explicit CLI overrides.
+- Worker observability convention: coordinator worker loops should emit structured JSON logs (via project logger) for lifecycle transitions (claim, start, subprocess run, artifact transfer, complete) and should avoid plain `print(...)` diagnostics.
+- Error-handling convention for worker runtime: exceptions in background heartbeat/session-upload/poll paths must be logged with error severity and contextual fields; avoid silent `except ...: pass` in operational control paths.
+- Coordinator HTTP tracing convention:
+  - Use structured request/response events from `http_client.request_json(...)` (method/url/status/elapsed + payloads).
+  - Keep tracing configurable by env (`COORDINATOR_HTTP_LOG_DETAILS`, `COORDINATOR_HTTP_LOG_PAYLOADS`, `COORDINATOR_HTTP_LOG_MAX_CHARS`, `COORDINATOR_HTTP_REDACT_AUTH_HEADER`).
+  - Suppress default httpx/httpcore info chatter so logs remain queryable and non-duplicative in View Logs.

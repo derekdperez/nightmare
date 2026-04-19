@@ -74,3 +74,66 @@ def test_request_capped_respects_read_limit_and_sets_user_agent():
     assert captured["user-agent"] == "nightmare-tests/1.0"
     assert out.headers.get("x-test") == "1"
 
+
+def test_request_json_logs_detailed_request_and_response_payloads():
+    class CaptureLogger:
+        def __init__(self):
+            self.rows: list[tuple[str, str, dict[str, object]]] = []
+
+        def info(self, event: str, **kwargs):
+            self.rows.append(("info", event, kwargs))
+
+        def error(self, event: str, **kwargs):
+            self.rows.append(("error", event, kwargs))
+
+    logger = CaptureLogger()
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, request=req, json={"ok": True, "n": 1}))
+    client = httpx.Client(transport=transport)
+    out = http_client.request_json(
+        "POST",
+        "https://example.com/api",
+        client=client,
+        headers={"Authorization": "Bearer secret", "X-Test": "1"},
+        json_payload={"hello": "world"},
+        logger=logger,
+        log_details=True,
+        include_payloads=True,
+        redact_authorization_header=True,
+    )
+    assert out == {"ok": True, "n": 1}
+    assert len(logger.rows) == 2
+    assert logger.rows[0][1] == "http_request_outbound"
+    assert logger.rows[1][1] == "http_response_inbound"
+    assert logger.rows[0][2]["request_headers"] == {"Authorization": "<redacted>", "X-Test": "1"}
+    assert logger.rows[0][2]["request_json_payload"] == {"hello": "world"}
+    assert logger.rows[1][2]["http_status_code"] == 200
+    assert logger.rows[1][2]["response_json_payload"] == {"ok": True, "n": 1}
+
+
+def test_request_json_logs_http_error_event():
+    class CaptureLogger:
+        def __init__(self):
+            self.rows: list[tuple[str, str, dict[str, object]]] = []
+
+        def info(self, event: str, **kwargs):
+            self.rows.append(("info", event, kwargs))
+
+        def error(self, event: str, **kwargs):
+            self.rows.append(("error", event, kwargs))
+
+    logger = CaptureLogger()
+    transport = httpx.MockTransport(lambda req: httpx.Response(503, request=req, text="temporary failure"))
+    client = httpx.Client(transport=transport)
+    with pytest.raises(RuntimeError, match="HTTP 503 GET https://example.com/api"):
+        http_client.request_json(
+            "GET",
+            "https://example.com/api",
+            client=client,
+            logger=logger,
+            log_details=True,
+            include_payloads=True,
+        )
+    assert len(logger.rows) == 2
+    assert logger.rows[0][1] == "http_request_outbound"
+    assert logger.rows[1][0] == "error"
+    assert logger.rows[1][1] == "http_response_error"

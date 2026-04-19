@@ -209,7 +209,12 @@ class DistributedCoordinator:
                     return
             try:
                 remote = int(self.client.get_fleet_settings().get("output_clear_generation", 0))
-            except Exception:
+            except Exception as exc:
+                self.logger.error(
+                    "fleet_settings_fetch_failed",
+                    output_root=str(self.cfg.output_root),
+                    error=str(exc),
+                )
                 return
             local = self._read_local_fleet_generation()
             if remote <= local:
@@ -435,12 +440,13 @@ class DistributedCoordinator:
                                 root_domain=root_domain,
                                 session_path=str(paths["nightmare_session_json"]),
                             )
-                except Exception:
+                except Exception as exc:
                     self.logger.error(
                         "nightmare_session_restore_failed",
                         worker_id=worker_id,
                         entry_id=entry_id,
                         root_domain=root_domain,
+                        error=str(exc),
                     )
 
                 heartbeat = LeaseHeartbeat(
@@ -544,13 +550,14 @@ class DistributedCoordinator:
                             root_domain=root_domain,
                             stage="fozzy",
                         )
-                    except Exception:
+                    except Exception as exc:
                         self.logger.error(
                             "nightmare_stage_enqueue_failed",
                             worker_id=worker_id,
                             entry_id=entry_id,
                             root_domain=root_domain,
                             stage="fozzy",
+                            error=str(exc),
                         )
                 try:
                     self.client.complete_target(entry_id, worker_id, exit_code, err_text)
@@ -707,12 +714,13 @@ class DistributedCoordinator:
                             root_domain=root_domain,
                             stage="extractor",
                         )
-                    except Exception:
+                    except Exception as exc:
                         self.logger.error(
                             "fozzy_stage_enqueue_failed",
                             worker_id=worker_id,
                             root_domain=root_domain,
                             stage="extractor",
+                            error=str(exc),
                         )
                 try:
                     self.client.complete_stage(worker_id, root_domain, "fozzy", exit_code, err_text)
