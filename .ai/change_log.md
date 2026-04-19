@@ -794,6 +794,12 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Why: sudo-run deploys created root-only files that broke non-root rollout/status commands and normal operator workflows.
 ## 2026-04-18
 
+- Removed noisy unauthorized UI-preference calls on pages without tokens.
+- `templates/_grid_controls.html.j2` now calls `/api/coord/ui-preferences` only when an Authorization token is available; otherwise it uses localStorage-only preference load/save.
+- Why: dashboard and other tokenless pages were emitting browser-console `401 Unauthorized` for preference fetches.
+
+## 2026-04-18
+
 - Hardened central bootstrap token reuse to prevent worker auth drift on reruns.
 - `deploy/bootstrap-central-auto.sh` now attempts to recover `COORDINATOR_API_TOKEN` from the running `nightmare-coordinator-server` container when `.env` is missing/incomplete (and not `--force`).
 - Why: this prevents unintended token regeneration that causes workers to loop on `401 Unauthorized` for claim/poll endpoints.

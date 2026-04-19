@@ -46,11 +46,14 @@
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
   async function loadPrefs(page, key, tokenInputId) {
+    const serverHeaders = buildAuthHeaders(tokenInputId);
     try {
-      const rsp = await fetch(`/api/coord/ui-preferences?page=${encodeURIComponent(page)}&key=${encodeURIComponent(key)}`, { cache: "no-store", headers: buildAuthHeaders(tokenInputId) });
-      if (!rsp.ok) throw new Error("pref_get_failed");
-      const payload = await rsp.json();
-      if (payload && typeof payload.pref_value === "object" && payload.pref_value) return payload.pref_value;
+      if (serverHeaders.Authorization) {
+        const rsp = await fetch(`/api/coord/ui-preferences?page=${encodeURIComponent(page)}&key=${encodeURIComponent(key)}`, { cache: "no-store", headers: serverHeaders });
+        if (!rsp.ok) throw new Error("pref_get_failed");
+        const payload = await rsp.json();
+        if (payload && typeof payload.pref_value === "object" && payload.pref_value) return payload.pref_value;
+      }
     } catch (_) {}
     try {
       const raw = localStorage.getItem(`ngc:${page}:${key}`);
@@ -62,14 +65,17 @@
     }
   }
   async function savePrefs(page, key, value, tokenInputId) {
+    const serverHeaders = buildAuthHeaders(tokenInputId);
     try {
-      await fetch("/api/coord/ui-preferences", {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json", ...buildAuthHeaders(tokenInputId) },
-        body: JSON.stringify({ page, key, value }),
-      });
-      return;
+      if (serverHeaders.Authorization) {
+        await fetch("/api/coord/ui-preferences", {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json", ...serverHeaders },
+          body: JSON.stringify({ page, key, value }),
+        });
+        return;
+      }
     } catch (_) {}
     try {
       localStorage.setItem(`ngc:${page}:${key}`, JSON.stringify(value || {}));
