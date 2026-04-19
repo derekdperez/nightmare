@@ -13,11 +13,16 @@ import structlog
 
 def configure_logging(level: Optional[str] = None) -> None:
     resolved_level = str(level or os.getenv("NIGHTMARE_LOG_LEVEL", "INFO")).upper()
+    resolved_level_value = getattr(logging, resolved_level, logging.INFO)
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
-        level=getattr(logging, resolved_level, logging.INFO),
+        level=resolved_level_value,
     )
+    # Prevent duplicated one-line HTTP client chatter; structured request/response
+    # logs are emitted explicitly from our http client wrapper.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -27,7 +32,7 @@ def configure_logging(level: Optional[str] = None) -> None:
             structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, resolved_level, logging.INFO)),
+        wrapper_class=structlog.make_filtering_bound_logger(resolved_level_value),
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )

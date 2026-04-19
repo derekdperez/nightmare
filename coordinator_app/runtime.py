@@ -20,10 +20,23 @@ from urllib.parse import urlencode
 
 from http_client import request_json
 from nightmare_shared.config import CoordinatorSettings, atomic_write_json, load_env_file_into_os, merged_value, read_json_dict, safe_float, safe_int
+from nightmare_shared.logging_utils import get_logger
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH_DEFAULT = BASE_DIR / "config" / "coordinator.json"
 OUTPUT_ROOT_DEFAULT = BASE_DIR / "output"
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "true" if default else "false") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    try:
+        return int(str(os.getenv(name, str(default)) or str(default)).strip())
+    except Exception:
+        return int(default)
 
 
 @dataclass
@@ -69,6 +82,15 @@ class CoordinatorClient:
         self.token = token.strip()
         self.timeout_seconds = timeout_seconds
         self.verify_ssl = verify_ssl
+        self.http_log_details = _env_truthy("COORDINATOR_HTTP_LOG_DETAILS", default=True)
+        self.http_log_payloads = _env_truthy("COORDINATOR_HTTP_LOG_PAYLOADS", default=True)
+        self.http_log_max_chars = _env_int("COORDINATOR_HTTP_LOG_MAX_CHARS", default=0)
+        self.http_redact_auth_header = _env_truthy("COORDINATOR_HTTP_REDACT_AUTH_HEADER", default=True)
+        self.logger = get_logger(
+            "coordinator_client",
+            component="coordinator_http_client",
+            coordinator_base_url=self.base_url,
+        )
 
     def _headers(self) -> dict[str, str]:
         out = {"Content-Type": "application/json"}
@@ -87,6 +109,11 @@ class CoordinatorClient:
             timeout_seconds=self.timeout_seconds,
             user_agent="nightmare-coordinator/1.0",
             verify=self.verify_ssl,
+            logger=self.logger,
+            log_details=self.http_log_details,
+            include_payloads=self.http_log_payloads,
+            max_logged_body_chars=(self.http_log_max_chars if self.http_log_max_chars > 0 else None),
+            redact_authorization_header=self.http_redact_auth_header,
         )
 
     def claim_target(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any] ]:
@@ -257,6 +284,12 @@ class SessionUploader(threading.Thread):
         self.interval = max(5.0, float(interval_seconds))
         self.stop_event = stop_event
         self.last_mtime_ns = 0
+        self.logger = get_logger(
+            "coordinator_session_uploader",
+            component="session_uploader",
+            root_domain=root_domain,
+            session_path=str(session_path),
+        )
 
     def run(self) -> None:
         while not self.stop_event.wait(self.interval):
@@ -276,21 +309,48 @@ class SessionUploader(threading.Thread):
             return
         data["root_domain"] = self.root_domain
         data["saved_at_utc"] = str(data.get("saved_at_utc") or _now_iso())
-        if self.client.save_session(data):
-            self.last_mtime_ns = st.st_mtime_ns
+        try:
+            if self.client.save_session(data):
+                self.last_mtime_ns = st.st_mtime_ns
+                self.logger.info(
+                    "session_upload_succeeded",
+                    root_domain=self.root_domain,
+                    session_path=str(self.session_path),
+                )
+            else:
+                self.logger.error(
+                    "session_upload_failed",
+                    root_domain=self.root_domain,
+                    session_path=str(self.session_path),
+                )
+        except Exception as exc:
+            self.logger.error(
+                "session_upload_error",
+                root_domain=self.root_domain,
+                session_path=str(self.session_path),
+                error=str(exc),
+            )
 
 class LeaseHeartbeat(threading.Thread):
-    def __init__(self, tick_fn, interval_seconds: float):
+    def __init__(self, tick_fn, interval_seconds: float, *, logger: Any = None, heartbeat_kind: str = "unknown"):
         super().__init__(daemon=True)
         self._tick_fn = tick_fn
         self._interval = max(5.0, float(interval_seconds))
         self._stop = threading.Event()
+        self._logger = logger or get_logger("coordinator_lease_heartbeat", component="lease_heartbeat")
+        self._heartbeat_kind = str(heartbeat_kind or "unknown")
 
     def run(self) -> None:
         while not self._stop.wait(self._interval):
             try:
                 self._tick_fn()
-            except Exception:
+                self._logger.info("lease_heartbeat_tick_ok", heartbeat_kind=self._heartbeat_kind)
+            except Exception as exc:
+                self._logger.error(
+                    "lease_heartbeat_tick_failed",
+                    heartbeat_kind=self._heartbeat_kind,
+                    error=str(exc),
+                )
                 continue
 
     def stop(self) -> None:

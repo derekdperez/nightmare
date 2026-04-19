@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -16,6 +17,33 @@ DEFAULT_USER_AGENT = "nightmare-httpx/1.0"
 
 _CLIENT_LOCK = threading.Lock()
 _CLIENTS: dict[tuple[bool, float, bool, str], httpx.Client] = {}
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "true" if default else "false") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _sanitize_headers_for_log(headers: dict[str, str], *, redact_authorization: bool = True) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in dict(headers or {}).items():
+        key_text = str(key or "")
+        val_text = str(value or "")
+        if redact_authorization and key_text.lower() == "authorization":
+            out[key_text] = "<redacted>"
+        else:
+            out[key_text] = val_text
+    return out
+
+
+def _truncate_text_for_log(text: str, max_chars: int | None) -> str:
+    if max_chars is None:
+        return str(text or "")
+    safe_max = max(0, int(max_chars))
+    value = str(text or "")
+    if safe_max <= 0 or len(value) <= safe_max:
+        return value
+    return value[:safe_max] + f"...<truncated:{len(value) - safe_max} chars>"
 
 
 def _client_key(verify: bool, timeout_seconds: float, follow_redirects: bool, user_agent: str) -> tuple[bool, float, bool, str]:
@@ -141,8 +169,12 @@ def request_json(
     follow_redirects: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
     client: httpx.Client | None = None,
+    logger: Any = None,
+    log_details: bool | None = None,
+    include_payloads: bool | None = None,
+    max_logged_body_chars: int | None = None,
+    redact_authorization_header: bool = True,
 ) -> dict[str, Any]:
-    owned_client = client is None
     http = client or get_shared_client(
         verify=verify,
         timeout_seconds=timeout_seconds,
@@ -150,6 +182,27 @@ def request_json(
         user_agent=user_agent,
     )
     request_headers = dict(headers or {})
+    should_log = bool(log_details) if log_details is not None else _env_truthy("NIGHTMARE_HTTP_LOG_DETAILS", default=False)
+    should_include_payloads = (
+        bool(include_payloads)
+        if include_payloads is not None
+        else _env_truthy("NIGHTMARE_HTTP_LOG_PAYLOADS", default=True)
+    )
+    started_at = time.perf_counter()
+    if logger is not None and should_log:
+        req_event: dict[str, Any] = {
+            "http_method": method.upper(),
+            "http_url": url,
+            "timeout_seconds": float(timeout_seconds),
+            "verify_tls": bool(verify),
+            "request_headers": _sanitize_headers_for_log(
+                request_headers,
+                redact_authorization=redact_authorization_header,
+            ),
+        }
+        if should_include_payloads:
+            req_event["request_json_payload"] = json_payload
+        logger.info("http_request_outbound", **req_event)
     try:
         response = http.request(
             method.upper(),
@@ -159,12 +212,42 @@ def request_json(
             timeout=timeout_seconds,
         )
     except httpx.HTTPError as exc:
+        if logger is not None and should_log:
+            logger.error(
+                "http_request_network_error",
+                http_method=method.upper(),
+                http_url=url,
+                error=str(exc),
+            )
         raise RuntimeError(f"Network error {method.upper()} {url}: {exc}") from exc
+    elapsed_ms = int(round((time.perf_counter() - started_at) * 1000.0))
     text = response.text
+    parsed_any: Any = None
+    parse_error = ""
+    try:
+        parsed_any = json.loads(text or "{}")
+    except Exception as exc:
+        parse_error = str(exc)
+        parsed_any = None
+    if logger is not None and should_log:
+        resp_event: dict[str, Any] = {
+            "http_method": method.upper(),
+            "http_url": url,
+            "http_status_code": int(response.status_code),
+            "elapsed_ms": elapsed_ms,
+            "response_headers": dict(response.headers.items()),
+        }
+        if should_include_payloads:
+            resp_event["response_text"] = _truncate_text_for_log(text, max_logged_body_chars)
+            if parsed_any is not None:
+                resp_event["response_json_payload"] = parsed_any
+            elif parse_error:
+                resp_event["response_json_parse_error"] = parse_error
+        if response.is_error:
+            logger.error("http_response_error", **resp_event)
+        else:
+            logger.info("http_response_inbound", **resp_event)
     if response.is_error:
         raise RuntimeError(f"HTTP {response.status_code} {method.upper()} {url}: {text[:400]}")
-    try:
-        parsed = json.loads(text or "{}")
-    except Exception:
-        parsed = {}
+    parsed = parsed_any if parsed_any is not None else {}
     return parsed if isinstance(parsed, dict) else {}
