@@ -28,7 +28,7 @@ from typing import Any
 PACK_SCHEMA_VERSION = 1
 DEFAULT_OUTPUT_NAME = "packed.json"
 DEFAULT_ZIP_NAME = "packed.zip"
-EXCLUDED_DIR_NAMES = {"output"}
+EXCLUDED_DIR_NAMES = {"output", ".git"}
 
 
 def _path_posix_rel(path: Path, root: Path) -> str:

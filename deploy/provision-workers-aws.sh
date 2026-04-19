@@ -6,7 +6,8 @@ DEPLOY_DIR="${ROOT_DIR}/deploy"
 
 COUNT=0
 AMI_ID=""
-INSTANCE_TYPE="t3.small"
+INSTANCE_TYPE="m7i-flex.large"
+ROOT_VOLUME_SIZE_GB=50
 SUBNET_ID=""
 SECURITY_GROUP_IDS=""
 KEY_NAME=""
@@ -32,7 +33,7 @@ Usage:
     --coordinator-base-url https://central-host \
     --api-token <token> \
     [--coordinator-insecure-tls true] \
-    [--instance-type t3.small] [--repo-branch main] [--key-name keypair] [--iam-instance-profile profile] [--region us-east-1]
+    [--instance-type m7i-flex.large] [--repo-branch main] [--key-name keypair] [--iam-instance-profile profile] [--region us-east-1]
 
 This script launches worker EC2 instances and bootstraps each VM with cloud-init to:
   - install docker + git,
@@ -103,7 +104,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --instance-type)
-      INSTANCE_TYPE="${2:-t3.small}"
+      INSTANCE_TYPE="${2:-m7i-flex.large}"
       shift 2
       ;;
     --subnet-id)
@@ -253,6 +254,7 @@ run_cmd=(
   --image-id "$AMI_ID"
   --count "$COUNT"
   --instance-type "$INSTANCE_TYPE"
+  --block-device-mappings "[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_SIZE_GB},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]"
   --subnet-id "$SUBNET_ID"
   --security-group-ids "${sg_ids[@]}"
   --user-data "file://${USER_DATA_FILE}"

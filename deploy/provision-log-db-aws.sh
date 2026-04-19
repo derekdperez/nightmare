@@ -8,7 +8,8 @@ ENV_FILE="${DEPLOY_DIR}/.env"
 COMPOSE_FILE="${DEPLOY_DIR}/docker-compose.central.yml"
 REGION=""
 AMI_ID=""
-INSTANCE_TYPE="t3.small"
+INSTANCE_TYPE="m7i-flex.large"
+ROOT_VOLUME_SIZE_GB=100
 SUBNET_ID=""
 SECURITY_GROUP_IDS=""
 KEY_NAME=""
@@ -27,7 +28,7 @@ Usage:
     --ami-id ami-xxxxxxxx \
     --subnet-id subnet-xxxxxxxx \
     --security-group-ids sg-aaaa,sg-bbbb \
-    [--instance-type t3.small] \
+    [--instance-type m7i-flex.large] \
     [--key-name my-key] \
     [--iam-instance-profile ec2-role] \
     [--region us-east-1] \
@@ -156,7 +157,7 @@ run_compose() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ami-id) AMI_ID="${2:-}"; shift 2 ;;
-    --instance-type) INSTANCE_TYPE="${2:-t3.small}"; shift 2 ;;
+    --instance-type) INSTANCE_TYPE="${2:-m7i-flex.large}"; shift 2 ;;
     --subnet-id) SUBNET_ID="${2:-}"; shift 2 ;;
     --security-group-ids) SECURITY_GROUP_IDS="${2:-}"; shift 2 ;;
     --key-name) KEY_NAME="${2:-}"; shift 2 ;;
@@ -263,6 +264,7 @@ run_cmd=(
   --image-id "$AMI_ID"
   --count 1
   --instance-type "$INSTANCE_TYPE"
+  --block-device-mappings "[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_SIZE_GB},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]"
   --subnet-id "$SUBNET_ID"
   --security-group-ids "${sg_ids[@]}"
   --user-data "file://${USER_DATA_FILE}"

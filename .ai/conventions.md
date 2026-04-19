@@ -246,3 +246,5 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Compose spec convention for observability: include `docker-compose.log-store.yml` in compose-spec discovery used by Docker status/log APIs.
 - UI time-column convention: render table time fields as fixed EST (`UTC-5`) `HH:MM:SS` with no fractional seconds; prefer dedicated `..._est_time` values from API payloads or deterministic client conversion from UTC timestamps.
 - Log-source discovery convention: never add local docker log sources or synthetic compose probes unless local `docker`/`docker-compose` commands are actually available in the runtime.
+- EC2 provisioning convention: deploy scripts default to `m7i-flex.large` for worker and dedicated log-DB VM provisioning unless explicitly overridden.
+- EC2 storage convention: provisioned worker VMs must launch with at least 50 GB root EBS (`gp3`), and dedicated log DB VMs must launch with at least 100 GB root EBS (`gp3`) using explicit `--block-device-mappings` in provisioning scripts.

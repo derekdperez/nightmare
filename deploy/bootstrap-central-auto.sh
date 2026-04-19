@@ -15,7 +15,7 @@ BASE_URL_OVERRIDE=""
 CERT_DAYS=825
 AUTO_PROVISION_WORKERS=0
 AWS_AMI_ID=""
-AWS_INSTANCE_TYPE="t3.small"
+AWS_INSTANCE_TYPE="m7i-flex.large"
 AWS_SUBNET_ID=""
 AWS_SECURITY_GROUP_IDS=""
 AWS_KEY_NAME=""
@@ -117,7 +117,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --aws-instance-type)
-      AWS_INSTANCE_TYPE="${2:-t3.small}"
+      AWS_INSTANCE_TYPE="${2:-m7i-flex.large}"
       shift 2
       ;;
     --aws-subnet-id)

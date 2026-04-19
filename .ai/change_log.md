@@ -857,3 +857,17 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Expanded compose spec discovery to include `deploy/docker-compose.log-store.yml` so log-store service fallback resolves.
 - Validation: `python -m pytest -q tests/test_client_and_cli_unit.py tests/test_reporting_and_store_helpers.py` -> 38 passed.
 - Why: View Logs entries for coordinator + DB containers should remain readable even when only compose client is present.
+
+## 2026-04-19
+
+- Updated AWS EC2 provisioning defaults and storage sizing in deploy scripts.
+- Instance type default is now `m7i-flex.large` across:
+  - `deploy/provision-workers-aws.sh`
+  - `deploy/provision-log-db-aws.sh`
+  - `deploy/bootstrap-central-auto.sh`
+  - `deploy/deploy-central-with-logdb.sh`
+  - `deploy/full_deploy_command.sh`
+- Added explicit EC2 root EBS sizing at launch time:
+  - Workers: 50 GB (`gp3`, delete on termination)
+  - Dedicated log DB VM: 100 GB (`gp3`, delete on termination)
+- Why: enforce consistent compute class and minimum disk capacity for worker and DB fleet provisioning.

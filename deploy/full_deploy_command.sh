@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 # Default deployment settings for this environment.
 AWS_AMI_ID="ami-098e39bafa7e7303d"
-AWS_INSTANCE_TYPE="t3.micro"
+AWS_INSTANCE_TYPE="m7i-flex.large"
 AWS_SUBNET_ID="subnet-054dbecc0059eda75"
 AWS_SECURITY_GROUP_IDS="sg-0423808f12622fada"
 AWS_IAM_INSTANCE_PROFILE="ec2"
