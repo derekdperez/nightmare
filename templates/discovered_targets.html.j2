@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discovered Targets</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 8px; }
+    h2 { margin: 16px 0 8px; }
+    .meta { margin-bottom: 12px; color: #475569; font-size: 13px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0 14px; flex-wrap: wrap; }
+    input, select { padding: 6px 8px; border: 1px solid #94a3b8; border-radius: 6px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: #fff; }
+    .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 14px; }
+    .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+    .k { font-size: 12px; color: #64748b; }
+    .v { font-size: 20px; font-weight: 700; margin-top: 4px; word-break: break-word; }
+    .muted { color: #64748b; }
+    .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+    .table-wrap { max-height: 440px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+    .table-wrap.sitemap { max-height: 620px; }
+    table { width: max-content; min-width: 100%; border-collapse: collapse; background: #fff; border: 0; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; text-align: left; vertical-align: top; }
+    th { background: #e2e8f0; position: sticky; top: 0; z-index: 4; }
+    tr.selectable:hover { background: #eff6ff; cursor: pointer; }
+    tr.selected { background: #dbeafe; }
+    .col-url { min-width: 420px; max-width: 420px; word-break: break-all; }
+    .chip-list { display: flex; gap: 4px; flex-wrap: wrap; }
+    .chip { background: #e2e8f0; border-radius: 999px; padding: 2px 8px; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h1>Discovered Targets</h1>
+  <div class="meta">Domains with at least one discovered URL in coordinator sessions. Select a domain row to inspect its sitemap. <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/docker-status">Docker Status</a> | <a href="/view-logs">View Logs</a></div>
+
+  <div class="toolbar">
+    <input id="token" type="password" placeholder="Coordinator token">
+    <input id="searchText" type="text" placeholder="Search domains and counts">
+    <input id="limit" type="number" min="1" max="5000" value="2000" style="max-width: 120px;" title="Max domains">
+    <button class="primary" onclick="refreshDomains()">Refresh</button>
+    <span id="msg" class="muted"></span>
+  </div>
+
+  <div id="cards" class="cards"></div>
+
+  <div class="panel">
+    <strong>Domains</strong>
+    <div class="table-wrap">
+      <table id="discoveredTargetsTable">
+        <thead>
+          <tr>
+            <th>Domain</th>
+            <th>Start URL</th>
+            <th>Total URLs</th>
+            <th>Internal Links</th>
+            <th>Forms</th>
+            <th>Href Refs</th>
+            <th>Src Refs</th>
+            <th>Embedded Routes</th>
+            <th>Attribute Routes</th>
+            <th>Script URLs</th>
+            <th>Redirects</th>
+            <th>Crawl Responses</th>
+            <th>Wordlist Paths</th>
+            <th>AI Guesses</th>
+            <th>AI Probes</th>
+            <th>Seed URLs</th>
+            <th>Saved</th>
+          </tr>
+        </thead>
+        <tbody id="domainRows"><tr><td colspan="17">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <strong id="sitemapTitle">Sitemap</strong>
+    <div class="toolbar" style="margin-top:8px;">
+      <input id="sitemapSearchText" type="text" placeholder="Search sitemap rows">
+      <span id="sitemapMeta" class="muted">Select a domain above.</span>
+    </div>
+    <div class="table-wrap sitemap">
+      <table id="discoveredTargetSitemapTable">
+        <thead>
+          <tr>
+            <th>URL</th>
+            <th>Inbound</th>
+            <th>Outbound</th>
+            <th>Discovered Via</th>
+            <th>Discovered From</th>
+            <th>Crawled</th>
+            <th>Requested</th>
+            <th>Exists</th>
+            <th>Crawl Status</th>
+            <th>Existence Status</th>
+          </tr>
+        </thead>
+        <tbody id="sitemapRows"><tr><td colspan="10">Select a domain above.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  {% include '_grid_controls.html.j2' %}
+  <script>
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    const DOMAIN_PAGE_KEY = "discovered_targets_domains_table_v1";
+    const SITEMAP_PAGE_KEY = "discovered_targets_sitemap_table_v1";
+    const METHOD_ORDER = [
+      ["internal_link", "Internal Links"],
+      ["form_action", "Forms"],
+      ["href_reference", "Href Refs"],
+      ["src_reference", "Src Refs"],
+      ["embedded_route", "Embedded Routes"],
+      ["attribute_route", "Attribute Routes"],
+      ["observed_in_script_file", "Script URLs"],
+      ["redirect_location", "Redirects"],
+      ["crawl_response", "Crawl Responses"],
+      ["file_path_wordlist", "Wordlist Paths"],
+      ["guessed_url", "AI Guesses"],
+      ["ai_probe_request", "AI Probes"],
+      ["seed_input", "Seed URLs"]
+    ];
+    let domainGridCtrl = null;
+    let sitemapGridCtrl = null;
+    let selectedDomain = "";
+    let domainRowsCache = [];
+    let sitemapRowsCache = [];
+
+    function readCookie(name) {
+      const needle = `${name}=`;
+      const cookies = String(document.cookie || "").split(";");
+      for (const part of cookies) {
+        const item = part.trim();
+        if (item.startsWith(needle)) return decodeURIComponent(item.slice(needle.length));
+      }
+      return "";
+    }
+    function writeCookie(name, value, days) {
+      const maxAge = Math.max(1, Number(days || 30)) * 24 * 60 * 60;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}`;
+    }
+    function deleteCookie(name) {
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+    }
+    function esc(v) {
+      return String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch]));
+    }
+    function authHeaders() {
+      const token = document.getElementById("token").value.trim();
+      if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+      else deleteCookie(TOKEN_COOKIE_NAME);
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    function methodCount(row, key) {
+      const counts = row && typeof row.method_counts === "object" && row.method_counts ? row.method_counts : {};
+      const value = Number(counts[key] || 0);
+      return Number.isFinite(value) ? value : 0;
+    }
+    function renderCards(rows) {
+      const totals = METHOD_ORDER.reduce((acc, [key]) => acc + rows.reduce((sum, row) => sum + methodCount(row, key), 0), 0);
+      document.getElementById("cards").innerHTML = `
+        <div class="card"><div class="k">Domains</div><div class="v">${rows.length}</div></div>
+        <div class="card"><div class="k">Total URLs Discovered</div><div class="v">${rows.reduce((sum, row) => sum + Number(row.discovered_urls_count || 0), 0)}</div></div>
+        <div class="card"><div class="k">Discovery Method Hits</div><div class="v">${totals}</div></div>
+        <div class="card"><div class="k">Selected Domain</div><div class="v">${esc(selectedDomain || "None")}</div></div>
+      `;
+    }
+    function bindGridControls() {
+      if (!window.NightmareGridControls) return;
+      if (!domainGridCtrl) {
+        domainGridCtrl = window.NightmareGridControls.attach({
+          tableId: "discoveredTargetsTable",
+          page: "discovered_targets",
+          prefKey: DOMAIN_PAGE_KEY,
+          tokenInputId: "token",
+          searchInputId: "searchText"
+        });
+      }
+      if (!sitemapGridCtrl) {
+        sitemapGridCtrl = window.NightmareGridControls.attach({
+          tableId: "discoveredTargetSitemapTable",
+          page: "discovered_targets",
+          prefKey: SITEMAP_PAGE_KEY,
+          tokenInputId: "token",
+          searchInputId: "sitemapSearchText"
+        });
+      }
+      domainGridCtrl?.refresh?.();
+      sitemapGridCtrl?.refresh?.();
+    }
+    function renderDomains(rows) {
+      domainRowsCache = Array.isArray(rows) ? rows.slice() : [];
+      renderCards(domainRowsCache);
+      const tbody = document.getElementById("domainRows");
+      if (!domainRowsCache.length) {
+        tbody.innerHTML = '<tr><td colspan="17">No discovered target domains found.</td></tr>';
+        bindGridControls();
+        return;
+      }
+      tbody.innerHTML = domainRowsCache.map((row) => `
+        <tr class="selectable ${selectedDomain === row.root_domain ? "selected" : ""}" data-domain="${esc(row.root_domain)}">
+          <td>${esc(row.root_domain)}</td>
+          <td>${esc(row.start_url || "")}</td>
+          <td data-raw="${Number(row.discovered_urls_count || 0)}">${Number(row.discovered_urls_count || 0)}</td>
+          ${METHOD_ORDER.map(([key]) => `<td data-raw="${methodCount(row, key)}">${methodCount(row, key)}</td>`).join("")}
+          <td>${esc(row.saved_at_utc || "")}</td>
+        </tr>
+      `).join("");
+      for (const tr of tbody.querySelectorAll("tr[data-domain]")) {
+        tr.addEventListener("click", () => {
+          const domain = String(tr.getAttribute("data-domain") || "");
+          if (!domain) return;
+          selectedDomain = domain;
+          renderDomains(domainRowsCache);
+          refreshSitemap(domain);
+        });
+      }
+      bindGridControls();
+    }
+    function renderSitemap(payload) {
+      const sitemap = payload && payload.sitemap && typeof payload.sitemap === "object" ? payload.sitemap : {};
+      sitemapRowsCache = Array.isArray(sitemap.pages) ? sitemap.pages.slice() : [];
+      document.getElementById("sitemapTitle").textContent = selectedDomain ? `Sitemap: ${selectedDomain}` : "Sitemap";
+      document.getElementById("sitemapMeta").textContent = selectedDomain
+        ? `${Number(sitemap.page_count || sitemapRowsCache.length || 0)} pages • start URL: ${sitemap.start_url || ""}`
+        : "Select a domain above.";
+      const tbody = document.getElementById("sitemapRows");
+      if (!sitemapRowsCache.length) {
+        tbody.innerHTML = '<tr><td colspan="10">No sitemap rows available for this domain.</td></tr>';
+        bindGridControls();
+        return;
+      }
+      tbody.innerHTML = sitemapRowsCache.map((row) => `
+        <tr>
+          <td class="col-url">${esc(row.url || "")}</td>
+          <td data-raw="${Number(row.inbound_count || 0)}">${Number(row.inbound_count || 0)}</td>
+          <td data-raw="${Number(row.outbound_count || 0)}">${Number(row.outbound_count || 0)}</td>
+          <td>${Array.isArray(row.discovered_via) && row.discovered_via.length ? `<div class="chip-list">${row.discovered_via.map((item) => `<span class="chip">${esc(item)}</span>`).join("")}</div>` : ""}</td>
+          <td>${Array.isArray(row.discovered_from) && row.discovered_from.length ? `<div class="chip-list">${row.discovered_from.slice(0, 8).map((item) => `<span class="chip">${esc(item)}</span>`).join("")}</div>` : ""}</td>
+          <td>${row.was_crawled ? "yes" : ""}</td>
+          <td>${row.crawl_requested ? "yes" : ""}</td>
+          <td>${row.exists_confirmed ? "yes" : ""}</td>
+          <td data-raw="${Number(row.crawl_status_code || 0)}">${esc(row.crawl_status_code ?? "")}</td>
+          <td data-raw="${Number(row.existence_status_code || 0)}">${esc(row.existence_status_code ?? "")}</td>
+        </tr>
+      `).join("");
+      bindGridControls();
+    }
+    async function refreshDomains() {
+      const msg = document.getElementById("msg");
+      msg.textContent = "Loading domains…";
+      const limit = Math.max(1, Math.min(5000, Number(document.getElementById("limit").value || 2000)));
+      const q = document.getElementById("searchText").value.trim();
+      const rsp = await fetch(`/api/coord/discovered-targets?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`, {
+        cache: "no-store",
+        headers: authHeaders()
+      });
+      const payload = await rsp.json().catch(() => ({}));
+      if (!rsp.ok) {
+        msg.textContent = String(payload.error || `HTTP ${rsp.status}`);
+        renderDomains([]);
+        return;
+      }
+      const rows = Array.isArray(payload.domains) ? payload.domains : [];
+      renderDomains(rows);
+      msg.textContent = `Loaded ${rows.length} domains`;
+      if (!selectedDomain && rows.length) {
+        selectedDomain = String(rows[0].root_domain || "");
+      }
+      if (selectedDomain && rows.some((row) => row.root_domain === selectedDomain)) {
+        refreshSitemap(selectedDomain);
+      } else if (!rows.length) {
+        selectedDomain = "";
+        renderSitemap({});
+      }
+    }
+    async function refreshSitemap(domain) {
+      if (!domain) {
+        renderSitemap({});
+        return;
+      }
+      const msg = document.getElementById("msg");
+      msg.textContent = `Loading sitemap for ${domain}…`;
+      const rsp = await fetch(`/api/coord/discovered-target-sitemap?root_domain=${encodeURIComponent(domain)}`, {
+        cache: "no-store",
+        headers: authHeaders()
+      });
+      const payload = await rsp.json().catch(() => ({}));
+      if (!rsp.ok) {
+        renderSitemap({});
+        msg.textContent = String(payload.error || `HTTP ${rsp.status}`);
+        return;
+      }
+      renderSitemap(payload);
+      msg.textContent = `Loaded sitemap for ${domain}`;
+    }
+    document.getElementById("token").value = readCookie(TOKEN_COOKIE_NAME);
+    document.getElementById("searchText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") refreshDomains(); });
+    document.getElementById("sitemapSearchText").addEventListener("input", () => sitemapGridCtrl?.refresh?.());
+    refreshDomains();
+    setInterval(refreshDomains, 15000);
+  </script>
+</body>
+</html>

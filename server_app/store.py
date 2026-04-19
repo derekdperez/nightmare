@@ -1762,6 +1762,154 @@ ORDER BY artifact_type ASC;
             )
         return out
 
+
+    @staticmethod
+    def _session_method_counts(payload: dict[str, Any]) -> dict[str, int]:
+        state = payload.get("state", {}) if isinstance(payload.get("state"), dict) else {}
+        inventory = state.get("url_inventory", {}) if isinstance(state.get("url_inventory"), dict) else {}
+        counts: dict[str, int] = {}
+        for record in inventory.values():
+            if not isinstance(record, dict):
+                continue
+            sources = record.get("discovered_via", [])
+            if not isinstance(sources, list):
+                continue
+            for source in {str(item or "").strip() for item in sources if str(item or "").strip()}:
+                counts[source] = int(counts.get(source, 0)) + 1
+        return counts
+
+    @staticmethod
+    def _build_session_sitemap_payload(
+        *,
+        root_domain: str,
+        start_url: str,
+        saved_at_utc: str | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = payload.get("state", {}) if isinstance(payload.get("state"), dict) else {}
+        discovered_urls_raw = state.get("discovered_urls", [])
+        discovered_urls = sorted(
+            {str(url or "").strip() for url in discovered_urls_raw if str(url or "").strip()}
+        ) if isinstance(discovered_urls_raw, list) else []
+        link_graph_raw = state.get("link_graph", {}) if isinstance(state.get("link_graph"), dict) else {}
+        inventory = state.get("url_inventory", {}) if isinstance(state.get("url_inventory"), dict) else {}
+
+        graph: dict[str, set[str]] = {}
+        for source, targets in link_graph_raw.items():
+            src = str(source or "").strip()
+            if not src or not isinstance(targets, list):
+                continue
+            graph.setdefault(src, set())
+            for target in targets:
+                tgt = str(target or "").strip()
+                if tgt:
+                    graph[src].add(tgt)
+
+        all_urls: set[str] = set(discovered_urls)
+        all_urls.update(graph.keys())
+        for targets in graph.values():
+            all_urls.update(targets)
+
+        inbound: dict[str, set[str]] = {}
+        for source, targets in graph.items():
+            for target in targets:
+                inbound.setdefault(target, set()).add(source)
+
+        pages: list[dict[str, Any]] = []
+        for url in sorted(all_urls):
+            record = inventory.get(url) if isinstance(inventory.get(url), dict) else {}
+            discovered_via = sorted(
+                {str(item or "").strip() for item in record.get("discovered_via", []) if str(item or "").strip()}
+            ) if isinstance(record.get("discovered_via"), list) else []
+            discovered_from = sorted(
+                {str(item or "").strip() for item in record.get("discovered_from", []) if str(item or "").strip()}
+            ) if isinstance(record.get("discovered_from"), list) else []
+            outbounds = sorted(graph.get(url, set()))
+            pages.append(
+                {
+                    "url": url,
+                    "inbound_count": len(inbound.get(url, set())),
+                    "outbound_count": len(outbounds),
+                    "outbound_internal_links": outbounds,
+                    "discovered_via": discovered_via,
+                    "discovered_from": discovered_from,
+                    "was_crawled": bool(record.get("was_crawled", False)),
+                    "crawl_requested": bool(record.get("crawl_requested", False)),
+                    "exists_confirmed": bool(record.get("exists_confirmed", False)),
+                    "crawl_status_code": record.get("crawl_status_code"),
+                    "existence_status_code": record.get("existence_status_code"),
+                }
+            )
+
+        return {
+            "generated_at_utc": _iso_now(),
+            "root_domain": root_domain,
+            "start_url": str(start_url or ""),
+            "saved_at_utc": saved_at_utc,
+            "page_count": len(pages),
+            "pages": pages,
+        }
+
+    def list_discovered_target_domains(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(20000, int(limit or 5000)))
+        sql = """
+SELECT root_domain, start_url, saved_at_utc, payload
+FROM coordinator_sessions
+WHERE jsonb_typeof(payload #> '{state,discovered_urls}') = 'array'
+  AND jsonb_array_length(payload #> '{state,discovered_urls}') > 0
+ORDER BY saved_at_utc DESC NULLS LAST, root_domain ASC
+LIMIT %s;
+"""
+        out: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
+            conn.commit()
+        for row in rows:
+            payload = row[3] if isinstance(row[3], dict) else {}
+            state = payload.get("state", {}) if isinstance(payload.get("state"), dict) else {}
+            discovered_urls = state.get("discovered_urls", [])
+            method_counts = self._session_method_counts(payload)
+            out.append(
+                {
+                    "root_domain": str(row[0] or "").strip().lower(),
+                    "start_url": str(row[1] or ""),
+                    "saved_at_utc": row[2].isoformat() if row[2] else None,
+                    "discovered_urls_count": len(discovered_urls) if isinstance(discovered_urls, list) else 0,
+                    "method_counts": method_counts,
+                }
+            )
+        return out
+
+    def get_discovered_target_sitemap(self, root_domain: str) -> Optional[dict[str, Any]]:
+        sql = """
+SELECT root_domain, start_url, saved_at_utc, payload
+FROM coordinator_sessions
+WHERE root_domain = %s;
+"""
+        rd = str(root_domain or "").strip().lower()
+        if not rd:
+            return None
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (rd,))
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        payload = row[3] if isinstance(row[3], dict) else {}
+        state = payload.get("state", {}) if isinstance(payload.get("state"), dict) else {}
+        discovered_urls = state.get("discovered_urls", [])
+        if not isinstance(discovered_urls, list) or not discovered_urls:
+            return None
+        return self._build_session_sitemap_payload(
+            root_domain=str(row[0] or "").strip().lower(),
+            start_url=str(row[1] or ""),
+            saved_at_utc=row[2].isoformat() if row[2] else None,
+            payload=payload,
+        )
+
     def list_extractor_match_domains(self, *, limit: int = 5000) -> list[dict[str, Any]]:
         safe_limit = max(1, min(20000, int(limit or 5000)))
         sql = """

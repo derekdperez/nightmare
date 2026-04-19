@@ -13,6 +13,7 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_docker_status_html,
+    render_discovered_targets_html,
     render_extractor_matches_html,
     render_fuzzing_html,
     render_view_logs_html,
@@ -42,6 +43,14 @@ def test_render_crawl_progress_html_contains_expected_heading():
     html = render_crawl_progress_html()
     assert "Crawl Progress" in html
 
+
+
+
+def test_render_discovered_targets_html_contains_expected_heading():
+    html = render_discovered_targets_html()
+    assert "Discovered Targets" in html
+    assert "/api/coord/discovered-targets" in html
+    assert "/api/coord/discovered-target-sitemap" in html
 
 def test_render_extractor_matches_html_contains_expected_heading():
     html = render_extractor_matches_html()
@@ -735,3 +744,99 @@ def test_apply_fuzzing_row_query_filters_sorts_and_pages():
     assert result["rows"][0]["root_domain"] == "a.com"
     assert result["rows"][0]["result_type"] == "anomaly"
     assert result["has_more"] is False
+
+
+def test_list_discovered_target_domains_uses_session_inventory_counts():
+    now = datetime(2026, 4, 19, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __init__(self):
+            self._fetchall = []
+            self._fetchone = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(str(sql).split())
+            if "FROM coordinator_sessions" in compact and "jsonb_array_length(payload #> '{state,discovered_urls}')" in compact:
+                assert params == (5000,)
+                self._fetchall = [
+                    (
+                        "example.com",
+                        "https://example.com",
+                        now,
+                        {
+                            "state": {
+                                "discovered_urls": ["https://example.com/", "https://example.com/app.js"],
+                                "url_inventory": {
+                                    "https://example.com/": {"discovered_via": ["seed_input", "internal_link"]},
+                                    "https://example.com/app.js": {"discovered_via": ["src_reference", "observed_in_script_file"]},
+                                },
+                            }
+                        },
+                    )
+                ]
+                return
+            if "FROM coordinator_sessions" in compact and "WHERE root_domain = %s" in compact:
+                assert params == ("example.com",)
+                self._fetchone = (
+                    "example.com",
+                    "https://example.com",
+                    now,
+                    {
+                        "state": {
+                            "discovered_urls": ["https://example.com/", "https://example.com/admin"],
+                            "link_graph": {"https://example.com/": ["https://example.com/admin"]},
+                            "url_inventory": {
+                                "https://example.com/": {"discovered_via": ["seed_input"], "was_crawled": True},
+                                "https://example.com/admin": {"discovered_via": ["internal_link"], "exists_confirmed": True},
+                            },
+                        }
+                    },
+                )
+                return
+            raise AssertionError(f"Unexpected SQL in test: {compact}")
+
+        def fetchall(self):
+            return self._fetchall
+
+        def fetchone(self):
+            return self._fetchone
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            return None
+
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._connect = lambda: FakeConnection()  # type: ignore[method-assign]
+
+    domains = CoordinatorStore.list_discovered_target_domains(store, limit=5000)
+    assert len(domains) == 1
+    row = domains[0]
+    assert row["root_domain"] == "example.com"
+    assert row["discovered_urls_count"] == 2
+    assert row["method_counts"]["seed_input"] == 1
+    assert row["method_counts"]["internal_link"] == 1
+    assert row["method_counts"]["src_reference"] == 1
+    assert row["method_counts"]["observed_in_script_file"] == 1
+
+    sitemap = CoordinatorStore.get_discovered_target_sitemap(store, "example.com")
+    assert sitemap is not None
+    assert sitemap["root_domain"] == "example.com"
+    assert sitemap["page_count"] == 2
+    pages = {row["url"]: row for row in sitemap["pages"]}
+    assert pages["https://example.com/"]["outbound_count"] == 1
+    assert pages["https://example.com/admin"]["inbound_count"] == 1

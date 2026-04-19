@@ -36,3 +36,7 @@ def render_docker_status_html() -> str:
 
 def render_view_logs_html() -> str:
     return render_template("view_logs.html.j2")
+
+
+def render_discovered_targets_html() -> str:
+    return render_template("discovered_targets.html.j2")

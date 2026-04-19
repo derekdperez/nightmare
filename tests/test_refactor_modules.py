@@ -6,6 +6,7 @@ from reporting.server_pages import (
     render_dashboard_html,
     render_database_html,
     render_docker_status_html,
+    render_discovered_targets_html,
     render_extractor_matches_html,
     render_fuzzing_html,
     render_view_logs_html,
@@ -135,3 +136,9 @@ def test_view_logs_template_renders():
     assert "/api/coord/log-events" in html
     assert "/api/coord/log-download" in html
     assert "nightmare_coord_token" in html
+
+
+def test_discovered_targets_template_renders():
+    html = render_discovered_targets_html()
+    assert "Discovered Targets" in html
+    assert '/api/coord/discovered-targets' in html

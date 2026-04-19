@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Small web server for Nightmare/Fozzy reporting and live run overview.
 
 Usage:
@@ -56,6 +56,7 @@ from reporting.server_pages import (
     render_dashboard_html,
     render_database_html,
     render_docker_status_html,
+    render_discovered_targets_html,
     render_extractor_matches_html,
     render_fuzzing_html,
     render_view_logs_html,
@@ -2866,6 +2867,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/view-logs":
             self._write_text(render_view_logs_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/discovered-targets":
+            self._write_text(render_discovered_targets_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root, self.coordinator_store)
             self._write_json(payload)
@@ -3158,6 +3162,64 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "crawl progress query failed", "detail": str(exc)}, status=500)
                 return
             self._write_json(payload)
+            return
+        if path == "/api/coord/discovered-targets":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or [2000])[0], 2000)
+            search_text = str((query.get("q") or [""])[0] or "").strip().lower()
+            try:
+                rows = self.coordinator_store.list_discovered_target_domains(limit=limit)
+            except Exception as exc:
+                self.log_message("list_discovered_target_domains failed: %r", exc)
+                self._write_json({"error": "discovered target query failed", "detail": str(exc)}, status=500)
+                return
+            if search_text:
+                filtered_rows: list[dict[str, Any]] = []
+                for item in rows:
+                    haystack = " ".join(
+                        [
+                            str(item.get("root_domain", "") or ""),
+                            str(item.get("start_url", "") or ""),
+                            str(item.get("saved_at_utc", "") or ""),
+                        ]
+                        + [str(value) for value in (item.get("method_counts") or {}).values()]
+                    ).lower()
+                    if search_text in haystack:
+                        filtered_rows.append(item)
+                rows = filtered_rows
+            payload = {
+                "generated_at_utc": _iso_now(),
+                "total_domains": len(rows),
+                "domains": rows,
+            }
+            self._write_json(payload)
+            return
+        if path == "/api/coord/discovered-target-sitemap":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            try:
+                payload = self.coordinator_store.get_discovered_target_sitemap(root_domain)
+            except Exception as exc:
+                self.log_message("get_discovered_target_sitemap failed: %r", exc)
+                self._write_json({"error": "discovered target sitemap query failed", "detail": str(exc)}, status=500)
+                return
+            if payload is None:
+                self._write_json({"found": False, "root_domain": root_domain}, status=404)
+                return
+            self._write_json({"found": True, "root_domain": root_domain, "sitemap": payload})
             return
         if path == "/api/coord/extractor-matches/domains":
             if self.coordinator_store is None:
