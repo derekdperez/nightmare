@@ -192,7 +192,12 @@
         });
         state.widths = nextWidths;
         state.order = sanitizeOrder(pref.column_order || defaultOrder);
+        state.sortKey = String(pref.sort_key || state.sortKey || "");
+        state.sortDir = String(pref.sort_dir || state.sortDir || "asc") === "desc" ? "desc" : "asc";
+        state.colFilters = (pref.column_filters && typeof pref.column_filters === "object") ? { ...pref.column_filters } : (state.colFilters || {});
+        state.globalSearch = typeof pref.global_search === "string" ? pref.global_search : String(state.globalSearch || "");
         applyColumnPrefs();
+        syncControlState();
         applySortFilter();
       });
     }
@@ -214,8 +219,43 @@
       if (state.saveTimer) clearTimeout(state.saveTimer);
       state.saveTimer = setTimeout(() => {
         state.saveTimer = null;
-        savePrefs(page, prefKey, { hidden_columns: state.hidden, column_widths: state.widths, column_order: state.order, sort_key: state.sortKey, sort_dir: state.sortDir }, tokenInputId);
+        savePrefs(page, prefKey, {
+          hidden_columns: state.hidden,
+          column_widths: state.widths,
+          column_order: state.order,
+          sort_key: state.sortKey,
+          sort_dir: state.sortDir,
+          column_filters: state.colFilters || {},
+          global_search: String(state.globalSearch || ""),
+        }, tokenInputId);
       }, 220);
+    }
+
+    function syncControlState() {
+      if (state.localSearchInput) {
+        const nextSearch = String(state.globalSearch || "");
+        if (state.localSearchInput.value !== nextSearch) state.localSearchInput.value = nextSearch;
+      }
+      if (mode === "full" && options.globalSearchInputId) {
+        const globalInput = document.getElementById(options.globalSearchInputId);
+        if (globalInput) {
+          const nextSearch = String(state.globalSearch || "");
+          if (globalInput.value !== nextSearch) globalInput.value = nextSearch;
+        }
+      }
+      if (state.filterRow) {
+        headers.forEach(({ key }) => {
+          const filterTh = state.filterRow.querySelector(`th[data-ngc-col-key="${CSS.escape(key)}"]`);
+          const input = filterTh ? filterTh.querySelector("input") : null;
+          if (!input) return;
+          const nextValue = String((state.colFilters && state.colFilters[key]) || "");
+          if (input.value !== nextValue) input.value = nextValue;
+        });
+      }
+      headers.forEach(({ th, key }) => {
+        const ind = th.querySelector(".ngc-sort-ind");
+        if (ind) ind.textContent = state.sortKey === key ? (state.sortDir === "asc" ? "^" : "v") : "";
+      });
     }
 
     function applyColumnPrefs() {
@@ -311,10 +351,7 @@
       }
       tbody.innerHTML = "";
       rows.forEach((row) => tbody.appendChild(row));
-      headers.forEach(({ th, key }) => {
-        const ind = th.querySelector(".ngc-sort-ind");
-        if (ind) ind.textContent = state.sortKey === key ? (state.sortDir === "asc" ? "^" : "v") : "";
-      });
+      syncControlState();
       applyColumnPrefs();
     }
 
@@ -533,6 +570,7 @@
       if (globalInput) globalInput.value = String(state.globalSearch || globalInput.value || "");
     }
 
+    syncControlState();
     applyColumnPrefs();
     if (mode === "full") applySortFilter();
     state.configured = true;
