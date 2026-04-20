@@ -40,3 +40,11 @@ def render_view_logs_html() -> str:
 
 def render_auth0r_html() -> str:
     return render_template("auth0r.html.j2")
+
+
+def render_discovered_targets_html() -> str:
+    return render_template("discovered_targets.html.j2")
+
+
+def render_discovered_files_html() -> str:
+    return render_template("discovered_files.html.j2")

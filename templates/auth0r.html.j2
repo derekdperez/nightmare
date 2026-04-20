@@ -50,6 +50,7 @@
       <h2>Domains</h2>
       <div class="toolbar">
         <input id="token" type="password" placeholder="Coordinator API token">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;"><input id="completed-only" type="checkbox" style="width:auto"> Only completed</label>
         <button id="refresh-domains">Refresh</button>
       </div>
       <div class="table-wrap">
@@ -249,7 +250,7 @@
   const state = { selectedDomain: "", selectedProfileId: "", selectedIdentityId: "" };
 
   function authHeaders() {
-    const token = String(document.getElementById("token").value || "").trim();
+    const token = String(document.getElementById("token").value || readCookie(TOKEN_COOKIE_NAME) || "").trim();
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
   async function fetchJson(url, options = {}) {
@@ -316,7 +317,8 @@
     state.selectedIdentityId = identity?.id || "";
   }
   async function loadOverview() {
-    const payload = await fetchJson("/api/coord/auth0r/overview");
+    state.completedOnly = Boolean(document.getElementById("completed-only")?.checked);
+    const payload = await fetchJson(`/api/coord/auth0r/overview?completed_only=${state.completedOnly ? "1" : "0"}`);
     const body = document.getElementById("domains-body");
     body.innerHTML = "";
     for (const row of payload.domains || []) {

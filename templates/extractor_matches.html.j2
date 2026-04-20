@@ -48,6 +48,22 @@
     <span id="msg" class="muted"></span>
   </div>
 
+
+  <div class="panel">
+    <h2 style="margin:0 0 8px;">Pattern Management</h2>
+    <div class="toolbar">
+      <button id="loadPatternsBtn">Load Patterns</button>
+      <button class="primary" id="addPatternBtn">Add Pattern</button>
+      <button class="primary" id="savePatternsBtn">Save Patterns</button>
+      <span class="muted" id="patternsMsg"></span>
+    </div>
+    <div class="table-wrap" style="max-height:280px;">
+      <table>
+        <thead><tr><th>Name</th><th>Scope</th><th>Regex</th><th>Description</th><th>Output File</th><th>Importance</th><th>Actions</th></tr></thead>
+        <tbody id="patternRows"></tbody>
+      </table>
+    </div>
+  </div>
   <div id="cards" class="cards"></div>
 
   <div class="panel">

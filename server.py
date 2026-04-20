@@ -56,6 +56,8 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
+    render_discovered_files_html,
+    render_discovered_targets_html,
     render_docker_status_html,
     render_extractor_matches_html,
     render_fuzzing_html,
@@ -63,6 +65,7 @@ from reporting.server_pages import (
     render_workers_html,
 )
 from server_app.store import CoordinatorStore
+from auth0r.profile_store import Auth0rProfileStore
 from logging_app.store import LogStore
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -997,6 +1000,12 @@ def _parse_log_events_from_text(text: str, *, source: dict[str, Any]) -> list[di
                 "machine": str(payload.get("machine") or payload.get("host") or payload.get("worker_id") or machine),
                 "source_id": source_id,
                 "source_type": source_type,
+                "program_name": str(payload.get("program_name") or payload.get("program") or ""),
+                "component_name": str(payload.get("component_name") or payload.get("component") or ""),
+                "class_name": str(payload.get("class_name") or payload.get("class") or ""),
+                "function_name": str(payload.get("function_name") or payload.get("function") or ""),
+                "exception_type": str(payload.get("exception_type") or payload.get("exc_type") or ""),
+                "stacktrace": str(payload.get("stacktrace") or payload.get("exc_info") or ""),
                 "raw_line": line,
             }
         )
@@ -1117,10 +1126,11 @@ def _discover_view_log_file_sources(app_root: Path, output_root: Path) -> list[d
     app_root_resolved = app_root.resolve()
     output_root_resolved = output_root.resolve()
     roots_with_depth = [
-        (output_root_resolved, 6),
-        (app_root_resolved / "output", 6),
-        (app_root_resolved / "logs", 4),
-        (app_root_resolved / "deploy", 3),
+        (output_root_resolved, 8),
+        (app_root_resolved / "output", 8),
+        (app_root_resolved / "logs", 8),
+        (app_root_resolved / "deploy", 6),
+        (app_root_resolved, 4),
     ]
     for root, max_depth in roots_with_depth:
         if len(candidates) >= MAX_VIEW_LOG_FILE_SOURCES:
@@ -2083,6 +2093,63 @@ def _top_extractor_filters(rows: list[dict[str, Any]], *, top_n: int = 10) -> li
     return out
 
 
+
+def _resolve_extractor_rule_paths(app_root: Path) -> tuple[Path, Path]:
+    config_path = (app_root / "config" / "extractor.json").resolve()
+    cfg: dict[str, Any] = {}
+    try:
+        cfg = _read_json_dict(config_path)
+    except Exception:
+        cfg = {}
+    rule_rel = str(cfg.get("wordlist", "resources/wordlists/extractor_list.txt") or "resources/wordlists/extractor_list.txt").strip()
+    js_rel = str(cfg.get("javascript_wordlist", "resources/wordlists/javascript_extractor_list.txt") or "resources/wordlists/javascript_extractor_list.txt").strip()
+    return (app_root / rule_rel).resolve(), (app_root / js_rel).resolve()
+
+
+def _load_extractor_rule_file(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "name": str(item.get("name", "") or "").strip(),
+            "scope": str(item.get("scope", "request_response") or "request_response").strip(),
+            "regex": str(item.get("regex", "") or ""),
+            "description": str(item.get("description", "") or ""),
+            "output_filename": str(item.get("output_filename", "") or ""),
+            "importance_score": _safe_int(item.get("importance_score", 0), 0),
+        })
+    return out
+
+
+def _write_extractor_rule_file(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    clean: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "") or "").strip()
+        regex_value = str(item.get("regex", "") or "")
+        if not name or not regex_value:
+            continue
+        clean.append({
+            "name": name,
+            "scope": str(item.get("scope", "request_response") or "request_response").strip() or "request_response",
+            "regex": regex_value,
+            "description": str(item.get("description", "") or ""),
+            "output_filename": str(item.get("output_filename", "") or ""),
+            "importance_score": _safe_int(item.get("importance_score", 0), 0),
+        })
+    path.write_text(json.dumps(clean, indent=2) + "\n", encoding="utf-8")
+
 def _decode_json_artifact(content: bytes, content_encoding: str) -> dict[str, Any]:
     data = bytes(content or b"")
     if not data:
@@ -2867,8 +2934,137 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/view-logs":
             self._write_text(render_view_logs_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/discovered-targets":
+            self._write_text(render_discovered_targets_html(), content_type="text/html; charset=utf-8")
+            return
+        if path == "/discovered-files":
+            self._write_text(render_discovered_files_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/auth0r":
             self._write_text(render_auth0r_html(), content_type="text/html; charset=utf-8")
+            return
+
+        if path == "/api/coord/discovered-targets":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or [5000])[0], 5000)
+            search_text = str((query.get("q") or [""])[0] or "").strip()
+            try:
+                rows = self.coordinator_store.list_discovered_target_domains(limit=limit, q=search_text)
+            except Exception as exc:
+                self.log_message("list_discovered_target_domains failed: %r", exc)
+                self._write_json({"error": "discovered targets query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json({"generated_at_utc": _iso_now(), "total_domains": len(rows), "domains": rows})
+            return
+        if path == "/api/coord/discovered-target-sitemap":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            try:
+                rows = self.coordinator_store.get_discovered_target_sitemap(root_domain)
+            except Exception as exc:
+                self.log_message("get_discovered_target_sitemap failed: %r", exc)
+                self._write_json({"error": "discovered target sitemap query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json({"generated_at_utc": _iso_now(), "root_domain": root_domain, "rows": rows})
+            return
+        if path == "/api/coord/discovered-files":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or [5000])[0], 5000)
+            self._write_json({"generated_at_utc": _iso_now(), "rows": self.coordinator_store.list_discovered_files(limit=limit)})
+            return
+        if path == "/api/coord/high-value-files":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or [5000])[0], 5000)
+            self._write_json({"generated_at_utc": _iso_now(), "rows": self.coordinator_store.list_high_value_files(limit=limit)})
+            return
+        if path == "/api/coord/discovered-files/download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            artifact_type = str((query.get("artifact_type") or [""])[0] or "").strip().lower()
+            artifact = self.coordinator_store.get_artifact(root_domain, artifact_type) if root_domain and artifact_type else None
+            if artifact is None:
+                self._write_json({"error": "artifact not found"}, status=404)
+                return
+            data = bytes(artifact.get("content", b"") or b"")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{root_domain}.{artifact_type}.bin"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/api/coord/high-value-files/download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            saved_relative = str((query.get("saved_relative") or [""])[0] or "").strip()
+            artifact = self.coordinator_store.get_artifact(root_domain, "nightmare_high_value_zip") if root_domain else None
+            if artifact is None:
+                self._write_json({"error": "artifact not found"}, status=404)
+                return
+            data = bytes(artifact.get("content", b"") or b"")
+            try:
+                with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+                    payload = zf.read(saved_relative)
+            except Exception as exc:
+                self._write_json({"error": "file not found", "detail": str(exc)}, status=404)
+                return
+            name = Path(saved_relative).name or "download.bin"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if path == "/api/coord/auth0r/overview":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            completed_only = str((query.get("completed_only") or ["0"])[0] or "0").strip().lower() in {"1","true","yes","on"}
+            limit = _safe_int((query.get("limit") or [5000])[0], 5000)
+            try:
+                payload = self.coordinator_store.auth0r_overview(completed_only=completed_only, limit=limit)
+            except Exception as exc:
+                self.log_message("auth0r_overview failed: %r", exc)
+                self._write_json({"error": "auth0r overview query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
             return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root, self.coordinator_store)
@@ -2914,6 +3110,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             log_lines = max(1, min(MAX_VIEW_LOG_LINES, _safe_int((query.get("log_lines") or [120])[0], 120)))
             payload = _collect_docker_status(self.app_root, include_logs=include_logs, log_lines=log_lines)
             self._write_json(payload)
+            return
+
+        if path == "/api/coord/auth0r/profiles":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503); return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            auth0r_store = getattr(self.server, "auth0r_store", None)
+            if auth0r_store is None:
+                self._write_json({"error": "auth0r store unavailable"}, status=503); return
+            self._write_json(auth0r_store.get_domain_profiles(root_domain))
+            return
+        if path == "/api/coord/auth0r/results":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503); return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            auth0r_store = getattr(self.server, "auth0r_store", None)
+            if auth0r_store is None:
+                self._write_json({"error": "auth0r store unavailable"}, status=503); return
+            self._write_json(auth0r_store.get_domain_results(root_domain))
+            return
+        if path == "/api/coord/extractor-patterns":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            rules_path, js_rules_path = _resolve_extractor_rule_paths(self.app_root)
+            self._write_json({
+                "generated_at_utc": _iso_now(),
+                "rules_path": _to_repo_relative_path(rules_path) or str(rules_path),
+                "javascript_rules_path": _to_repo_relative_path(js_rules_path) or str(js_rules_path),
+                "rules": _load_extractor_rule_file(rules_path),
+                "javascript_rules": _load_extractor_rule_file(js_rules_path),
+            })
             return
         if path == "/api/coord/log-sources":
             if self.coordinator_store is None:
@@ -3023,10 +3254,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if src is not None:
                     sources = [src]
             else:
-                sources = _collect_view_log_sources_cached(self.app_root, self.output_root)[:20]
+                sources = _collect_view_log_sources_cached(self.app_root, self.output_root)
             events: list[dict[str, Any]] = []
             for source in sources:
-                ok, text, error = _read_log_source_text(source, lines=lines, full=False, app_root=self.app_root)
+                ok, text, error = _read_log_source_text(source, lines=lines, full=bool(source_id and source_id != "__all__"), app_root=self.app_root)
                 if not ok:
                     events.append(
                         {
@@ -3870,6 +4101,79 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json({"ok": ok})
             return
 
+
+        if path == "/api/coord/extractor-patterns/save":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            rules = body.get("rules", [])
+            javascript_rules = body.get("javascript_rules", None)
+            rules_path, js_rules_path = _resolve_extractor_rule_paths(self.app_root)
+            if not isinstance(rules, list):
+                self._write_json({"error": "rules must be a list"}, status=400); return
+            _write_extractor_rule_file(rules_path, rules)
+            if isinstance(javascript_rules, list):
+                _write_extractor_rule_file(js_rules_path, javascript_rules)
+            self._write_json({"ok": True, "rules_path": _to_repo_relative_path(rules_path) or str(rules_path)})
+            return
+        if path == "/api/coord/auth0r/profile/save":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            auth0r_store = getattr(self.server, "auth0r_store", None)
+            if auth0r_store is None:
+                self._write_json({"error": "auth0r store unavailable"}, status=503); return
+            profile_id = auth0r_store.upsert_profile(
+                profile_id=body.get("profile_id"),
+                root_domain=str(body.get("root_domain","") or "").strip().lower(),
+                profile_label=str(body.get("profile_label","") or "").strip() or "Default",
+                enabled=bool(body.get("enabled", True)),
+                allowed_hosts=body.get("allowed_hosts", []),
+                default_headers=body.get("default_headers", {}),
+                replay_policy=body.get("replay_policy", {}),
+            )
+            self._write_json({"ok": True, "profile_id": profile_id}); return
+        if path == "/api/coord/auth0r/profile/delete":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            auth0r_store = getattr(self.server, "auth0r_store", None)
+            if auth0r_store is None:
+                self._write_json({"error": "auth0r store unavailable"}, status=503); return
+            self._write_json({"ok": auth0r_store.delete_profile(str(body.get("profile_id","") or "").strip())}); return
+        if path == "/api/coord/auth0r/identity/save":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            auth0r_store = getattr(self.server, "auth0r_store", None)
+            if auth0r_store is None:
+                self._write_json({"error": "auth0r store unavailable"}, status=503); return
+            identity_id = auth0r_store.upsert_identity(
+                identity_id=body.get("identity_id"),
+                profile_id=str(body.get("profile_id","") or "").strip(),
+                identity_label=str(body.get("identity_label","") or "").strip() or "default",
+                role_label=str(body.get("role_label","") or "").strip(),
+                tenant_label=str(body.get("tenant_label","") or "").strip(),
+                login_strategy=str(body.get("login_strategy","cookie_import") or "cookie_import"),
+                username=str(body.get("username","") or ""),
+                password=str(body.get("password","") or ""),
+                login_url=str(body.get("login_url","") or ""),
+                login_method=str(body.get("login_method","POST") or "POST"),
+                login_username_field=str(body.get("login_username_field","username") or "username"),
+                login_password_field=str(body.get("login_password_field","password") or "password"),
+                login_extra_fields=body.get("login_extra_fields", {}),
+                authenticated_probe_url=str(body.get("authenticated_probe_url","") or ""),
+                logout_url=str(body.get("logout_url","") or ""),
+                custom_headers=body.get("custom_headers", {}),
+                success_markers=body.get("success_markers", []),
+                denial_markers=body.get("denial_markers", []),
+                imported_cookies=body.get("imported_cookies", []),
+                enabled=bool(body.get("enabled", True)),
+            )
+            self._write_json({"ok": True, "identity_id": identity_id}); return
+        if path == "/api/coord/auth0r/identity/delete":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401); return
+            auth0r_store = getattr(self.server, "auth0r_store", None)
+            if auth0r_store is None:
+                self._write_json({"error": "auth0r store unavailable"}, status=503); return
+            self._write_json({"ok": auth0r_store.delete_identity(str(body.get("identity_id","") or "").strip())}); return
         if path == "/api/coord/complete":
             entry_id = str(body.get("entry_id", "") or "").strip()
             worker_id = str(body.get("worker_id", "") or "").strip()
@@ -4430,6 +4734,7 @@ def main(argv: list[str] | None = None) -> int:
         srv.fuzzing_summary_cache = _FozzySummaryCache()  # type: ignore[attr-defined]
         srv.fuzzing_zip_index_cache = _ZipFileIndexCache()  # type: ignore[attr-defined]
         srv.log_store = log_store  # type: ignore[attr-defined]
+        srv.auth0r_store = auth0r_store  # type: ignore[attr-defined]
         return srv
 
     servers: list[tuple[str, ThreadingHTTPServer]] = []

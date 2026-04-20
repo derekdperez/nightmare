@@ -1122,6 +1122,189 @@ LIMIT %s;
         }
 
 
+
+    def list_discovered_target_domains(self, *, limit: int = 5000, q: str = "") -> list[dict[str, Any]]:
+        safe_limit = max(1, min(20000, int(limit or 5000)))
+        needle = str(q or "").strip().lower()
+        sql = """
+WITH target_status AS (
+    SELECT
+      root_domain,
+      COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
+      COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets
+    FROM coordinator_targets
+    GROUP BY root_domain
+),
+domain_rows AS (
+    SELECT
+      sess.root_domain,
+      COALESCE(ts.pending_targets, 0) AS pending_targets,
+      COALESCE(ts.running_targets, 0) AS running_targets,
+      COALESCE(ts.completed_targets, 0) AS completed_targets,
+      COALESCE(ts.failed_targets, 0) AS failed_targets,
+      sess.saved_at_utc,
+      sess.start_url,
+      sess.payload
+    FROM coordinator_sessions sess
+    LEFT JOIN target_status ts ON ts.root_domain = sess.root_domain
+)
+SELECT root_domain, start_url, saved_at_utc, payload,
+       pending_targets, running_targets, completed_targets, failed_targets
+FROM domain_rows
+ORDER BY COALESCE(saved_at_utc, NOW()) DESC, root_domain ASC
+LIMIT %s;
+"""
+        rows_out: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
+            conn.commit()
+        for row in rows:
+            root_domain = str(row[0] or "").strip().lower()
+            if not root_domain:
+                continue
+            if needle and needle not in root_domain:
+                continue
+            payload = row[3] if isinstance(row[3], dict) else {}
+            state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+            discovered_urls = state.get("discovered_urls")
+            discovered_count = len(discovered_urls) if isinstance(discovered_urls, list) else 0
+            if discovered_count <= 0:
+                continue
+            url_inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
+            method_counts: dict[str, int] = {}
+            for _url, record in url_inventory.items():
+                if not isinstance(record, dict):
+                    continue
+                discovered_via = record.get("discovered_via")
+                if isinstance(discovered_via, list):
+                    for method in discovered_via:
+                        key = str(method or "").strip()
+                        if key:
+                            method_counts[key] = int(method_counts.get(key, 0) or 0) + 1
+            if int(row[5] or 0) > 0:
+                status = "running"
+            elif int(row[4] or 0) > 0:
+                status = "pending"
+            elif int(row[7] or 0) > 0 and int(row[6] or 0) == 0:
+                status = "failed"
+            elif int(row[7] or 0) > 0:
+                status = "completed_with_failures"
+            elif int(row[6] or 0) > 0:
+                status = "completed"
+            else:
+                status = "unknown"
+            rows_out.append({
+                "root_domain": root_domain,
+                "start_url": str(row[1] or "").strip(),
+                "saved_at_utc": row[2].isoformat() if row[2] else None,
+                "discovered_urls_count": discovered_count,
+                "method_counts": method_counts,
+                "status": status,
+            })
+        return rows_out
+
+    def get_discovered_target_sitemap(self, root_domain: str) -> list[dict[str, Any]]:
+        rd = str(root_domain or "").strip().lower()
+        if not rd:
+            return []
+        session = self.load_session(rd) or {}
+        state = session.get("state") if isinstance(session.get("state"), dict) else {}
+        link_graph = state.get("link_graph") if isinstance(state.get("link_graph"), dict) else {}
+        inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
+        discovered_urls = state.get("discovered_urls") if isinstance(state.get("discovered_urls"), list) else []
+        rows: list[dict[str, Any]] = []
+        discovered_set = {str(u or "").strip() for u in discovered_urls if str(u or "").strip()}
+        for url in sorted(discovered_set):
+            if rd not in str(urlparse(url).hostname or "").lower():
+                continue
+            record = inventory.get(url) if isinstance(inventory.get(url), dict) else {}
+            discovered_via = [str(v or "").strip() for v in (record.get("discovered_via") if isinstance(record.get("discovered_via"), list) else []) if str(v or "").strip()]
+            parents: list[str] = []
+            for src, targets in link_graph.items():
+                if isinstance(targets, list) and url in {str(t or "").strip() for t in targets}:
+                    src_text = str(src or "").strip()
+                    if src_text:
+                        parents.append(src_text)
+            rows.append({
+                "url": url,
+                "parent_count": len(parents),
+                "parents": sorted(set(parents))[:50],
+                "discovered_via": discovered_via,
+                "status_code": record.get("status_code"),
+                "content_type": str(record.get("content_type", "") or ""),
+            })
+        return rows
+
+    def list_discovered_files(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(20000, int(limit or 5000)))
+        sql = """
+SELECT a.root_domain, a.artifact_type, a.content_size_bytes, a.updated_at_utc,
+       COALESCE(s.start_url, '') AS start_url
+FROM coordinator_artifacts a
+LEFT JOIN coordinator_sessions s ON s.root_domain = a.root_domain
+ORDER BY a.updated_at_utc DESC NULLS LAST, a.root_domain ASC, a.artifact_type ASC
+LIMIT %s
+"""
+        out: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
+            conn.commit()
+        for row in rows:
+            out.append({
+                "discovered_at_utc": row[3].isoformat() if row[3] else None,
+                "root_domain": str(row[0] or "").strip().lower(),
+                "artifact_type": str(row[1] or "").strip(),
+                "file_size": int(row[2] or 0),
+                "source_url": str(row[4] or "").strip(),
+            })
+        return out
+
+    def list_high_value_files(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(20000, int(limit or 5000)))
+        sql = """
+SELECT root_domain, content, content_encoding, updated_at_utc
+FROM coordinator_artifacts
+WHERE artifact_type = 'nightmare_high_value_zip'
+ORDER BY updated_at_utc DESC NULLS LAST, root_domain ASC
+LIMIT %s
+"""
+        out: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
+            conn.commit()
+        for row in rows:
+            root_domain = str(row[0] or "").strip().lower()
+            data = bytes(row[1] or b"")
+            encoding = str(row[2] or "identity")
+            updated_at = row[3].isoformat() if row[3] else None
+            if encoding != "zip" or not data:
+                continue
+            try:
+                with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+                    for name in zf.namelist():
+                        if name.endswith("/") or name.lower().endswith(".json"):
+                            continue
+                        info = zf.getinfo(name)
+                        out.append({
+                            "discovered_at_utc": updated_at,
+                            "root_domain": root_domain,
+                            "saved_relative": name,
+                            "file_size": int(info.file_size or 0),
+                            "source_url": "",
+                        })
+            except Exception:
+                continue
+        return out
+
+
     @staticmethod
     def _normalize_worker_state(state: str) -> str:
         text = str(state or "").strip().lower()
