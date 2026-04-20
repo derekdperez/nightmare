@@ -21,18 +21,11 @@
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
     .stack { max-width: 900px; max-height: 200px; overflow: auto; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #fecaca; background: #fee2e2; color: #991b1b; font-weight: 700; font-size: 11px; }
-    .nav { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
     .muted { color:#64748b; }
   </style>
 </head>
 <body>
-  <div class="nav">
-    <a class="button" href="/">Dashboard</a>
-    <a class="button" href="/workers">Workers</a>
-    <a class="button" href="/docker-status">Docker Status</a>
-    <a class="button" href="/view-logs">View Logs</a>
-    <a class="button" href="/errors">Errors</a>
-  </div>
+  {% include '_navbar.html.j2' %}
   <h1>Errors</h1>
   <div class="meta">Central error feed for application, worker, and system-level events that are forwarded into the log database.</div>
 

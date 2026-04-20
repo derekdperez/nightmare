@@ -1,0 +1,91 @@
+<style>
+  .app-nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    margin: -16px -16px 16px;
+    padding: 0 16px;
+    background: rgba(248, 250, 252, 0.94);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid #cbd5e1;
+  }
+  .app-nav-inner {
+    max-width: 1600px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 58px;
+    flex-wrap: wrap;
+    padding: 10px 0;
+  }
+  .app-nav-brand {
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f172a;
+    text-decoration: none;
+    margin-right: 4px;
+    white-space: nowrap;
+  }
+  .app-nav-links {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .app-nav-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #fff;
+    color: #334155;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 600;
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .app-nav-link:hover {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+  }
+  .app-nav-link.active {
+    background: #0ea5e9;
+    border-color: #0284c7;
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(2, 132, 199, 0.18);
+  }
+  @media (max-width: 900px) {
+    .app-nav { margin-left: -16px; margin-right: -16px; }
+    .app-nav-brand { width: 100%; margin-bottom: 2px; }
+  }
+</style>
+<nav class="app-nav" aria-label="Primary">
+  <div class="app-nav-inner">
+    <a class="app-nav-brand" href="/dashboard">Nightmare</a>
+    <div class="app-nav-links">
+      <a class="app-nav-link" href="/dashboard" data-nav-path="/dashboard">Dashboard</a>
+      <a class="app-nav-link" href="/workers" data-nav-path="/workers">Workers</a>
+      <a class="app-nav-link" href="/database" data-nav-path="/database">Database</a>
+      <a class="app-nav-link" href="/crawl-progress" data-nav-path="/crawl-progress">Crawl Progress</a>
+      <a class="app-nav-link" href="/discovered-targets" data-nav-path="/discovered-targets">Discovered Targets</a>
+      <a class="app-nav-link" href="/discovered-files" data-nav-path="/discovered-files">Discovered Files</a>
+      <a class="app-nav-link" href="/extractor-matches" data-nav-path="/extractor-matches">Extractor Matches</a>
+      <a class="app-nav-link" href="/fuzzing" data-nav-path="/fuzzing">Fuzzing</a>
+      <a class="app-nav-link" href="/docker-status" data-nav-path="/docker-status">Docker Status</a>
+      <a class="app-nav-link" href="/view-logs" data-nav-path="/view-logs">View Logs</a>
+      <a class="app-nav-link" href="/errors" data-nav-path="/errors">Errors</a>
+    </div>
+  </div>
+</nav>
+<script>
+  (() => {
+    const current = window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
+    document.querySelectorAll(".app-nav-link").forEach((link) => {
+      if (link.dataset.navPath === current) link.classList.add("active");
+    });
+  })();
+</script>

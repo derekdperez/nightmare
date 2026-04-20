@@ -40,8 +40,9 @@
   </style>
 </head>
 <body>
+  {% include '_navbar.html.j2' %}
   <h1>View Logs</h1>
-  <div class="meta">Fleet log viewer (central server + worker VMs + AWS console output). Time shown in EST (UTC-5). <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> · <a href="/errors">Errors</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/docker-status">Docker Status</a></div>
+  <div class="meta">Fleet log viewer (central server + worker VMs + AWS console output). Time shown in EST (UTC-5).</div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <select id="sourceSelect"></select>

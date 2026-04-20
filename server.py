@@ -55,6 +55,8 @@ from reporting.server_pages import (
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
+    render_discovered_files_html,
+    render_discovered_targets_html,
     render_docker_status_html,
     render_errors_html,
     render_extractor_matches_html,
@@ -2865,6 +2867,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/crawl-progress":
             self._write_text(render_crawl_progress_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/discovered-targets":
+            self._write_text(render_discovered_targets_html(), content_type="text/html; charset=utf-8")
+            return
+        if path == "/discovered-files":
+            self._write_text(render_discovered_files_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/extractor-matches":
             self._write_text(render_extractor_matches_html(), content_type="text/html; charset=utf-8")
             return
@@ -3264,6 +3272,147 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "total_domains": len(out),
                     "domains": out,
                 }
+            )
+            return
+        if path == "/api/coord/discovered-targets":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = max(1, min(20000, _safe_int((query.get("limit") or [2000])[0], 2000)))
+            search_text = str((query.get("q") or [""])[0] or "").strip().lower()
+            rows = self.coordinator_store.list_discovered_target_domains(limit=limit)
+            if search_text:
+                filtered_rows: list[dict[str, Any]] = []
+                for row in rows:
+                    haystack = " ".join(
+                        [
+                            str(row.get("root_domain") or ""),
+                            str(row.get("start_url") or ""),
+                            str(row.get("discovered_urls_count") or ""),
+                            json.dumps(row.get("method_counts") or {}, sort_keys=True),
+                        ]
+                    ).lower()
+                    if search_text in haystack:
+                        filtered_rows.append(row)
+                rows = filtered_rows
+            self._write_json({"domains": rows})
+            return
+        if path == "/api/coord/discovered-target-sitemap":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            payload = self.coordinator_store.get_discovered_target_sitemap(root_domain)
+            if payload is None:
+                self._write_json({"error": "domain not found or no discovered URLs"}, status=404)
+                return
+            self._write_json(payload)
+            return
+        if path == "/api/coord/discovered-files":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = max(1, min(50000, _safe_int((query.get("limit") or [5000])[0], 5000)))
+            search_text = str((query.get("q") or [""])[0] or "").strip().lower()
+            rows = self.coordinator_store.list_discovered_files(limit=limit)
+            if search_text:
+                rows = [
+                    row for row in rows
+                    if search_text in " ".join(
+                        [
+                            str(row.get("root_domain") or ""),
+                            str(row.get("source_url") or ""),
+                            str(row.get("artifact_type") or ""),
+                            str(row.get("content_size_bytes") or ""),
+                            str(row.get("updated_at_utc") or ""),
+                        ]
+                    ).lower()
+                ]
+            self._write_json({"files": rows})
+            return
+        if path == "/api/coord/high-value-files":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = max(1, min(50000, _safe_int((query.get("limit") or [5000])[0], 5000)))
+            search_text = str((query.get("q") or [""])[0] or "").strip().lower()
+            rows = self.coordinator_store.list_high_value_items(limit=limit)
+            if search_text:
+                rows = [
+                    row for row in rows
+                    if search_text in " ".join(
+                        [
+                            str(row.get("root_domain") or ""),
+                            str(row.get("source_url") or ""),
+                            str(row.get("saved_relative") or ""),
+                            str(row.get("content_size_bytes") or ""),
+                            str(row.get("captured_at_utc") or ""),
+                        ]
+                    ).lower()
+                ]
+            self._write_json({"files": rows})
+            return
+        if path == "/api/coord/discovered-files/download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            artifact_type = str((query.get("artifact_type") or [""])[0] or "").strip().lower()
+            if not root_domain or not artifact_type:
+                self._write_json({"error": "root_domain and artifact_type are required"}, status=400)
+                return
+            artifact = self.coordinator_store.get_artifact(root_domain, artifact_type)
+            if artifact is None:
+                self._write_json({"error": "artifact not found"}, status=404)
+                return
+            download_name = f"{root_domain}_{artifact_type}"
+            content_type = str(artifact.get("content_encoding") or "").strip().lower()
+            if content_type == "gzip":
+                download_name += ".gz"
+            self._write_bytes(
+                bytes(artifact.get("content", b"") or b""),
+                content_type="application/octet-stream",
+                download_name=download_name,
+            )
+            return
+        if path == "/api/coord/high-value-files/download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            saved_relative = str((query.get("saved_relative") or [""])[0] or "").strip()
+            if not root_domain or not saved_relative:
+                self._write_json({"error": "root_domain and saved_relative are required"}, status=400)
+                return
+            item = self.coordinator_store.get_high_value_item_content(root_domain, saved_relative)
+            if item is None:
+                self._write_json({"error": "high value item not found"}, status=404)
+                return
+            self._write_bytes(
+                bytes(item.get("content", b"") or b""),
+                content_type="application/octet-stream",
+                download_name=str(item.get("download_name") or "download.bin"),
             )
             return
         if path == "/api/coord/extractor-matches":

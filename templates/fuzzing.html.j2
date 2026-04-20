@@ -57,8 +57,9 @@
   </style>
 </head>
 <body>
+  {% include '_navbar.html.j2' %}
   <h1>Fuzzing</h1>
-  <div class="meta">Fozzy run findings from coordinator artifacts (anomalies + reflections). <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> · <a href="/errors">Errors</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/docker-status">Docker Status</a> | <a href="/view-logs">View Logs</a></div>
+  <div class="meta">Fozzy run findings from coordinator artifacts (anomalies + reflections).</div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <select id="domainSelect" style="min-width: 320px;"></select>

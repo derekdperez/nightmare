@@ -26,8 +26,9 @@
   </style>
 </head>
 <body>
+  {% include '_navbar.html.j2' %}
   <h1>Docker Status</h1>
-  <div class="meta">Live container status for central + worker VMs (via SSM when configured). <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> · <a href="/errors">Errors</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/view-logs">View Logs</a></div>
+  <div class="meta">Live container status for central + worker VMs (via SSM when configured).</div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="containerSearch" type="text" placeholder="Search containers table">

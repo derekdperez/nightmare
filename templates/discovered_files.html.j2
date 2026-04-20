@@ -31,8 +31,9 @@
   </style>
 </head>
 <body>
+  {% include '_navbar.html.j2' %}
   <h1>Discovered Files</h1>
-  <div class="meta">Artifacts stored in the coordinator database, plus extracted High Value items from crawl output. <a href="/dashboard">Dashboard</a> | <a href="/workers">Workers</a> | <a href="/database">Database</a> | <a href="/crawl-progress">Crawl Progress</a> | <a href="/discovered-targets">Discovered Targets</a> | <a href="/extractor-matches">Extractor Matches</a> | <a href="/fuzzing">Fuzzing</a> | <a href="/docker-status">Docker Status</a> | <a href="/view-logs">View Logs</a></div>
+  <div class="meta">Artifacts stored in the coordinator database, plus extracted High Value items from crawl output.</div>
 
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
@@ -169,7 +170,7 @@
           <td class="col-url">${esc(row.source_url || "")}</td>
           <td class="col-type">${esc(row.artifact_type || "")}</td>
           <td class="col-size" data-raw="${Number(row.content_size_bytes || 0)}">${Number(row.content_size_bytes || 0)}</td>
-          <td class="col-dl"><a href="/api/coord/artifact/download?root_domain=${encodeURIComponent(row.root_domain || "")}&artifact_type=${encodeURIComponent(row.artifact_type || "")}" target="_blank" rel="noopener noreferrer">Download</a></td>
+          <td class="col-dl"><a href="/api/coord/discovered-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&artifact_type=${encodeURIComponent(row.artifact_type || "")}" target="_blank" rel="noopener noreferrer">Download</a></td>
         </tr>
       `).join("");
       renderCards();
@@ -190,7 +191,7 @@
           <td class="col-domain">${esc(row.root_domain || "")}</td>
           <td class="col-url">${esc(row.source_url || "")}</td>
           <td class="col-size" data-raw="${Number(row.content_size_bytes || 0)}">${Number(row.content_size_bytes || 0)}</td>
-          <td class="col-dl"><a href="/api/coord/high-value-item/download?root_domain=${encodeURIComponent(row.root_domain || "")}&saved_relative=${encodeURIComponent(row.saved_relative || "")}" target="_blank" rel="noopener noreferrer">Download</a></td>
+          <td class="col-dl"><a href="/api/coord/high-value-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&saved_relative=${encodeURIComponent(row.saved_relative || "")}" target="_blank" rel="noopener noreferrer">Download</a></td>
         </tr>
       `).join("");
       renderCards();
