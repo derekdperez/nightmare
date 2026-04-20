@@ -218,3 +218,4 @@ __marimo__/
 # Project Specific:
 output/
 *.zip
+packed.json

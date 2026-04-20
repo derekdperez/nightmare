@@ -5506,6 +5506,7 @@ def crawl_domain(
     start_url: str,
     max_pages: int,
     crawl_delay: float,
+    verify_delay: float,
     max_delay: float,
     backoff_factor: float,
     recovery_factor: float,
@@ -5525,6 +5526,8 @@ def crawl_domain(
 
     if crawl_delay <= 0:
         raise ValueError("crawl_delay must be greater than 0 to enforce throttling")
+    if verify_delay <= 0:
+        raise ValueError("verify_delay must be greater than 0 to enforce throttling")
     if max_delay < crawl_delay:
         raise ValueError("max_delay must be >= crawl_delay")
 
@@ -7040,6 +7043,7 @@ def main() -> None:
                 start_url=args.url,
                 max_pages=max_pages,
                 crawl_delay=crawl_delay,
+                verify_delay=verify_delay,
                 max_delay=max_delay,
                 backoff_factor=backoff_factor,
                 recovery_factor=recovery_factor,
