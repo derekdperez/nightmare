@@ -27,6 +27,7 @@ import base64
 import ctypes
 import gzip
 import hashlib
+import uuid
 import html
 import json
 import logging
@@ -41,6 +42,7 @@ import time
 import webbrowser
 from collections import defaultdict
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1339,6 +1341,22 @@ class CrawlState:
     post_request_ids: set[str] = field(default_factory=set)
 
 
+@dataclass
+class NotFoundSimilarityBaseline:
+    origin_url: str
+    probe_urls: list[str]
+    threshold: float
+    response_signatures: list[str]
+    average_probe_similarity: float
+    minimum_probe_average_similarity: float
+    existing_page_similarity: float
+    disabled_reason: str | None = None
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.response_signatures) and not self.disabled_reason
+
+
 DIRECT_DISCOVERY_SOURCES = {
     "internal_link",
     "form_action",
@@ -2505,6 +2523,7 @@ class DomainSpider(scrapy.Spider):
         verbose: bool = False,
         progress: ProgressReporter | None = None,
         wordlist_path_seeds: frozenset[str] | set[str] | None = None,
+        not_found_baseline: NotFoundSimilarityBaseline | None = None,
         *args: Any,
         **kwargs: Any,
     ):
@@ -2526,6 +2545,7 @@ class DomainSpider(scrapy.Spider):
         self.verbose = verbose
         self.progress = progress
         self.wordlist_path_seeds = frozenset(wordlist_path_seeds or ())
+        self.not_found_baseline = not_found_baseline
         self.initial_discovered_url_count = len(self.state.discovered_urls)
         self._last_nonverbose_progress_at = time.monotonic()
         self._last_nonverbose_new_url_count = 0
@@ -3040,6 +3060,22 @@ class DomainSpider(scrapy.Spider):
         record.was_crawled = True
         record.crawl_status_code = response.status
         soft_404_detected, soft_404_reason = detect_soft_not_found_response(response.status, response.body)
+        guessed_request = bool(response.meta.get("wordlist_path_guess"))
+        similarity_not_found = False
+        similarity_score: float | None = None
+        if guessed_request:
+            similarity_not_found, similarity_score = classify_not_found_similarity(
+                status_code=int(response.status),
+                body=response.body,
+                response_url=current_url,
+                baseline=self.not_found_baseline,
+            )
+            if similarity_not_found:
+                soft_404_detected = True
+                soft_404_reason = (
+                    "Matched not-found similarity baseline "
+                    f"(similarity={similarity_score:.3f}, threshold={self.not_found_baseline.threshold:.2f})"
+                )
         record.soft_404_detected = bool(soft_404_detected)
         record.soft_404_reason = soft_404_reason
         if soft_404_detected:
@@ -3335,6 +3371,14 @@ def build_url_inventory(root_domain: str, state: CrawlState) -> dict[str, Any]:
         "entries_raw": all_entries,
         "entries": entries,
     }
+
+
+
+UNCERTAIN_GUESS_DISCOVERY_SOURCES = {"guessed_url", "file_path_wordlist", "ai_probe_request"}
+
+
+def record_is_uncertain_guess(record: UrlInventoryRecord) -> bool:
+    return bool(set(record.discovered_via) & UNCERTAIN_GUESS_DISCOVERY_SOURCES)
 
 
 def was_crawl_requested(record: UrlInventoryRecord) -> bool:
@@ -4898,65 +4942,50 @@ def execute_ai_probe_request(
     method: str,
     timeout_seconds: float,
     request_throttle: RequestThrottle | None = None,
+    not_found_baseline: NotFoundSimilarityBaseline | None = None,
 ) -> dict[str, Any]:
-    if request_throttle is not None:
-        request_throttle.wait()
-
     request_method = (method or "GET").upper()
     if request_method not in {"GET", "HEAD"}:
         request_method = "GET"
-
-    headers = {
-        "User-Agent": "nightmare-ai-probe/1.0",
-        "Accept": "*/*",
-        "Connection": "close",
-    }
-
-    if _nightmare_queue_enabled():
-        result = _get_nightmare_http_queue().submit_and_wait(
-            method=request_method,
-            url=url,
-            headers=headers,
-            timeout_seconds=timeout_seconds,
-            read_limit=HTTP_PROBE_BODY_READ_MAX,
-            metadata={"component": "nightmare", "operation": "execute_ai_probe_request"},
-            max_attempts=int((globals().get("config") or {}).get("http_queue_max_attempts", 5) or 5),
-            wait_timeout_seconds=max(timeout_seconds * 6.0, 30.0),
-        )
-        return _http_probe_result_from_queue_result(
-            result,
-            fallback_url=url,
-            method=request_method,
-            success_note="HTTP probe completed",
-        )
+    if not_found_baseline is not None and request_method == "HEAD":
+        request_method = "GET"
 
     try:
-        response = request_capped(
-            request_method,
-            url,
-            headers=headers,
+        fetched = fetch_http_probe_response(
+            url=url,
+            method=request_method,
             timeout_seconds=timeout_seconds,
-            read_limit=HTTP_PROBE_BODY_READ_MAX,
-            user_agent=headers["User-Agent"],
+            user_agent="nightmare-ai-probe/1.0",
+            request_throttle=request_throttle,
+            queue_operation="execute_ai_probe_request",
         )
-        preview_text = response.body[:1200].decode("utf-8", errors="replace")
+        preview_text = fetched["response_body"][:1200].decode("utf-8", errors="replace")
+        similarity_not_found, similarity_score = classify_not_found_similarity(
+            status_code=int(fetched["status_code"]),
+            body=fetched["response_body"],
+            response_url=str(fetched["response_url"] or url),
+            baseline=not_found_baseline,
+        )
+        note = "HTTP probe completed"
+        ok = int(fetched["status_code"]) < 400
+        if similarity_not_found:
+            ok = False
+            note = (
+                "Response matched the not-found similarity baseline "
+                f"(similarity={similarity_score:.3f}, threshold={not_found_baseline.threshold:.2f})"
+            )
         return {
-            "ok": int(response.status_code) < 400,
-            "status_code": int(response.status_code),
-            "note": "HTTP probe completed",
-            "request": {
-                "method": request_method,
-                "url": url,
-                "headers": headers,
-                "body_base64": "",
-            },
+            "ok": ok,
+            "status_code": int(fetched["status_code"]),
+            "note": note,
+            "request": fetched["request"],
             "response": {
-                "status": int(response.status_code),
-                "url": response.url,
-                "headers": response.headers,
+                "status": int(fetched["status_code"]),
+                "url": fetched["response_url"],
+                "headers": fetched["response_headers"],
                 "body_text_preview": preview_text,
-                **encode_body_for_evidence(response.body),
-                "elapsed_ms": int(response.elapsed_ms or 0),
+                **encode_body_for_evidence(fetched["response_body"]),
+                "elapsed_ms": int(fetched.get("elapsed_ms", 0) or 0),
             },
         }
     except Exception as error:
@@ -4967,7 +4996,11 @@ def execute_ai_probe_request(
             "request": {
                 "method": request_method,
                 "url": url,
-                "headers": headers,
+                "headers": {
+                    "User-Agent": "nightmare-ai-probe/1.0",
+                    "Accept": "*/*",
+                    "Connection": "close",
+                },
                 "body_base64": "",
             },
             "response": None,
@@ -5009,66 +5042,328 @@ def prioritize_probe_requests(
     return selected
 
 
+
+def append_guid_path_segment(url: str) -> str:
+    normalized = normalize_url(url)
+    parsed = urlparse(normalized)
+    path = parsed.path or "/"
+    guid = str(uuid.uuid4())
+    if path.endswith("/"):
+        new_path = f"{path}{guid}"
+    elif path == "/":
+        new_path = f"/{guid}"
+    else:
+        new_path = f"{path}/{guid}"
+    return normalize_url(urlunparse(parsed._replace(path=new_path, params="", query="", fragment="")))
+
+
+def normalize_similarity_text(status_code: int | None, body: bytes | str | None, response_url: str = "") -> str:
+    if isinstance(body, bytes):
+        text = body.decode("utf-8", errors="replace")
+    else:
+        text = str(body or "")
+    text = html.unescape(text).lower()
+    text = re.sub(r"https?://[^\s'\"<>]+", " <url> ", text)
+    text = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        " <guid> ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\b[a-f0-9]{16,}\b", " <hex> ", text, flags=re.I)
+    text = re.sub(r"\b[0-9a-z_-]{24,}\b", " <token> ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    normalized_url = re.sub(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        "<guid>",
+        str(response_url or "").lower(),
+        flags=re.I,
+    )
+    return f"status={int(status_code) if status_code is not None else 0}\nurl={normalized_url}\n{text[:120000]}"
+
+
+def similarity_ratio(left: str, right: str) -> float:
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    return float(SequenceMatcher(None, left, right).ratio())
+
+
+def average_similarity_to_signatures(candidate: str, signatures: list[str]) -> float:
+    if not signatures:
+        return 0.0
+    return sum(similarity_ratio(candidate, signature) for signature in signatures) / float(len(signatures))
+
+
+def fetch_http_probe_response(
+    *,
+    url: str,
+    method: str,
+    timeout_seconds: float,
+    user_agent: str,
+    request_throttle: RequestThrottle | None = None,
+    queue_operation: str,
+) -> dict[str, Any]:
+    if request_throttle is not None:
+        request_throttle.wait()
+
+    request_payload = {
+        "method": method,
+        "url": url,
+        "headers": {
+            "User-Agent": user_agent,
+            "Accept": "*/*",
+            "Connection": "close",
+        },
+        "body_base64": "",
+    }
+
+    if _nightmare_queue_enabled():
+        queued_result = _get_nightmare_http_queue().submit_and_wait(
+            method=method,
+            url=url,
+            headers=request_payload["headers"],
+            timeout_seconds=timeout_seconds,
+            read_limit=HTTP_PROBE_BODY_READ_MAX,
+            metadata={"component": "nightmare", "operation": queue_operation},
+            max_attempts=int((globals().get("config") or {}).get("http_queue_max_attempts", 5) or 5),
+            wait_timeout_seconds=max(timeout_seconds * 6.0, 30.0),
+        )
+        status_code = int(queued_result.get("status_code", 0) or 0)
+        response_dict = queued_result.get("response") if isinstance(queued_result.get("response"), dict) else {}
+        response_body = base64.b64decode(str(response_dict.get("body_base64", "") or ""))
+        response_headers = response_dict.get("headers") if isinstance(response_dict.get("headers"), dict) else {}
+        response_url = str(response_dict.get("url") or url)
+        return {
+            "request": request_payload,
+            "status_code": status_code,
+            "response_body": response_body,
+            "response_headers": response_headers,
+            "response_url": response_url,
+            "elapsed_ms": int(queued_result.get("elapsed_ms", 0) or 0),
+        }
+
+    response = request_capped(
+        method,
+        url,
+        headers=request_payload["headers"],
+        timeout_seconds=timeout_seconds,
+        read_limit=HTTP_PROBE_BODY_READ_MAX,
+        user_agent=user_agent,
+    )
+    return {
+        "request": request_payload,
+        "status_code": int(response.status_code),
+        "response_body": response.body,
+        "response_headers": response.headers,
+        "response_url": response.url,
+        "elapsed_ms": int(response.elapsed_ms or 0),
+    }
+
+
+def build_not_found_similarity_baseline(
+    *,
+    origin_url: str,
+    timeout_seconds: float,
+    request_throttle: RequestThrottle | None = None,
+    sample_count: int = 10,
+    minimum_similarity_threshold: float = 0.90,
+    progress: ProgressReporter | None = None,
+    logger: logging.Logger | None = None,
+) -> NotFoundSimilarityBaseline:
+    log = logger or logging.getLogger("nightmare")
+    probe_urls = [append_guid_path_segment(origin_url) for _ in range(max(1, sample_count))]
+    signatures: list[str] = []
+
+    for probe_index, probe_url in enumerate(probe_urls, start=1):
+        if progress is not None:
+            progress.info(f"Baseline probe {probe_index}/{len(probe_urls)}: {probe_url}")
+        try:
+            response = fetch_http_probe_response(
+                url=probe_url,
+                method="GET",
+                timeout_seconds=timeout_seconds,
+                user_agent="nightmare-not-found-baseline/1.0",
+                request_throttle=request_throttle,
+                queue_operation="build_not_found_similarity_baseline",
+            )
+        except Exception as exc:
+            reason = f"baseline probe failed for {probe_url}: {exc}"
+            log.error("Wordlist similarity baseline disabled: %s", reason)
+            return NotFoundSimilarityBaseline(
+                origin_url=normalize_url(origin_url),
+                probe_urls=probe_urls,
+                threshold=minimum_similarity_threshold,
+                response_signatures=[],
+                average_probe_similarity=0.0,
+                minimum_probe_average_similarity=0.0,
+                existing_page_similarity=0.0,
+                disabled_reason=reason,
+            )
+        signatures.append(
+            normalize_similarity_text(
+                response.get("status_code"),
+                response.get("response_body"),
+                str(response.get("response_url") or probe_url),
+            )
+        )
+
+    pairwise_scores: list[float] = []
+    sample_average_scores: list[float] = []
+    for i, signature in enumerate(signatures):
+        others = [other for j, other in enumerate(signatures) if j != i]
+        if not others:
+            continue
+        sample_avg = average_similarity_to_signatures(signature, others)
+        sample_average_scores.append(sample_avg)
+        pairwise_scores.extend(similarity_ratio(signature, other) for other in others)
+
+    average_probe_similarity = sum(pairwise_scores) / float(len(pairwise_scores)) if pairwise_scores else 1.0
+    minimum_probe_average_similarity = min(sample_average_scores) if sample_average_scores else average_probe_similarity
+    if average_probe_similarity < minimum_similarity_threshold:
+        reason = (
+            f"random not-found responses were only {average_probe_similarity:.3f} similar on average; "
+            "cannot establish a stable baseline"
+        )
+        log.error("Wordlist similarity baseline disabled: %s", reason)
+        return NotFoundSimilarityBaseline(
+            origin_url=normalize_url(origin_url),
+            probe_urls=probe_urls,
+            threshold=minimum_similarity_threshold,
+            response_signatures=signatures,
+            average_probe_similarity=average_probe_similarity,
+            minimum_probe_average_similarity=minimum_probe_average_similarity,
+            existing_page_similarity=0.0,
+            disabled_reason=reason,
+        )
+
+    try:
+        origin_response = fetch_http_probe_response(
+            url=origin_url,
+            method="GET",
+            timeout_seconds=timeout_seconds,
+            user_agent="nightmare-not-found-baseline/1.0",
+            request_throttle=request_throttle,
+            queue_operation="build_not_found_similarity_baseline_origin_check",
+        )
+        origin_signature = normalize_similarity_text(
+            origin_response.get("status_code"),
+            origin_response.get("response_body"),
+            str(origin_response.get("response_url") or origin_url),
+        )
+        existing_similarity = average_similarity_to_signatures(origin_signature, signatures)
+    except Exception as exc:
+        reason = f"origin page comparison failed: {exc}"
+        log.error("Wordlist similarity baseline disabled: %s", reason)
+        return NotFoundSimilarityBaseline(
+            origin_url=normalize_url(origin_url),
+            probe_urls=probe_urls,
+            threshold=minimum_similarity_threshold,
+            response_signatures=signatures,
+            average_probe_similarity=average_probe_similarity,
+            minimum_probe_average_similarity=minimum_probe_average_similarity,
+            existing_page_similarity=0.0,
+            disabled_reason=reason,
+        )
+
+    threshold = minimum_similarity_threshold
+    while existing_similarity >= threshold and threshold < 0.999:
+        threshold = round(threshold + 0.01, 2)
+
+    max_usable_threshold = round(max(0.0, minimum_probe_average_similarity - 0.01), 2)
+    if existing_similarity >= threshold or threshold > max_usable_threshold:
+        reason = (
+            f"origin page stayed too similar to the not-found baseline "
+            f"(origin={existing_similarity:.3f}, baseline_floor={minimum_probe_average_similarity:.3f})"
+        )
+        log.error("Wordlist similarity baseline disabled: %s", reason)
+        return NotFoundSimilarityBaseline(
+            origin_url=normalize_url(origin_url),
+            probe_urls=probe_urls,
+            threshold=threshold,
+            response_signatures=signatures,
+            average_probe_similarity=average_probe_similarity,
+            minimum_probe_average_similarity=minimum_probe_average_similarity,
+            existing_page_similarity=existing_similarity,
+            disabled_reason=reason,
+        )
+
+    if progress is not None:
+        progress.info(
+            "Established not-found similarity baseline: "
+            f"avg_probe_similarity={average_probe_similarity:.3f}, "
+            f"origin_similarity={existing_similarity:.3f}, threshold={threshold:.2f}"
+        )
+    return NotFoundSimilarityBaseline(
+        origin_url=normalize_url(origin_url),
+        probe_urls=probe_urls,
+        threshold=threshold,
+        response_signatures=signatures,
+        average_probe_similarity=average_probe_similarity,
+        minimum_probe_average_similarity=minimum_probe_average_similarity,
+        existing_page_similarity=existing_similarity,
+        disabled_reason=None,
+    )
+
+
+def classify_not_found_similarity(
+    *,
+    status_code: int | None,
+    body: bytes | str | None,
+    response_url: str,
+    baseline: NotFoundSimilarityBaseline | None,
+) -> tuple[bool, float | None]:
+    if baseline is None or not baseline.is_usable:
+        return False, None
+    signature = normalize_similarity_text(status_code, body, response_url)
+    score = average_similarity_to_signatures(signature, baseline.response_signatures)
+    return score >= float(baseline.threshold), score
+
+
 def probe_url_existence(
     url: str,
     timeout_seconds: float,
     request_throttle: RequestThrottle | None = None,
+    not_found_baseline: NotFoundSimilarityBaseline | None = None,
 ) -> dict[str, Any]:
     user_agent = "nightmare-url-validator/1.0"
     last_error: str | None = None
 
     for method in ("HEAD", "GET"):
-        if request_throttle is not None:
-            request_throttle.wait()
-
-        request_payload = {
-            "method": method,
-            "url": url,
-            "headers": {
-                "User-Agent": user_agent,
-                "Accept": "*/*",
-                "Connection": "close",
-            },
-            "body_base64": "",
-        }
-
         try:
-            if _nightmare_queue_enabled():
-                queued_result = _get_nightmare_http_queue().submit_and_wait(
-                    method=method,
-                    url=url,
-                    headers=request_payload["headers"],
-                    timeout_seconds=timeout_seconds,
-                    read_limit=HTTP_PROBE_BODY_READ_MAX,
-                    metadata={"component": "nightmare", "operation": "probe_url_existence"},
-                    max_attempts=int((globals().get("config") or {}).get("http_queue_max_attempts", 5) or 5),
-                    wait_timeout_seconds=max(timeout_seconds * 6.0, 30.0),
-                )
-                status_code = int(queued_result.get("status_code", 0) or 0)
-                response_dict = queued_result.get("response") if isinstance(queued_result.get("response"), dict) else {}
-                response_body = base64.b64decode(str(response_dict.get("body_base64", "") or ""))
-                response_headers = response_dict.get("headers") if isinstance(response_dict.get("headers"), dict) else {}
-                response_url = str(response_dict.get("url") or url)
-            else:
-                response = request_capped(
-                    method,
-                    url,
-                    headers=request_payload["headers"],
-                    timeout_seconds=timeout_seconds,
-                    read_limit=HTTP_PROBE_BODY_READ_MAX,
-                    user_agent=user_agent,
-                )
-                status_code = int(response.status_code)
-                response_body = response.body
-                response_headers = response.headers
-                response_url = response.url
+            fetched = fetch_http_probe_response(
+                url=url,
+                method=method,
+                timeout_seconds=timeout_seconds,
+                user_agent=user_agent,
+                request_throttle=request_throttle,
+                queue_operation="probe_url_existence",
+            )
+            request_payload = fetched["request"]
+            status_code = int(fetched["status_code"])
+            response_body = fetched["response_body"]
+            response_headers = fetched["response_headers"]
+            response_url = str(fetched["response_url"] or url)
 
             if method == "HEAD" and status_code == 200:
                 continue
             soft_404_detected, soft_404_reason = detect_soft_not_found_response(status_code, response_body)
             exists_confirmed = status_code not in configured_not_found_statuses()
             note = "Confirmed by direct HTTP probe"
-            if soft_404_detected:
+            similarity_not_found, similarity_score = classify_not_found_similarity(
+                status_code=status_code,
+                body=response_body,
+                response_url=response_url,
+                baseline=not_found_baseline,
+            )
+            if similarity_not_found:
+                exists_confirmed = False
+                note = (
+                    "Response matched the not-found similarity baseline "
+                    f"(similarity={similarity_score:.3f}, threshold={not_found_baseline.threshold:.2f})"
+                )
+            elif soft_404_detected:
                 exists_confirmed = False
                 note = f"Soft-404 detected in 200 response: {soft_404_reason}" if soft_404_reason else "Soft-404 detected"
             elif status_code in configured_not_found_statuses():
@@ -5314,25 +5609,46 @@ def crawl_domain(
     active_wordlist_path = crawl_wordlist_path or FILE_PATH_WORDLIST_PATH
     state.wordlist_source = format_repo_relative_path(active_wordlist_path)
     wl_from_file = load_path_wordlist_seed_urls(normalized_start_url, root_domain, active_wordlist_path)
-    state.wordlist_path_seeds = sorted(set(state.wordlist_path_seeds) | set(wl_from_file))
+    not_found_baseline: NotFoundSimilarityBaseline | None = None
     if wl_from_file:
-        for guessed_url in wl_from_file:
-            register_url_discovery(
-                state=state,
-                url=guessed_url,
-                source_type="file_path_wordlist",
-                discovered_from=state.wordlist_source,
-                evidence_file="",
-            )
-        seen_seed = set(start_urls)
-        for u in wl_from_file:
-            if u not in seen_seed:
-                start_urls.append(u)
-                seen_seed.add(u)
-        if progress is not None:
-            progress.info(
-                f"Appended {len(wl_from_file)} URL(s) from {state.wordlist_source} as crawl seeds "
-                f"({len(state.wordlist_path_seeds)} unique paths tracked)"
+        baseline_throttle = RequestThrottle(interval_seconds=verify_delay)
+        not_found_baseline = build_not_found_similarity_baseline(
+            origin_url=normalized_start_url,
+            timeout_seconds=verify_timeout,
+            request_throttle=baseline_throttle,
+            progress=progress,
+            logger=logging.getLogger("nightmare"),
+        )
+        if not_found_baseline.is_usable:
+            state.wordlist_path_seeds = sorted(set(state.wordlist_path_seeds) | set(wl_from_file))
+            for guessed_url in wl_from_file:
+                register_url_discovery(
+                    state=state,
+                    url=guessed_url,
+                    source_type="file_path_wordlist",
+                    discovered_from=state.wordlist_source,
+                    evidence_file="",
+                )
+            seen_seed = set(start_urls)
+            for u in wl_from_file:
+                if u not in seen_seed:
+                    start_urls.append(u)
+                    seen_seed.add(u)
+            if progress is not None:
+                progress.info(
+                    f"Appended {len(wl_from_file)} URL(s) from {state.wordlist_source} as crawl seeds "
+                    f"({len(state.wordlist_path_seeds)} unique paths tracked)"
+                )
+        else:
+            if progress is not None:
+                progress.info(
+                    "Skipping wordlist spidering because the not-found similarity baseline "
+                    f"was not reliable: {not_found_baseline.disabled_reason}"
+                )
+            logging.getLogger("nightmare").error(
+                "Wordlist spidering disabled for %s: %s",
+                normalized_start_url,
+                not_found_baseline.disabled_reason,
             )
     elif progress is not None and not active_wordlist_path.is_file():
         progress.info(f"No path wordlist crawl seeds: missing file {active_wordlist_path}")
@@ -5405,6 +5721,7 @@ def crawl_domain(
         verbose=verbose,
         progress=progress,
         wordlist_path_seeds=wordlist_seed_set,
+        not_found_baseline=not_found_baseline,
     )
     logging.getLogger("nightmare").info(
         "Scrapy reactor starting - Ctrl+C stops the crawl. "
@@ -6976,6 +7293,7 @@ def main() -> None:
                         url=url,
                         timeout_seconds=verify_timeout,
                         request_throttle=verify_throttle,
+                        not_found_baseline=not_found_baseline if record_is_uncertain_guess(ensure_inventory_record(state, url)) else None,
                     )
             except KeyboardInterrupt:
                 interrupted = True
