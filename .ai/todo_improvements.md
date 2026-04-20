@@ -11,3 +11,5 @@
 - Add pagination + server-side source selection caching for `/api/coord/log-events` when querying `source_id=__all__` on very large fleets.
 - Add explicit UI diagnostics panel on View Logs for SSM/EC2 permission failures and target-filter mismatches.
 - Add optional asynchronous ingestion worker for log DB writes to decouple source polling latency from API response times.
+
+- Fix `nightmare.py` undefined variable path (`verify_timeout` in `crawl_domain`) and add a regression test so coordinator runs stop failing with repeated `NameError`.

@@ -135,3 +135,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - UI controls boundary consolidation:
   - Fuzzing table now delegates column hide/show/reorder and width persistence to shared grid-controls module.
   - Shared grid-controls now exposes consistent reorder behavior regardless of table mode, reducing page-specific divergence and maintenance.
+
+- Worker subprocess error propagation boundary refinement:
+  - `coordinator_app/runtime.py` now owns log-tail based subprocess failure summarization (`summarize_subprocess_failure`).
+  - `coordinator.py` worker loops consume that helper so completion APIs and worker lifecycle logs carry root-cause detail instead of generic exit codes.

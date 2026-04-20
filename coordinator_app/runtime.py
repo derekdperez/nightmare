@@ -79,6 +79,57 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _read_text_tail(path: Path, *, max_bytes: int = 65536) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size <= 0:
+                return ""
+            start = max(0, size - int(max_bytes))
+            handle.seek(start, os.SEEK_SET)
+            return handle.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_failure_detail(log_text: str) -> str:
+    lines = [line.strip() for line in str(log_text or "").splitlines()]
+    if not lines:
+        return ""
+
+    interesting: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if line.startswith("=== RUN"):
+            continue
+        if line.startswith("$ "):
+            continue
+        interesting.append(line)
+    if not interesting:
+        return ""
+
+    for line in reversed(interesting):
+        lower = line.lower()
+        if "traceback" in lower:
+            continue
+        if "error" in lower or "exception" in lower:
+            return line
+    return interesting[-1]
+
+
+def summarize_subprocess_failure(process_name: str, exit_code: int, log_path: Path, *, max_detail_chars: int = 400) -> str:
+    base = f"{str(process_name or 'subprocess').strip()} exit code {int(exit_code)}"
+    detail = _extract_failure_detail(_read_text_tail(log_path))
+    if not detail:
+        return base
+    detail = detail.strip().replace("\r", " ").replace("\n", " ")
+    if max_detail_chars > 0 and len(detail) > max_detail_chars:
+        detail = f"{detail[: max_detail_chars - 3].rstrip()}..."
+    return f"{base}; {detail}"
+
+
 class CoordinatorClient:
     def __init__(self, base_url: str, token: str, timeout_seconds: float = 20.0, verify_ssl: bool = True):
         self.base_url = base_url.rstrip("/")

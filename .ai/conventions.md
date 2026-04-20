@@ -275,3 +275,6 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Target registration convention: fleet re-registration from `register_targets.py` is authoritative full-replace, not additive upsert; API payload includes `replace_existing=true` and store truncates `coordinator_targets` before insert.
 - Column-configuration convention: all page column modals must use shared `templates/_grid_controls.html.j2` (`NightmareGridControls`) rather than page-local implementations.
 - Grid-controls convention update: column reorder controls are enabled for every mode (`full` and `columnsOnly`) unless explicitly disabled via `allowReorder: false`.
+
+- Subprocess failure reporting convention: when a stage subprocess returns non-zero, build the `error` payload from log-tail evidence (not exit code alone) using `summarize_subprocess_failure(stage_name, exit_code, log_path)`.
+- Coordinator completion payload convention: `/api/coord/complete` and `/api/coord/stage/complete` should receive concise, actionable error text that includes the concrete exception line when available (for example `NameError: ...`).

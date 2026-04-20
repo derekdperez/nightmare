@@ -33,7 +33,7 @@ from http_client import request_json
 from output_cleanup import FLEET_GEN_APPLIED_FILENAME, clear_output_root_children
 from nightmare_shared.config import CoordinatorSettings, atomic_write_json, load_env_file_into_os, merged_value, read_json_dict, safe_float, safe_int
 from nightmare_shared.logging_utils import configure_logging, get_logger
-from coordinator_app.runtime import CoordinatorClient, CoordinatorConfig, SessionUploader, LeaseHeartbeat, _zip_directory_bytes, _unzip_bytes_to_directory, run_subprocess, load_config
+from coordinator_app.runtime import CoordinatorClient, CoordinatorConfig, SessionUploader, LeaseHeartbeat, _zip_directory_bytes, _unzip_bytes_to_directory, run_subprocess, load_config, summarize_subprocess_failure
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH_DEFAULT = BASE_DIR / "config" / "coordinator.json"
@@ -491,7 +491,7 @@ class DistributedCoordinator:
                 try:
                     exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
-                        err_text = f"nightmare exit code {exit_code}"
+                        err_text = summarize_subprocess_failure("nightmare", exit_code, log_path)
                     self.logger.info(
                         "nightmare_subprocess_complete",
                         worker_id=worker_id,
@@ -692,7 +692,7 @@ class DistributedCoordinator:
                 try:
                     exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
-                        err_text = f"fozzy exit code {exit_code}"
+                        err_text = summarize_subprocess_failure("fozzy", exit_code, log_path)
                     self.logger.info(
                         "fozzy_subprocess_complete",
                         worker_id=worker_id,
@@ -850,7 +850,7 @@ class DistributedCoordinator:
                 try:
                     exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
-                        err_text = f"auth0r exit code {exit_code}"
+                        err_text = summarize_subprocess_failure("auth0r", exit_code, log_path)
                     self.logger.info(
                         "auth0r_subprocess_complete",
                         worker_id=worker_id,
@@ -977,7 +977,7 @@ class DistributedCoordinator:
                 try:
                     exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
-                        err_text = f"extractor exit code {exit_code}"
+                        err_text = summarize_subprocess_failure("extractor", exit_code, log_path)
                     self.logger.info(
                         "extractor_subprocess_complete",
                         worker_id=worker_id,

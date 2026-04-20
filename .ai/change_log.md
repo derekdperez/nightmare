@@ -1000,3 +1000,17 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `python -m pytest -q tests/test_refactor_modules.py tests/test_reporting_and_store_helpers.py` -> 39 passed.
   - `python -m pytest -q tests/test_server_auth_cookie.py tests/test_client_and_cli_unit.py` -> 21 passed.
 - Why: ensure one column-config code path and consistent hide/show/reorder behavior across all pages.
+
+## 2026-04-20
+
+- Improved coordinator subprocess failure reporting so non-zero exits include real error details instead of only `"<stage> exit code N"`.
+- Added `summarize_subprocess_failure(...)` in `coordinator_app/runtime.py`:
+  - reads tail of per-domain subprocess log file,
+  - extracts the most relevant error/exception line,
+  - returns a concise message like `nightmare exit code 1; NameError: ...`.
+- Updated coordinator stage loops in `coordinator.py` (`nightmare`, `fozzy`, `auth0r`, `extractor`) to use the new helper for non-zero subprocess exits.
+- Added unit coverage in `tests/test_runtime_unit.py` for:
+  - extracting an exception line from log content,
+  - fallback behavior when no log file exists.
+- Validation: `pytest tests/test_runtime_unit.py -q` -> 11 passed.
+- Why: operator logs and `/api/coord/complete` payloads were showing only exit codes, which hid root-cause exceptions that were already present in stage log artifacts.

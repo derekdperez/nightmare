@@ -11,3 +11,5 @@
 - Validate VPC/Security Group rules for the log DB VM: inbound TCP/5432 must allow traffic from the central server security group/private subnet, otherwise central startup will fail with required log DB connectivity errors.
 - Worker VM full-log downloads now avoid explicit byte caps in app code, but AWS SSM command-plugin output may still impose service-side size limits. Confirm whether we should switch remote log-download path to SSM output-to-S3 (or chunked retrieval) for guaranteed unbounded exports.
 - Register-target full-replace currently truncates only `coordinator_targets`. Confirm whether stage/session/artifact tables should also be cleaned when replacing the target list to avoid stale non-target rows for removed domains.
+
+- Repeated runtime failure still unresolved in crawler logic: `nightmare.py` crash `NameError: name 'verify_timeout' is not defined` (seen in uploaded nightmare logs, around `crawl_domain` path). This coordinator patch improves reporting but does not fix the underlying crawler bug.

@@ -85,6 +85,32 @@ def test_run_subprocess_writes_log_and_returns_exit_code(tmp_path: Path):
     assert "hello" in text
 
 
+def test_summarize_subprocess_failure_uses_error_line_from_log(tmp_path: Path):
+    log_path = tmp_path / "logs" / "run.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        "\n".join(
+            [
+                "=== RUN 2026-01-01 00:00:00 ===",
+                "$ python nightmare.py https://example.com/",
+                "Traceback (most recent call last):",
+                "  File \"/app/nightmare.py\", line 5620, in crawl_domain",
+                "NameError: name 'verify_timeout' is not defined",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    message = runtime.summarize_subprocess_failure("nightmare", 1, log_path)
+    assert message == "nightmare exit code 1; NameError: name 'verify_timeout' is not defined"
+
+
+def test_summarize_subprocess_failure_falls_back_without_log(tmp_path: Path):
+    missing_log_path = tmp_path / "logs" / "missing.log"
+    message = runtime.summarize_subprocess_failure("nightmare", 1, missing_log_path)
+    assert message == "nightmare exit code 1"
+
+
 def test_coordinator_client_upload_and_download_artifact(monkeypatch):
     client = runtime.CoordinatorClient("https://coord.example.com", " token ")
     calls: list[tuple[str, str, dict[str, object] | None]] = []
