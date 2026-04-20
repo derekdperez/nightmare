@@ -48,3 +48,7 @@ def render_discovered_targets_html() -> str:
 
 def render_discovered_files_html() -> str:
     return render_template("discovered_files.html.j2")
+
+
+def render_auth0r_html() -> str:
+    return render_template("auth0r.html.j2")

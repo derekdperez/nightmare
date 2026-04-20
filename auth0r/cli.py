@@ -126,7 +126,11 @@ def run(
     max_seed_actions: int,
     timeout_seconds: float,
 ) -> int:
-    store = Auth0rProfileStore(database_url)
+    try:
+        store = Auth0rProfileStore(database_url)
+    except Exception as exc:
+        write_summary(summary_path, {"root_domain": root_domain, "status": "failed", "reason": "profile_store_init_failed", "error": str(exc)})
+        return 2
     identities = store.list_enabled_identities(root_domain)
     if not identities:
         write_summary(summary_path, {"root_domain": root_domain, "status": "skipped", "reason": "no_enabled_auth_profiles"})
@@ -320,7 +324,7 @@ def parse_args(argv=None):
     p.add_argument("root_domain")
     p.add_argument("--nightmare-session", required=True)
     p.add_argument("--summary-json", required=True)
-    p.add_argument("--database-url", default=os.getenv("DATABASE_URL", ""))
+    p.add_argument("--database-url", default=(os.getenv("AUTH0R_DATABASE_URL", "") or os.getenv("DATABASE_URL", "") or os.getenv("COORDINATOR_DATABASE_URL", "")))
     p.add_argument("--min-delay-seconds", type=float, default=0.25)
     p.add_argument("--max-seed-actions", type=int, default=200)
     p.add_argument("--timeout-seconds", type=float, default=20.0)

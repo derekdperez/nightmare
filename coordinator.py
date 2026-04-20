@@ -827,8 +827,9 @@ class DistributedCoordinator:
                     "--summary-json",
                     str(paths["auth0r_summary_json"]),
                 ]
-                if os.getenv("DATABASE_URL"):
-                    cmd.extend(["--database-url", os.getenv("DATABASE_URL", "")])
+                auth0r_database_url = os.getenv("AUTH0R_DATABASE_URL", "") or os.getenv("DATABASE_URL", "") or os.getenv("COORDINATOR_DATABASE_URL", "")
+                if auth0r_database_url:
+                    cmd.extend(["--database-url", auth0r_database_url])
                 if not self.client.verify_ssl:
                     cmd.append("--insecure-tls")
                 auth0r_cfg = _read_json_dict(self.cfg.auth0r_config)

@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Auth0r</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1, h2, h3 { margin: 0 0 10px; }
+    .meta { margin-bottom: 12px; color: #475569; font-size: 13px; }
+    .layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+    .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 12px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0 14px; flex-wrap: wrap; }
+    input, select, textarea { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #94a3b8; border-radius: 7px; background: #fff; }
+    textarea { min-height: 84px; resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
+    label { display: block; font-size: 12px; color: #334155; margin: 8px 0 4px; font-weight: 600; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: white; }
+    button.danger { background: #ef4444; border-color: #dc2626; color: white; }
+    .table-wrap { max-height: 360px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
+    th { background: #e2e8f0; position: sticky; top: 0; z-index: 4; }
+    tr.selectable:hover { background: #eff6ff; cursor: pointer; }
+    tr.selected { background: #dbeafe; }
+    .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px; }
+    .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+    .k { font-size: 12px; color: #64748b; }
+    .v { font-size: 21px; font-weight: 700; margin-top: 4px; word-break: break-word; }
+    .muted { color: #64748b; font-size: 12px; }
+    .code { font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+    .subgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .pill { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; border: 1px solid #cbd5e1; }
+    .pill.good { background: #dcfce7; border-color: #86efac; color: #166534; }
+    .pill.bad { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+    @media (max-width: 1100px) {
+      .layout, .subgrid, .row, .row-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  {% include '_navbar.html.j2' %}
+  <h1>Auth0r</h1>
+  <div class="meta">Manage authenticated testing profiles and review Auth0r runtime sessions, replay attempts, and findings for each domain.</div>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>Domains</h2>
+      <div class="toolbar">
+        <input id="token" type="password" placeholder="Coordinator API token">
+        <button id="refresh-domains">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table id="domains-table">
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Profiles</th>
+              <th>Identities</th>
+              <th>Findings</th>
+            </tr>
+          </thead>
+          <tbody id="domains-body"></tbody>
+        </table>
+      </div>
+      <div class="muted" style="margin-top:10px">Select a domain to manage profiles and view Auth0r results.</div>
+    </section>
+
+    <section>
+      <div class="panel">
+        <h2 id="selected-domain-heading">No domain selected</h2>
+        <div class="muted" id="selected-domain-subtitle">Choose a domain from the left.</div>
+      </div>
+
+      <div class="cards" id="summary-cards"></div>
+
+      <div class="panel">
+        <h2>Profile</h2>
+        <div class="row">
+          <div>
+            <label>Profile ID</label>
+            <input id="profile-id" placeholder="leave blank to create">
+          </div>
+          <div>
+            <label>Profile Label</label>
+            <input id="profile-label" placeholder="Default">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Root Domain</label>
+            <input id="profile-root-domain" placeholder="example.com">
+          </div>
+          <div>
+            <label>Enabled</label>
+            <select id="profile-enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+          </div>
+        </div>
+        <label>Allowed Hosts (one per line)</label>
+        <textarea id="profile-allowed-hosts" placeholder="app.example.com&#10;api.example.com"></textarea>
+        <label>Replay Policy JSON</label>
+        <textarea id="profile-replay-policy" placeholder='{"read_only_mode": false, "allowed_methods": ["GET","POST"]}'></textarea>
+        <label>Default Headers JSON</label>
+        <textarea id="profile-default-headers" placeholder='{"x-tenant": "test"}'></textarea>
+        <div class="toolbar">
+          <button class="primary" id="save-profile">Save Profile</button>
+          <button class="danger" id="delete-profile">Delete Profile</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <h2>Identity</h2>
+        <div class="row-3">
+          <div>
+            <label>Identity ID</label>
+            <input id="identity-id" placeholder="leave blank to create">
+          </div>
+          <div>
+            <label>Profile ID</label>
+            <input id="identity-profile-id" placeholder="profile id">
+          </div>
+          <div>
+            <label>Enabled</label>
+            <select id="identity-enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+          </div>
+        </div>
+        <div class="row-3">
+          <div>
+            <label>Identity Label</label>
+            <input id="identity-label" placeholder="qa-admin">
+          </div>
+          <div>
+            <label>Role Label</label>
+            <input id="identity-role-label" placeholder="admin">
+          </div>
+          <div>
+            <label>Tenant Label</label>
+            <input id="identity-tenant-label" placeholder="tenant-a">
+          </div>
+        </div>
+        <div class="row-3">
+          <div>
+            <label>Login Strategy</label>
+            <select id="identity-login-strategy">
+              <option value="cookie_import">cookie_import</option>
+              <option value="html_form">html_form</option>
+              <option value="json_api">json_api</option>
+            </select>
+          </div>
+          <div>
+            <label>Username</label>
+            <input id="identity-username" placeholder="tester@example.com">
+          </div>
+          <div>
+            <label>Password</label>
+            <input id="identity-password" type="password" placeholder="leave blank to keep existing">
+          </div>
+        </div>
+        <div class="row-3">
+          <div>
+            <label>Login URL</label>
+            <input id="identity-login-url" placeholder="https://app.example.com/login">
+          </div>
+          <div>
+            <label>Login Method</label>
+            <input id="identity-login-method" value="POST">
+          </div>
+          <div>
+            <label>Authenticated Probe URL</label>
+            <input id="identity-auth-probe-url" placeholder="https://app.example.com/account">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Username Field</label>
+            <input id="identity-username-field" value="username">
+          </div>
+          <div>
+            <label>Password Field</label>
+            <input id="identity-password-field" value="password">
+          </div>
+        </div>
+        <label>Logout URL</label>
+        <input id="identity-logout-url" placeholder="https://app.example.com/logout">
+        <label>Login Extra Fields JSON</label>
+        <textarea id="identity-login-extra-fields" placeholder='{"csrf_token":"..."}'></textarea>
+        <label>Custom Headers JSON</label>
+        <textarea id="identity-custom-headers" placeholder='{"x-test-user":"qa-admin"}'></textarea>
+        <label>Success Markers (one text marker per line)</label>
+        <textarea id="identity-success-markers" placeholder="Logout&#10;My Account"></textarea>
+        <label>Denial Markers (one text marker per line)</label>
+        <textarea id="identity-denial-markers" placeholder="Access denied&#10;Sign in"></textarea>
+        <label>Imported Cookies JSON</label>
+        <textarea id="identity-imported-cookies" placeholder='[{"name":"session","value":"...","domain":"app.example.com","path":"/"}]'></textarea>
+        <div class="toolbar">
+          <button class="primary" id="save-identity">Save Identity</button>
+          <button class="danger" id="delete-identity">Delete Identity</button>
+        </div>
+      </div>
+
+      <div class="subgrid">
+        <div class="panel">
+          <h2>Profiles & Identities</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Type</th><th>Label</th><th>Details</th><th>Actions</th></tr></thead>
+              <tbody id="profiles-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Recent Sessions</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>When</th><th>Identity</th><th>Source</th><th>Gen</th><th>Verified</th></tr></thead>
+              <tbody id="sessions-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Recent Findings</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>When</th><th>Type</th><th>Severity</th><th>Identity</th><th>Title</th></tr></thead>
+              <tbody id="findings-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Recent Replays</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>When</th><th>Identity</th><th>Request</th><th>Variant</th><th>Status</th><th>Suspicious</th></tr></thead>
+              <tbody id="replays-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+<script>
+(() => {
+  const state = { selectedDomain: "", selectedProfileId: "", selectedIdentityId: "" };
+
+  function authHeaders() {
+    const token = String(document.getElementById("token").value || "").trim();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+  async function fetchJson(url, options = {}) {
+    const rsp = await fetch(url, {
+      cache: "no-store",
+      ...options,
+      headers: { ...(options.headers || {}), ...authHeaders() },
+    });
+    const payload = await rsp.json().catch(() => ({}));
+    if (!rsp.ok) throw new Error(payload.detail || payload.error || `HTTP ${rsp.status}`);
+    return payload;
+  }
+  function parseJson(text, fallback) {
+    try { return text.trim() ? JSON.parse(text) : fallback; } catch (_) { return fallback; }
+  }
+  function splitLines(text) {
+    return String(text || "").split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
+  }
+  function setSummaryCards(counts = {}) {
+    const cards = [
+      ["Sessions", counts.session_count || 0],
+      ["Verified Sessions", counts.verified_session_count || 0],
+      ["Actions", counts.action_count || 0],
+      ["Replays", counts.replay_count || 0],
+      ["Suspicious Replays", counts.suspicious_replay_count || 0],
+      ["Findings", counts.finding_count || 0],
+      ["Authorization", counts.authorization_finding_count || 0],
+      ["Lifecycle", counts.lifecycle_finding_count || 0],
+    ];
+    document.getElementById("summary-cards").innerHTML = cards.map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  }
+  function fillProfileForm(profile) {
+    document.getElementById("profile-id").value = profile?.id || "";
+    document.getElementById("profile-label").value = profile?.profile_label || "";
+    document.getElementById("profile-root-domain").value = profile?.root_domain || state.selectedDomain || "";
+    document.getElementById("profile-enabled").value = String(profile?.enabled ?? true);
+    document.getElementById("profile-allowed-hosts").value = (profile?.allowed_hosts || []).join("\n");
+    document.getElementById("profile-replay-policy").value = JSON.stringify(profile?.replay_policy || {}, null, 2);
+    document.getElementById("profile-default-headers").value = JSON.stringify(profile?.default_headers || {}, null, 2);
+    state.selectedProfileId = profile?.id || "";
+    if (profile?.id) document.getElementById("identity-profile-id").value = profile.id;
+  }
+  function fillIdentityForm(identity) {
+    document.getElementById("identity-id").value = identity?.id || "";
+    document.getElementById("identity-profile-id").value = identity?.profile_id || state.selectedProfileId || "";
+    document.getElementById("identity-enabled").value = String(identity?.enabled ?? true);
+    document.getElementById("identity-label").value = identity?.identity_label || "";
+    document.getElementById("identity-role-label").value = identity?.role_label || "";
+    document.getElementById("identity-tenant-label").value = identity?.tenant_label || "";
+    document.getElementById("identity-login-strategy").value = identity?.login_strategy || "cookie_import";
+    document.getElementById("identity-username").value = identity?.username || "";
+    document.getElementById("identity-password").value = "";
+    document.getElementById("identity-login-url").value = identity?.login_url || "";
+    document.getElementById("identity-login-method").value = identity?.login_method || "POST";
+    document.getElementById("identity-auth-probe-url").value = identity?.authenticated_probe_url || "";
+    document.getElementById("identity-username-field").value = identity?.login_username_field || "username";
+    document.getElementById("identity-password-field").value = identity?.login_password_field || "password";
+    document.getElementById("identity-logout-url").value = identity?.logout_url || "";
+    document.getElementById("identity-login-extra-fields").value = JSON.stringify(identity?.login_extra_fields || {}, null, 2);
+    document.getElementById("identity-custom-headers").value = JSON.stringify(identity?.custom_headers || {}, null, 2);
+    document.getElementById("identity-success-markers").value = (identity?.success_markers || []).map((m) => m.value || "").join("\n");
+    document.getElementById("identity-denial-markers").value = (identity?.denial_markers || []).map((m) => m.value || "").join("\n");
+    document.getElementById("identity-imported-cookies").value = JSON.stringify(identity?.imported_cookies || [], null, 2);
+    state.selectedIdentityId = identity?.id || "";
+  }
+  async function loadOverview() {
+    const payload = await fetchJson("/api/coord/auth0r/overview");
+    const body = document.getElementById("domains-body");
+    body.innerHTML = "";
+    for (const row of payload.domains || []) {
+      const tr = document.createElement("tr");
+      tr.className = "selectable" + (row.root_domain === state.selectedDomain ? " selected" : "");
+      tr.innerHTML = `
+        <td>${row.root_domain || ""}</td>
+        <td>${row.profile_count || 0}</td>
+        <td>${row.identity_count || 0}</td>
+        <td>${(row.authorization_findings || 0) + (row.lifecycle_findings || 0)}</td>`;
+      tr.addEventListener("click", () => selectDomain(row.root_domain));
+      body.appendChild(tr);
+    }
+    if (!state.selectedDomain && payload.domains && payload.domains[0]) {
+      await selectDomain(payload.domains[0].root_domain);
+    }
+  }
+  async function selectDomain(rootDomain) {
+    state.selectedDomain = rootDomain || "";
+    document.getElementById("selected-domain-heading").textContent = state.selectedDomain || "No domain selected";
+    document.getElementById("selected-domain-subtitle").textContent = state.selectedDomain ? `Auth0r configuration and results for ${state.selectedDomain}` : "Choose a domain from the left.";
+    document.getElementById("profile-root-domain").value = state.selectedDomain;
+    await Promise.all([loadProfiles(), loadResults(), loadOverview()]);
+  }
+  async function loadProfiles() {
+    if (!state.selectedDomain) return;
+    const payload = await fetchJson(`/api/coord/auth0r/profiles?root_domain=${encodeURIComponent(state.selectedDomain)}`);
+    const body = document.getElementById("profiles-body");
+    body.innerHTML = "";
+    const profiles = payload.profiles || [];
+    if (!profiles.length) {
+      fillProfileForm({ root_domain: state.selectedDomain, enabled: true });
+      fillIdentityForm({ profile_id: "" });
+      body.innerHTML = '<tr><td colspan="4" class="muted">No profiles configured yet for this domain.</td></tr>';
+      return;
+    }
+    let firstProfile = profiles[0];
+    fillProfileForm(firstProfile);
+    if (firstProfile.identities && firstProfile.identities[0]) fillIdentityForm(firstProfile.identities[0]);
+    for (const profile of profiles) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>Profile</td>
+        <td>${profile.profile_label || ""}</td>
+        <td class="code">${(profile.allowed_hosts || []).join("\n")}</td>
+        <td><button data-profile="${profile.id}">Load</button></td>`;
+      tr.querySelector("button").addEventListener("click", () => fillProfileForm(profile));
+      body.appendChild(tr);
+      for (const identity of profile.identities || []) {
+        const tri = document.createElement("tr");
+        tri.innerHTML = `
+          <td>Identity</td>
+          <td>${identity.identity_label || ""}</td>
+          <td class="code">${identity.login_strategy || ""}\n${identity.username || ""}\nrole=${identity.role_label || ""}\ntenant=${identity.tenant_label || ""}</td>
+          <td><button data-identity="${identity.id}">Load</button></td>`;
+        tri.querySelector("button").addEventListener("click", () => fillIdentityForm(identity));
+        body.appendChild(tri);
+      }
+    }
+  }
+  async function loadResults() {
+    if (!state.selectedDomain) return;
+    const payload = await fetchJson(`/api/coord/auth0r/results?root_domain=${encodeURIComponent(state.selectedDomain)}`);
+    setSummaryCards(payload.counts || {});
+    document.getElementById("sessions-body").innerHTML = (payload.sessions || []).map((row) => `
+      <tr>
+        <td>${row.created_at_utc || ""}</td>
+        <td>${row.identity_label || ""}</td>
+        <td>${row.source_type || ""}</td>
+        <td>${row.generation_number || ""}</td>
+        <td>${row.verified ? '<span class="pill good">yes</span>' : '<span class="pill bad">no</span>'}</td>
+      </tr>`).join("") || '<tr><td colspan="5" class="muted">No sessions yet.</td></tr>';
+    document.getElementById("findings-body").innerHTML = (payload.findings || []).map((row) => `
+      <tr>
+        <td>${row.created_at_utc || ""}</td>
+        <td>${row.finding_type || ""}</td>
+        <td>${row.severity || ""}</td>
+        <td>${row.identity_label || ""}</td>
+        <td class="code">${row.title || ""}\n${row.endpoint || ""}</td>
+      </tr>`).join("") || '<tr><td colspan="5" class="muted">No findings yet.</td></tr>';
+    document.getElementById("replays-body").innerHTML = (payload.replays || []).map((row) => `
+      <tr>
+        <td>${row.created_at_utc || ""}</td>
+        <td>${row.identity_label || ""}</td>
+        <td class="code">${row.method || ""} ${row.url || ""}</td>
+        <td>${row.replay_variant || ""}</td>
+        <td>${row.status_code ?? ""}</td>
+        <td>${row.suspicious ? '<span class="pill bad">yes</span>' : '<span class="pill good">no</span>'}</td>
+      </tr>`).join("") || '<tr><td colspan="6" class="muted">No replay attempts yet.</td></tr>';
+  }
+  async function saveProfile() {
+    const payload = {
+      profile_id: document.getElementById("profile-id").value.trim(),
+      root_domain: document.getElementById("profile-root-domain").value.trim(),
+      profile_label: document.getElementById("profile-label").value.trim(),
+      enabled: document.getElementById("profile-enabled").value === "true",
+      allowed_hosts: splitLines(document.getElementById("profile-allowed-hosts").value),
+      replay_policy: parseJson(document.getElementById("profile-replay-policy").value, {}),
+      default_headers: parseJson(document.getElementById("profile-default-headers").value, {}),
+    };
+    const rsp = await fetchJson("/api/coord/auth0r/profile/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (rsp.profile_id) document.getElementById("profile-id").value = rsp.profile_id;
+    document.getElementById("identity-profile-id").value = rsp.profile_id || document.getElementById("identity-profile-id").value;
+    await selectDomain(payload.root_domain);
+  }
+  async function saveIdentity() {
+    const payload = {
+      identity_id: document.getElementById("identity-id").value.trim(),
+      profile_id: document.getElementById("identity-profile-id").value.trim(),
+      identity_label: document.getElementById("identity-label").value.trim(),
+      role_label: document.getElementById("identity-role-label").value.trim(),
+      tenant_label: document.getElementById("identity-tenant-label").value.trim(),
+      login_strategy: document.getElementById("identity-login-strategy").value,
+      username: document.getElementById("identity-username").value,
+      password: document.getElementById("identity-password").value,
+      login_url: document.getElementById("identity-login-url").value.trim(),
+      login_method: document.getElementById("identity-login-method").value.trim(),
+      login_username_field: document.getElementById("identity-username-field").value.trim(),
+      login_password_field: document.getElementById("identity-password-field").value.trim(),
+      authenticated_probe_url: document.getElementById("identity-auth-probe-url").value.trim(),
+      logout_url: document.getElementById("identity-logout-url").value.trim(),
+      login_extra_fields: parseJson(document.getElementById("identity-login-extra-fields").value, {}),
+      custom_headers: parseJson(document.getElementById("identity-custom-headers").value, {}),
+      success_markers: splitLines(document.getElementById("identity-success-markers").value),
+      denial_markers: splitLines(document.getElementById("identity-denial-markers").value),
+      imported_cookies: parseJson(document.getElementById("identity-imported-cookies").value, []),
+      enabled: document.getElementById("identity-enabled").value === "true",
+    };
+    const rsp = await fetchJson("/api/coord/auth0r/identity/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (rsp.identity_id) document.getElementById("identity-id").value = rsp.identity_id;
+    await loadProfiles();
+  }
+  async function deleteProfile() {
+    const profileId = document.getElementById("profile-id").value.trim();
+    if (!profileId) return;
+    await fetchJson("/api/coord/auth0r/profile/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: profileId }) });
+    fillProfileForm({ root_domain: state.selectedDomain, enabled: true });
+    await selectDomain(state.selectedDomain);
+  }
+  async function deleteIdentity() {
+    const identityId = document.getElementById("identity-id").value.trim();
+    if (!identityId) return;
+    await fetchJson("/api/coord/auth0r/identity/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ identity_id: identityId }) });
+    fillIdentityForm({ profile_id: document.getElementById("identity-profile-id").value.trim() });
+    await loadProfiles();
+  }
+
+  document.getElementById("refresh-domains").addEventListener("click", () => loadOverview().catch((e) => alert(e.message)));
+  document.getElementById("save-profile").addEventListener("click", () => saveProfile().catch((e) => alert(e.message)));
+  document.getElementById("save-identity").addEventListener("click", () => saveIdentity().catch((e) => alert(e.message)));
+  document.getElementById("delete-profile").addEventListener("click", () => deleteProfile().catch((e) => alert(e.message)));
+  document.getElementById("delete-identity").addEventListener("click", () => deleteIdentity().catch((e) => alert(e.message)));
+
+  loadOverview().catch((e) => {
+    console.error(e);
+    alert(`Failed to load Auth0r page: ${e.message}`);
+  });
+})();
+</script>
+</body>
+</html>

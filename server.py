@@ -57,6 +57,7 @@ from reporting.server_pages import (
     render_database_html,
     render_discovered_files_html,
     render_discovered_targets_html,
+    render_auth0r_html,
     render_docker_status_html,
     render_errors_html,
     render_extractor_matches_html,
@@ -66,6 +67,7 @@ from reporting.server_pages import (
 )
 from server_app.store import CoordinatorStore
 from logging_app.store import LogStore
+from auth0r.profile_store import Auth0rProfileStore
 from nightmare_shared.error_reporting import install_error_reporting, report_error
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -2591,6 +2593,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return getattr(self.server, "fuzzing_zip_index_cache")  # type: ignore[attr-defined]
 
     @property
+    def auth0r_store(self) -> Auth0rProfileStore | None:
+        return getattr(self.server, "auth0r_store", None)  # type: ignore[attr-defined]
+
+    @property
     def coordinator_token(self) -> str:
         return str(getattr(self.server, "coordinator_token", "") or "")  # type: ignore[attr-defined]
 
@@ -2888,6 +2894,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/errors":
             self._write_text(render_errors_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/auth0r":
+            self._write_text(render_auth0r_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/api/summary":
             payload = collect_dashboard_data(self.output_root, self.coordinator_store)
             self._write_json(payload)
@@ -2924,6 +2933,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json(payload)
             return
+
+        if path == "/api/coord/auth0r/overview":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = max(1, min(1000, _safe_int((query.get("limit") or [250])[0], 250)))
+            self._write_json({"domains": self.auth0r_store.list_domains_overview(limit=limit)})
+            return
+        if path == "/api/coord/auth0r/profiles":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            self._write_json(self.auth0r_store.get_domain_profiles(root_domain))
+            return
+        if path == "/api/coord/auth0r/results":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            limit = max(1, min(1000, _safe_int((query.get("limit") or [200])[0], 200)))
+            self._write_json(self.auth0r_store.get_domain_results(root_domain, limit=limit))
+            return
+
         if path == "/api/coord/database-status":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
@@ -4050,6 +4098,84 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json({"ok": True, "inserted": inserted})
             return
 
+
+        if path == "/api/coord/auth0r/profile/save":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            payload = body if isinstance(body, dict) else {}
+            root_domain = str(payload.get("root_domain", "") or "").strip().lower()
+            if not root_domain:
+                self._write_json({"error": "root_domain is required"}, status=400)
+                return
+            profile_id = self.auth0r_store.upsert_profile(
+                profile_id=str(payload.get("profile_id", "") or "").strip() or None,
+                root_domain=root_domain,
+                profile_label=str(payload.get("profile_label", "") or "").strip() or "Default",
+                enabled=bool(payload.get("enabled", True)),
+                allowed_hosts=payload.get("allowed_hosts", []),
+                default_headers=payload.get("default_headers", {}),
+                replay_policy=payload.get("replay_policy", {}),
+            )
+            self._write_json({"ok": True, "profile_id": profile_id})
+            return
+
+        if path == "/api/coord/auth0r/profile/delete":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            profile_id = str((body or {}).get("profile_id", "") or "").strip()
+            if not profile_id:
+                self._write_json({"error": "profile_id is required"}, status=400)
+                return
+            self._write_json({"ok": self.auth0r_store.delete_profile(profile_id)})
+            return
+
+        if path == "/api/coord/auth0r/identity/save":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            payload = body if isinstance(body, dict) else {}
+            profile_id = str(payload.get("profile_id", "") or "").strip()
+            if not profile_id:
+                self._write_json({"error": "profile_id is required"}, status=400)
+                return
+            identity_id = self.auth0r_store.upsert_identity(
+                identity_id=str(payload.get("identity_id", "") or "").strip() or None,
+                profile_id=profile_id,
+                identity_label=str(payload.get("identity_label", "") or "").strip() or "Identity",
+                role_label=str(payload.get("role_label", "") or "").strip(),
+                tenant_label=str(payload.get("tenant_label", "") or "").strip(),
+                login_strategy=str(payload.get("login_strategy", "cookie_import") or "cookie_import").strip(),
+                username=str(payload.get("username", "") or ""),
+                password=str(payload.get("password", "") or ""),
+                login_url=str(payload.get("login_url", "") or ""),
+                login_method=str(payload.get("login_method", "POST") or "POST"),
+                login_username_field=str(payload.get("login_username_field", "username") or "username"),
+                login_password_field=str(payload.get("login_password_field", "password") or "password"),
+                login_extra_fields=payload.get("login_extra_fields", {}),
+                authenticated_probe_url=str(payload.get("authenticated_probe_url", "") or ""),
+                logout_url=str(payload.get("logout_url", "") or ""),
+                custom_headers=payload.get("custom_headers", {}),
+                success_markers=payload.get("success_markers", []),
+                denial_markers=payload.get("denial_markers", []),
+                imported_cookies=payload.get("imported_cookies", []),
+                enabled=bool(payload.get("enabled", True)),
+            )
+            self._write_json({"ok": True, "identity_id": identity_id})
+            return
+
+        if path == "/api/coord/auth0r/identity/delete":
+            if self.auth0r_store is None:
+                self._write_json({"error": "auth0r store is not configured"}, status=503)
+                return
+            identity_id = str((body or {}).get("identity_id", "") or "").strip()
+            if not identity_id:
+                self._write_json({"error": "identity_id is required"}, status=400)
+                return
+            self._write_json({"ok": self.auth0r_store.delete_identity(identity_id)})
+            return
+
         if path == "/api/coord/register-targets":
             targets_payload = body.get("targets", [])
             targets: list[str] = []
@@ -4622,6 +4748,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     coordinator_store: CoordinatorStore | None = CoordinatorStore(database_url)
+    auth0r_store: Auth0rProfileStore | None = Auth0rProfileStore(database_url)
     try:
         log_store: LogStore | None = LogStore(log_database_url)
         try:
@@ -4648,6 +4775,7 @@ def main(argv: list[str] | None = None) -> int:
         srv.fuzzing_summary_cache = _FozzySummaryCache()  # type: ignore[attr-defined]
         srv.fuzzing_zip_index_cache = _ZipFileIndexCache()  # type: ignore[attr-defined]
         srv.log_store = log_store  # type: ignore[attr-defined]
+        srv.auth0r_store = auth0r_store  # type: ignore[attr-defined]
         return srv
 
     servers: list[tuple[str, ThreadingHTTPServer]] = []
