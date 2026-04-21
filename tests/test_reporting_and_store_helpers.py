@@ -15,6 +15,7 @@ from reporting.server_pages import (
     render_discovered_files_html,
     render_docker_status_html,
     render_discovered_targets_html,
+    render_events_html,
     render_extractor_matches_html,
     render_fuzzing_html,
     render_view_logs_html,
@@ -90,6 +91,12 @@ def test_render_view_logs_html_contains_expected_heading():
     html = render_view_logs_html()
     assert "View Logs" in html
     assert "/api/coord/log-sources" in html
+
+
+def test_render_events_html_contains_expected_heading():
+    html = render_events_html()
+    assert "System Events" in html
+    assert "/api/coord/events" in html
 
 
 def test_extractor_report_html_escapes_script_content():

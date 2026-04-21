@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from shared.events import EventStream
+from shared.models import EventRecord
+
 import argparse
 import base64
 import io
@@ -220,3 +223,12 @@ def test_load_config_uses_env_for_insecure_tls_and_applies_minimums(tmp_path: Pa
     assert cfg.nightmare_workers >= 1
     assert cfg.fozzy_workers >= 1
     assert cfg.extractor_workers >= 1
+
+
+def test_event_stream_reads_recent_rows_in_reverse_order(tmp_path: Path):
+    stream = EventStream(tmp_path / "events.ndjson")
+    stream.append(EventRecord(event_type="worker.started", aggregate_key="worker:a", payload={"source": "test", "message": "first"}))
+    stream.append(EventRecord(event_type="worker.stopped", aggregate_key="worker:a", payload={"source": "test", "message": "second"}))
+    rows = stream.read(limit=1, reverse=True)
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "worker.stopped"

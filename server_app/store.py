@@ -309,6 +309,112 @@ class CoordinatorStore:
         return build_projection(self._event_stream.read())
 
     @staticmethod
+    def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in dict(payload or {}).items():
+            try:
+                json.dumps(value)
+                out[str(key)] = value
+            except Exception:
+                out[str(key)] = str(value)
+        return out
+
+    @staticmethod
+    def _build_event_message(event_type: str, payload: dict[str, Any]) -> str:
+        source = str(payload.get("source") or "").strip()
+        worker_id = str(payload.get("worker_id") or "").strip()
+        root_domain = str(payload.get("root_domain") or "").strip()
+        stage = str(payload.get("stage") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        command = str(payload.get("command") or "").strip()
+        table = str(payload.get("table") or "").strip()
+        artifact_type = str(payload.get("artifact_type") or "").strip()
+        parts = [event_type]
+        for item in (worker_id, root_domain, stage, command, artifact_type, table, status, source):
+            if item:
+                parts.append(item)
+        return " · ".join(parts[:8])
+
+    def record_system_event(
+        self,
+        event_type: str,
+        aggregate_key: str,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        safe_payload = self._safe_event_payload(payload or {})
+        safe_payload.setdefault("source", "coordinator_store")
+        safe_payload.setdefault("message", self._build_event_message(event_type, safe_payload))
+        self._emit_event(event_type, aggregate_key, safe_payload)
+
+    def list_events(
+        self,
+        *,
+        limit: int = 250,
+        offset: int = 0,
+        search: str = "",
+        event_type: str = "",
+        aggregate_key: str = "",
+        source: str = "",
+        sort_dir: str = "desc",
+    ) -> dict[str, Any]:
+        requested = max(1, min(5000, int(limit or 250)))
+        skip = max(0, int(offset or 0))
+        read_limit = min(20000, max(requested + skip, requested * 4, 1000))
+        reverse = str(sort_dir or "desc").strip().lower() != "asc"
+        rows = self._event_stream.read(limit=read_limit, reverse=reverse)
+        needle = str(search or "").strip().lower()
+        event_type_q = str(event_type or "").strip().lower()
+        aggregate_q = str(aggregate_key or "").strip().lower()
+        source_q = str(source or "").strip().lower()
+        filtered: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload")
+            payload_dict = payload if isinstance(payload, dict) else {}
+            item_source = str(payload_dict.get("source") or "").strip()
+            item_message = str(payload_dict.get("message") or "").strip()
+            normalized = {
+                "event_id": str(item.get("event_id") or ""),
+                "created_at": str(item.get("created_at") or ""),
+                "event_type": str(item.get("event_type") or ""),
+                "aggregate_key": str(item.get("aggregate_key") or ""),
+                "schema_version": int(item.get("schema_version") or 1),
+                "source": item_source,
+                "message": item_message,
+                "payload": payload_dict,
+            }
+            if event_type_q and event_type_q not in normalized["event_type"].lower():
+                continue
+            if aggregate_q and aggregate_q not in normalized["aggregate_key"].lower():
+                continue
+            if source_q and source_q not in normalized["source"].lower():
+                continue
+            if needle:
+                haystack = " ".join(
+                    [
+                        normalized["created_at"],
+                        normalized["event_type"],
+                        normalized["aggregate_key"],
+                        normalized["source"],
+                        normalized["message"],
+                        json.dumps(payload_dict, sort_keys=True, default=str),
+                    ]
+                ).lower()
+                if needle not in haystack:
+                    continue
+            filtered.append(normalized)
+        total = len(filtered)
+        page = filtered[skip : skip + requested]
+        return {
+            "generated_at_utc": _iso_now(),
+            "total": total,
+            "offset": skip,
+            "limit": requested,
+            "events": page,
+        }
+
+    @staticmethod
     def _risk_score_for_artifact(artifact_type: str, size_bytes: int) -> float:
         lowered = str(artifact_type or "").lower()
         score = 0.0
@@ -503,6 +609,19 @@ SET line_number = EXCLUDED.line_number,
                     cur.executemany(upsert_sql, rows)
             conn.commit()
         inserted = len(rows)
+        self.record_system_event(
+            "target.batch_registered",
+            "targets",
+            {
+                "source": "coordinator_store.register_targets",
+                "inserted": inserted,
+                "skipped": skipped,
+                "replace_existing": bool(replace_existing),
+                "target_count": len(rows),
+                "sample_targets": [row[4] for row in rows[:10]],
+                "table": "coordinator_targets",
+            },
+        )
         return {"inserted": inserted, "skipped": skipped, "replaced_existing": bool(replace_existing)}
 
     def claim_target(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
@@ -542,6 +661,22 @@ RETURNING t.entry_id, t.line_number, t.raw, t.start_url, t.root_domain, t.attemp
             conn.commit()
         if row is None:
             return None
+        self.record_system_event(
+            "target.claimed",
+            f"target:{row[4]}",
+            {
+                "source": "coordinator_store.claim_target",
+                "entry_id": row[0],
+                "line_number": int(row[1] or 0),
+                "raw": row[2],
+                "start_url": row[3],
+                "root_domain": row[4],
+                "attempt_count": int(row[5] or 0),
+                "status": row[6],
+                "worker_id": row[7],
+                "lease_expires_at": row[8].isoformat() if row[8] else None,
+            },
+        )
         return {
             "entry_id": row[0],
             "line": int(row[1]),
@@ -571,6 +706,18 @@ WHERE entry_id = %s
                 cur.execute(sql, (lease, str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                "target.heartbeat",
+                f"target:{str(entry_id)}",
+                {
+                    "source": "coordinator_store.heartbeat",
+                    "entry_id": str(entry_id),
+                    "worker_id": str(worker_id),
+                    "lease_seconds": lease,
+                    "status": "running",
+                },
+            )
         return updated > 0
 
     def finish(self, entry_id: str, worker_id: str, *, exit_code: int, error: str = "") -> bool:
@@ -594,6 +741,19 @@ WHERE entry_id = %s
                 cur.execute(sql, (status, int(exit_code), str(error or "")[:2000], str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                f"target.{status}",
+                f"target:{str(entry_id)}",
+                {
+                    "source": "coordinator_store.finish",
+                    "entry_id": str(entry_id),
+                    "worker_id": str(worker_id),
+                    "status": status,
+                    "exit_code": int(exit_code),
+                    "error": str(error or "")[:2000],
+                },
+            )
         return updated > 0
 
     def load_session(self, root_domain: str) -> Optional[dict[str, Any]]:
@@ -663,6 +823,18 @@ SET start_url = EXCLUDED.start_url,
                     ),
                 )
             conn.commit()
+        self.record_system_event(
+            "session.saved",
+            f"session:{rd}",
+            {
+                "source": "coordinator_store.save_session",
+                "root_domain": rd,
+                "start_url": su,
+                "max_pages": int(max_pages) if max_pages is not None else None,
+                "saved_at_utc": saved_dt.isoformat() if saved_dt else None,
+                "table": "coordinator_sessions",
+            },
+        )
         return True
 
     def reset_coordinator_tables(self) -> dict[str, Any]:
@@ -673,6 +845,20 @@ TRUNCATE TABLE coordinator_targets, coordinator_sessions, coordinator_stage_task
             with conn.cursor() as cur:
                 cur.execute(truncate_sql)
             conn.commit()
+        self.record_system_event(
+            "coordinator.tables_reset",
+            "coordinator",
+            {
+                "source": "coordinator_store.reset_coordinator_tables",
+                "status": "completed",
+                "tables": [
+                    "coordinator_targets",
+                    "coordinator_sessions",
+                    "coordinator_stage_tasks",
+                    "coordinator_artifacts",
+                ],
+            },
+        )
         return {
             "truncated_tables": [
                 "coordinator_targets",
@@ -1800,6 +1986,17 @@ VALUES (%s, %s, %s::jsonb, 'queued', NOW());
                 cur.execute(insert_sql, (wid, cmd, json.dumps(safe_payload)))
                 self._touch_worker_presence(cur, wid, f"command_queued_{cmd}")
             conn.commit()
+        self.record_system_event(
+            "worker.command_queued",
+            f"worker:{wid}",
+            {
+                "source": "coordinator_store.queue_worker_command",
+                "worker_id": wid,
+                "command": cmd,
+                "payload": safe_payload,
+                "table": "coordinator_worker_commands",
+            },
+        )
         return True
 
     def claim_worker_command(self, worker_id: str, *, worker_state: str = "idle") -> Optional[dict[str, Any]]:
@@ -1833,6 +2030,18 @@ RETURNING c.id, c.command, c.payload;
         if row is None:
             return None
         payload = row[2] if isinstance(row[2], dict) else {}
+        self.record_system_event(
+            "worker.command_claimed",
+            f"worker:{wid}",
+            {
+                "source": "coordinator_store.claim_worker_command",
+                "worker_id": wid,
+                "command_id": int(row[0] or 0),
+                "command": str(row[1] or "").strip().lower(),
+                "payload": payload,
+                "worker_state": state,
+            },
+        )
         return {
             "id": int(row[0]),
             "command": str(row[1] or "").strip().lower(),
@@ -1882,6 +2091,30 @@ RETURNING command;
                         self._touch_worker_presence(cur, wid, f"command_{command}_error")
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                f"worker.command_{next_status}",
+                f"worker:{wid}",
+                {
+                    "source": "coordinator_store.complete_worker_command",
+                    "worker_id": wid,
+                    "command_id": cid,
+                    "command": command if row is not None else "",
+                    "status": next_status,
+                    "error": str(error or "")[:2000],
+                },
+            )
+            if next_status == "completed" and row is not None:
+                self.record_system_event(
+                    "worker.state_changed",
+                    f"worker:{wid}",
+                    {
+                        "source": "coordinator_store.complete_worker_command",
+                        "worker_id": wid,
+                        "command": command,
+                        "status": mapped_state,
+                    },
+                )
         return updated > 0
 
     def enqueue_stage(self, root_domain: str, stage: str) -> bool:
@@ -1910,6 +2143,17 @@ SET status = CASE
             with conn.cursor() as cur:
                 cur.execute(sql, (rd, stg))
             conn.commit()
+        self.record_system_event(
+            "stage.enqueued",
+            f"stage:{rd}:{stg}",
+            {
+                "source": "coordinator_store.enqueue_stage",
+                "root_domain": rd,
+                "stage": stg,
+                "status": "pending",
+                "table": "coordinator_stage_tasks",
+            },
+        )
         return True
 
     def claim_stage(self, stage: str, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
@@ -1954,6 +2198,19 @@ RETURNING t.root_domain, t.stage, t.status, t.worker_id, t.attempt_count, t.leas
             conn.commit()
         if row is None:
             return None
+        self.record_system_event(
+            "stage.claimed",
+            f"stage:{row[0]}:{row[1]}",
+            {
+                "source": "coordinator_store.claim_stage",
+                "root_domain": row[0],
+                "stage": row[1],
+                "status": row[2],
+                "worker_id": row[3],
+                "attempt_count": int(row[4] or 0),
+                "lease_expires_at": row[5].isoformat() if row[5] else None,
+            },
+        )
         return {
             "root_domain": row[0],
             "stage": row[1],
@@ -1986,6 +2243,19 @@ WHERE root_domain = %s
                 cur.execute(sql, (lease, rd, stg, wid))
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                "stage.heartbeat",
+                f"stage:{rd}:{stg}",
+                {
+                    "source": "coordinator_store.heartbeat_stage",
+                    "root_domain": rd,
+                    "stage": stg,
+                    "worker_id": wid,
+                    "lease_seconds": lease,
+                    "status": "running",
+                },
+            )
         return updated > 0
 
     def complete_stage(
@@ -2023,6 +2293,20 @@ WHERE root_domain = %s
                 cur.execute(sql, (next_status, int(exit_code), str(error or "")[:2000], rd, stg, wid))
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                f"stage.{next_status}",
+                f"stage:{rd}:{stg}",
+                {
+                    "source": "coordinator_store.complete_stage",
+                    "root_domain": rd,
+                    "stage": stg,
+                    "worker_id": wid,
+                    "status": next_status,
+                    "exit_code": int(exit_code),
+                    "error": str(error or "")[:2000],
+                },
+            )
         return updated > 0
 
     def upload_artifact(
@@ -2107,16 +2391,21 @@ SET source_worker = EXCLUDED.source_worker,
                     (rd, f"artifact:{at}", summary_payload),
                 )
             conn.commit()
-        self._emit_event(
-            "artifact_written",
-            rd,
+        self.record_system_event(
+            "artifact.uploaded",
+            f"artifact:{rd}:{at}",
             {
+                "source": "coordinator_store.upload_artifact",
                 "root_domain": rd,
                 "artifact_type": at,
+                "worker_id": str(source_worker or "")[:200],
                 "sha256": metadata.sha256,
                 "size_bytes": len(data),
+                "storage_backend": metadata.storage_backend,
                 "storage_uri": metadata.storage_uri,
                 "compression": metadata.compression,
+                "risk_score": self._risk_score_for_artifact(at, len(data)),
+                "table": "coordinator_artifacts",
             },
         )
         return True

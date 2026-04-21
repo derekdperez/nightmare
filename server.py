@@ -60,6 +60,7 @@ from reporting.server_pages import (
     render_discovered_targets_html,
     render_docker_status_html,
     render_errors_html,
+    render_events_html,
     render_extractor_matches_html,
     render_fuzzing_html,
     render_view_logs_html,
@@ -2920,6 +2921,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/database":
             self._write_text(render_database_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/events":
+            self._write_text(render_events_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/crawl-progress":
             self._write_text(render_crawl_progress_html(), content_type="text/html; charset=utf-8")
             return
@@ -3387,6 +3391,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 content_type="application/zip",
                 download_name=f"{safe_name}.zip",
             )
+            return
+
+        if path == "/api/coord/events":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            search = str((query.get("search") or [""])[0] or "").strip()
+            event_type = str((query.get("event_type") or [""])[0] or "").strip()
+            aggregate_key = str((query.get("aggregate_key") or [""])[0] or "").strip()
+            source = str((query.get("source") or [""])[0] or "").strip()
+            sort_dir = str((query.get("sort_dir") or ["desc"])[0] or "desc").strip().lower()
+            limit = max(1, min(5000, _safe_int((query.get("limit") or [250])[0], 250)))
+            offset = max(0, _safe_int((query.get("offset") or [0])[0], 0))
+            try:
+                payload = self.coordinator_store.list_events(
+                    limit=limit,
+                    offset=offset,
+                    search=search,
+                    event_type=event_type,
+                    aggregate_key=aggregate_key,
+                    source=source,
+                    sort_dir=sort_dir,
+                )
+            except Exception as exc:
+                self.log_message("list_events failed: %r", exc)
+                self._write_json({"error": "event query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
             return
 
         if path == "/api/coord/state":

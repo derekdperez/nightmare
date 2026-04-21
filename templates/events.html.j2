@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Events</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 8px; }
+    .meta { margin-bottom: 12px; color: #475569; font-size: 13px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0 16px; flex-wrap: wrap; }
+    input, select { padding: 6px 8px; border: 1px solid #94a3b8; border-radius: 6px; min-width: 180px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: white; }
+    .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 14px; }
+    .card { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+    .k { font-size: 12px; color: #64748b; }
+    .v { font-size: 20px; font-weight: 700; margin-top: 4px; word-break: break-word; }
+    .muted { color: #64748b; }
+    .status-pill { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cbd5e1; border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 600; background: #fff; color: #334155; }
+    .status-dot { width: 9px; height: 9px; border-radius: 999px; background: #94a3b8; }
+    .status-loading .status-dot { background: #0284c7; animation: pulse 1s ease-in-out infinite; }
+    .status-success .status-dot { background: #16a34a; }
+    .status-error .status-dot { background: #dc2626; }
+    @keyframes pulse { 0%, 100% { transform: scale(0.8); opacity: 0.7; } 50% { transform: scale(1.2); opacity: 1; } }
+    .table-wrap { max-height: 72vh; overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 0; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; vertical-align: top; text-align: left; }
+    th { background: #f1f5f9; position: sticky; top: 0; z-index: 2; }
+    td code { white-space: pre-wrap; word-break: break-word; font-size: 11px; display: block; max-width: 480px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .type-badge { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 999px; padding: 2px 8px; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+  </style>
+</head>
+<body>
+  {% include '_navbar.html.j2' %}
+  <h1>System Events</h1>
+  <div class="meta">A live stream of coordinator, worker, stage, artifact, and database-adjacent actions captured in one place. Auto-refresh every 2s.</div>
+
+  <div class="cards">
+    <div class="card"><div class="k">Visible Events</div><div class="v" id="visibleCount">0</div></div>
+    <div class="card"><div class="k">Total Matched</div><div class="v" id="totalCount">0</div></div>
+    <div class="card"><div class="k">Latest Event Time</div><div class="v" id="latestEventTime">—</div></div>
+    <div class="card"><div class="k">Active Filters</div><div class="v" id="activeFilters">0</div></div>
+  </div>
+
+  <div class="toolbar">
+    <input id="searchInput" type="text" placeholder="Search type, worker, domain, payload, message">
+    <input id="eventTypeInput" type="text" placeholder="event type prefix, e.g. worker.">
+    <input id="sourceInput" type="text" placeholder="source, e.g. coordinator_store">
+    <input id="aggregateInput" type="text" placeholder="aggregate key, e.g. target:example.com">
+    <select id="limitSelect">
+      <option value="100">100 rows</option>
+      <option value="250" selected>250 rows</option>
+      <option value="500">500 rows</option>
+      <option value="1000">1000 rows</option>
+    </select>
+    <button class="primary" id="refreshButton">Refresh</button>
+    <button id="pauseButton">Pause</button>
+    <span id="statusPill" class="status-pill"><span class="status-dot"></span><span id="statusText">Idle</span></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="min-width:180px;">Time (UTC)</th>
+          <th style="min-width:180px;">Event Type</th>
+          <th style="min-width:180px;">Source</th>
+          <th style="min-width:220px;">Aggregate</th>
+          <th style="min-width:260px;">Message</th>
+          <th>Payload</th>
+        </tr>
+      </thead>
+      <tbody id="eventsBody">
+        <tr><td colspan="6" class="muted">Loading events…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const state = { paused: false, timer: null };
+
+    function setStatus(kind, text) {
+      const pill = document.getElementById("statusPill");
+      const label = document.getElementById("statusText");
+      pill.className = "status-pill";
+      if (kind) pill.classList.add(`status-${kind}`);
+      label.textContent = text;
+    }
+
+    function buildQuery() {
+      const search = document.getElementById("searchInput").value.trim();
+      const eventType = document.getElementById("eventTypeInput").value.trim();
+      const source = document.getElementById("sourceInput").value.trim();
+      const aggregate = document.getElementById("aggregateInput").value.trim();
+      const limit = document.getElementById("limitSelect").value;
+      const qs = new URLSearchParams({ limit, sort_dir: "desc" });
+      if (search) qs.set("search", search);
+      if (eventType) qs.set("event_type", eventType);
+      if (source) qs.set("source", source);
+      if (aggregate) qs.set("aggregate_key", aggregate);
+      return qs.toString();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function renderRows(events) {
+      const body = document.getElementById("eventsBody");
+      if (!Array.isArray(events) || events.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" class="muted">No events matched the current filters.</td></tr>';
+        return;
+      }
+      body.innerHTML = events.map((event) => {
+        const payload = escapeHtml(JSON.stringify(event.payload || {}, null, 2));
+        return `
+          <tr>
+            <td class="mono">${escapeHtml(event.created_at || "")}</td>
+            <td><span class="type-badge">${escapeHtml(event.event_type || "")}</span></td>
+            <td>${escapeHtml(event.source || "")}</td>
+            <td class="mono">${escapeHtml(event.aggregate_key || "")}</td>
+            <td>${escapeHtml(event.message || "")}</td>
+            <td><code>${payload}</code></td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function updateCards(payload) {
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      document.getElementById("visibleCount").textContent = String(events.length);
+      document.getElementById("totalCount").textContent = String(payload.total || 0);
+      document.getElementById("latestEventTime").textContent = events[0]?.created_at || "—";
+      const activeFilters = ["searchInput", "eventTypeInput", "sourceInput", "aggregateInput"]
+        .map((id) => document.getElementById(id).value.trim())
+        .filter(Boolean)
+        .length;
+      document.getElementById("activeFilters").textContent = String(activeFilters);
+    }
+
+    async function loadEvents() {
+      if (state.paused) return;
+      setStatus("loading", "Refreshing…");
+      try {
+        const response = await fetch(`/api/coord/events?${buildQuery()}`, { credentials: "same-origin" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+        renderRows(payload.events || []);
+        updateCards(payload);
+        setStatus("success", `Live · updated ${new Date().toLocaleTimeString()}`);
+      } catch (error) {
+        renderRows([]);
+        setStatus("error", String(error && error.message ? error.message : error));
+      }
+    }
+
+    function scheduleRefresh() {
+      if (state.timer) clearInterval(state.timer);
+      state.timer = setInterval(loadEvents, 2000);
+    }
+
+    document.getElementById("refreshButton").addEventListener("click", loadEvents);
+    document.getElementById("pauseButton").addEventListener("click", () => {
+      state.paused = !state.paused;
+      document.getElementById("pauseButton").textContent = state.paused ? "Resume" : "Pause";
+      setStatus(state.paused ? "" : "success", state.paused ? "Paused" : "Live");
+      if (!state.paused) loadEvents();
+    });
+    ["searchInput", "eventTypeInput", "sourceInput", "aggregateInput"].forEach((id) => {
+      document.getElementById(id).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") loadEvents();
+      });
+    });
+    document.getElementById("limitSelect").addEventListener("change", loadEvents);
+
+    scheduleRefresh();
+    loadEvents();
+  </script>
+</body>
+</html>

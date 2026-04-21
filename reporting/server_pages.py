@@ -52,3 +52,7 @@ def render_discovered_targets_html() -> str:
 
 def render_discovered_files_html() -> str:
     return render_template("discovered_files.html.j2")
+
+
+def render_events_html() -> str:
+    return render_template("events.html.j2")
