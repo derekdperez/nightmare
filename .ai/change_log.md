@@ -1143,3 +1143,12 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile nightmare.py`
   - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py tests/test_reporting_and_store_helpers.py` -> 52 passed
+- Fixed central deploy readiness/registration flow for EC2 self-reachability edge case.
+- Root cause: `deploy/full_deploy_command.sh` required `COORDINATOR_BASE_URL` to be reachable from the same VM; on some EC2 setups (public endpoint hairpin path), self-calls return HTTP `000` even while the container is healthy.
+- Changes:
+  - Added local reachability probing in `deploy/full_deploy_command.sh` (`COORDINATOR_BASE_URL`, then localhost/127.0.0.1 over HTTPS/HTTP).
+  - Readiness now succeeds when the coordinator is reachable on a local listener, not only via the externally advertised base URL.
+  - `register_targets.py` and `client.py rollout` calls now use the detected locally reachable coordinator URL for host-local API calls while preserving `COORDINATOR_BASE_URL` for worker provisioning/env generation.
+- Validation:
+  - Script logic reviewed end-to-end against compose/server startup flow.
+  - `bash -n deploy/full_deploy_command.sh` could not be executed in this Windows environment due shell runtime timeout; syntax therefore remains runtime-verified on Linux deploy host.

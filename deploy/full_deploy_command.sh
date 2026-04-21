@@ -133,6 +133,35 @@ ids_empty() {
   [[ -z "$value" || "$value" == "None" ]]
 }
 
+probe_coordinator_http_code() {
+  local base_url="$1"
+  local code
+  code="$(curl -k -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer ${COORDINATOR_API_TOKEN}" \
+    "${base_url%/}/api/coord/database-status" || true)"
+  printf '%s' "$code"
+}
+
+resolve_local_coordinator_base_url() {
+  local candidate code
+  local candidates=()
+  candidates+=("${COORDINATOR_BASE_URL%/}")
+  candidates+=("https://127.0.0.1")
+  candidates+=("https://localhost")
+  candidates+=("http://127.0.0.1")
+  candidates+=("http://localhost")
+
+  for candidate in "${candidates[@]}"; do
+    code="$(probe_coordinator_http_code "$candidate")"
+    if [[ "$code" == "200" || "$code" == "401" || "$code" == "403" ]]; then
+      printf '%s\n%s' "$candidate" "$code"
+      return 0
+    fi
+  done
+  printf '\n'
+  return 1
+}
+
 get_worker_instance_ids() {
   local state_values="$1"
   run_as_invoking_user aws ec2 describe-instances \
@@ -171,10 +200,13 @@ fi
 echo "Waiting for coordinator API readiness..."
 api_ready=0
 last_code=""
+effective_coordinator_base_url=""
 for _ in $(seq 1 45); do
-  code="$(curl -k -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${COORDINATOR_API_TOKEN}" "${COORDINATOR_BASE_URL%/}/api/coord/database-status" || true)"
+  resolved="$(resolve_local_coordinator_base_url || true)"
+  effective_coordinator_base_url="$(printf '%s' "$resolved" | sed -n '1p')"
+  code="$(printf '%s' "$resolved" | sed -n '2p')"
   last_code="$code"
-  if [[ "$code" == "200" ]]; then
+  if [[ "$code" == "200" && -n "$effective_coordinator_base_url" ]]; then
     api_ready=1
     break
   fi
@@ -198,8 +230,12 @@ if [[ "$api_ready" -ne 1 ]]; then
   exit 1
 fi
 
+if [[ -n "${effective_coordinator_base_url:-}" && "${effective_coordinator_base_url%/}" != "${COORDINATOR_BASE_URL%/}" ]]; then
+  echo "Coordinator reachable via local URL ${effective_coordinator_base_url}; continuing local API calls with this URL."
+fi
+
 run_as_invoking_user python3 register_targets.py \
-  --server-base-url "${COORDINATOR_BASE_URL}" \
+  --server-base-url "${effective_coordinator_base_url:-${COORDINATOR_BASE_URL}}" \
   --api-token "${COORDINATOR_API_TOKEN}" \
   --targets-file "targets.txt"
 
@@ -235,7 +271,7 @@ else
   echo "Existing worker VMs found. Rolling out latest code + docker rebuild on workers..."
   rollout_cmd=(
     python3 client.py rollout
-    --server-base-url "${COORDINATOR_BASE_URL}"
+    --server-base-url "${effective_coordinator_base_url:-${COORDINATOR_BASE_URL}}"
     --api-token "${COORDINATOR_API_TOKEN}"
     --aws-region "$AWS_REGION"
     --ssm-target-key "tag:Name"

@@ -163,3 +163,6 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Extractor page control-plane robustness:
   - `/extractor-matches` now has complete client-side wiring for pattern configuration read/write against server endpoints.
   - The page now reports domain-list load errors explicitly instead of silently continuing, reducing false "empty page" symptoms when upstream API calls fail.
+- Coordinator deploy boundary refinement:
+  - `COORDINATOR_BASE_URL` is now treated as the fleet-facing address, not a guaranteed self-call address on the central VM.
+  - `deploy/full_deploy_command.sh` now resolves an effective local coordinator URL for control-plane actions executed on the central host (readiness polling, target registration, rollout initiation), reducing false-negative bootstrap failures on EC2 networking topologies that block/flake self-public-endpoint access.
