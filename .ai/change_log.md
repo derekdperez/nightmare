@@ -1104,3 +1104,16 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `pytest -q tests/test_refactor_modules.py` -> 14 passed
   - `pytest -q tests/test_reporting_and_store_helpers.py -k "render_extractor_matches_html_contains_expected_heading"` -> 1 passed
   - `pytest -q tests/test_server_auth_cookie.py` -> 6 passed
+
+- Hardened auth0r overview ordering to remove `CASE`-based mixed-type sort paths entirely.
+- Root cause follow-up: even after initial typed-CASE mitigation, some deployed instances still surfaced the old PostgreSQL error path (`CASE types timestamp without time zone and text cannot be matched`) during `/api/coord/auth0r/overview`.
+- Changes:
+  - `server_app/store.py` `auth0r_overview(...)` now chooses one of two static `ORDER BY` clauses based on `completed_only`:
+    - completed-only: `ORDER BY root_domain ASC`
+    - default: `ORDER BY COALESCE(saved_at_utc, NOW()) DESC, root_domain ASC`
+  - Removed dynamic type-mixing `CASE` ordering and simplified SQL bind params.
+  - Updated regression test in `tests/test_reporting_and_store_helpers.py` to assert branch-based ordering and param shape.
+- Validation:
+  - `pytest -q tests/test_reporting_and_store_helpers.py -k "auth0r_overview_completed_only_uses_type_safe_ordering"` -> 1 passed
+  - `python -m py_compile server_app/store.py server.py`
+  - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py` -> 20 passed

@@ -296,6 +296,7 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Discovered-file row-shape convention: list rows consumed by UI tables should provide `updated_at_utc` and `content_size_bytes` canonical fields; legacy aliases (`discovered_at_utc`, `file_size`) can be preserved only for compatibility.
 
 - Postgres sort convention for optional ordering modes: avoid `CASE` branches that return different data types (for example text vs timestamp) inside a single expression; instead use separate typed `CASE` expressions in `ORDER BY` or build explicit query variants.
+- Preferred SQL ordering convention for mode-dependent sorting: use explicit branch-selected static `ORDER BY` clauses over parameterized `CASE` in `ORDER BY` when key types differ, to eliminate planner/type-resolution ambiguity.
 
 - Extractor UI convention: every visible action button in dashboard templates (for example Pattern Management load/save/add/remove) must have explicit JS handlers bound in the same template script.
 - Extractor page UX convention: do not silently swallow domain/match API load failures; surface actionable error text in-page so empty tables are diagnosable.

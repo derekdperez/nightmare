@@ -1098,7 +1098,7 @@ WHERE discovered_urls_count > 0
   ))
 ORDER BY {order_by_clause}
 LIMIT %s;
-""".format(order_by_clause=order_by_clause)
+""".replace("{order_by_clause}", order_by_clause)
         domains: list[dict[str, Any]] = []
         with self._connect() as conn:
             with conn.cursor() as cur:
