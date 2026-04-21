@@ -1014,3 +1014,11 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - fallback behavior when no log file exists.
 - Validation: `pytest tests/test_runtime_unit.py -q` -> 11 passed.
 - Why: operator logs and `/api/coord/complete` payloads were showing only exit codes, which hid root-cause exceptions that were already present in stage log artifacts.
+
+## 2026-04-20
+
+- Hardened `deploy/full_deploy_command.sh` Docker diagnostics path for fresh hosts where docker-group access is not active in the current shell.
+- `run_compose` now executes via detected access mode (`invoking_user`, `current_user`, or `sudo -n`) instead of always forcing invoking-user context.
+- Added daemon-access probing (`detect_docker_access_mode`) so readiness-failure diagnostics can still fetch compose `ps` and service logs when direct socket access is denied.
+- Updated compose command resolution to check both invoking-user and current-user contexts.
+- Why: full deploy readiness failures were masking root cause with Docker socket permission errors during diagnostic logging (`permission denied ... /var/run/docker.sock`).

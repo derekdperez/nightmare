@@ -139,3 +139,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Worker subprocess error propagation boundary refinement:
   - `coordinator_app/runtime.py` now owns log-tail based subprocess failure summarization (`summarize_subprocess_failure`).
   - `coordinator.py` worker loops consume that helper so completion APIs and worker lifecycle logs carry root-cause detail instead of generic exit codes.
+
+- Deploy/runtime boundary refinement:
+  - `deploy/full_deploy_command.sh` now separates compose binary detection from daemon-access detection.
+  - Compose diagnostics during coordinator readiness failure can run under invoking user, current user, or sudo-noninteractive mode, reducing false diagnostic failures on newly provisioned EC2 hosts.

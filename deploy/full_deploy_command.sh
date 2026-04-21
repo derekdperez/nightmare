@@ -62,12 +62,28 @@ run_as_invoking_user() {
 }
 
 resolve_compose_cmd() {
-  if run_as_invoking_user docker compose version >/dev/null 2>&1; then
+  if run_as_invoking_user docker compose version >/dev/null 2>&1 || docker compose version >/dev/null 2>&1; then
     echo "docker compose"
     return 0
   fi
-  if run_as_invoking_user which docker-compose >/dev/null 2>&1; then
+  if run_as_invoking_user which docker-compose >/dev/null 2>&1 || which docker-compose >/dev/null 2>&1; then
     echo "docker-compose"
+    return 0
+  fi
+  return 1
+}
+
+detect_docker_access_mode() {
+  if run_as_invoking_user docker info >/dev/null 2>&1; then
+    echo "invoking_user"
+    return 0
+  fi
+  if docker info >/dev/null 2>&1; then
+    echo "current_user"
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    echo "sudo"
     return 0
   fi
   return 1
@@ -75,11 +91,40 @@ resolve_compose_cmd() {
 
 run_compose() {
   local compose_cmd="$1"
+  local access_mode="$2"
   shift
+  shift
+
   if [[ "$compose_cmd" == "docker compose" ]]; then
-    run_as_invoking_user docker compose "$@"
+    case "$access_mode" in
+      invoking_user)
+        run_as_invoking_user docker compose "$@"
+        ;;
+      current_user)
+        docker compose "$@"
+        ;;
+      sudo)
+        sudo -n docker compose "$@"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
   else
-    run_as_invoking_user docker-compose "$@"
+    case "$access_mode" in
+      invoking_user)
+        run_as_invoking_user docker-compose "$@"
+        ;;
+      current_user)
+        docker-compose "$@"
+        ;;
+      sudo)
+        sudo -n docker-compose "$@"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
   fi
 }
 
@@ -139,12 +184,15 @@ done
 if [[ "$api_ready" -ne 1 ]]; then
   echo "Coordinator API did not become ready after 90 seconds (last HTTP code: ${last_code:-none})." >&2
   compose_cmd="$(resolve_compose_cmd || true)"
-  if [[ -n "$compose_cmd" ]]; then
+  docker_access_mode="$(detect_docker_access_mode || true)"
+  if [[ -n "$compose_cmd" && -n "$docker_access_mode" ]]; then
     echo "Central compose service status:" >&2
-    run_compose "$compose_cmd" -f deploy/docker-compose.central.yml --env-file deploy/.env ps >&2 || true
+    run_compose "$compose_cmd" "$docker_access_mode" -f deploy/docker-compose.central.yml --env-file deploy/.env ps >&2 || true
     echo >&2
     echo "Recent central service logs (tail):" >&2
-    run_compose "$compose_cmd" -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail 120 server postgres >&2 || true
+    run_compose "$compose_cmd" "$docker_access_mode" -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail 120 server postgres >&2 || true
+  elif [[ -n "$compose_cmd" ]]; then
+    echo "Central compose diagnostics skipped: Docker daemon is not accessible for invoking user/current user and sudo -n docker is unavailable." >&2
   fi
   echo "Refusing to continue with target registration because coordinator is unreachable." >&2
   exit 1
