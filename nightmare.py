@@ -3349,9 +3349,11 @@ def was_crawl_requested(record: UrlInventoryRecord) -> bool:
 def derive_exists_for_requested_url(record: UrlInventoryRecord) -> bool:
     if bool(record.soft_404_detected):
         return False
-    if bool(record.exists_confirmed):
-        return True
+    discovered_via = {str(source or "").strip().lower() for source in (record.discovered_via or set()) if str(source or "").strip()}
+    non_guess_sources = discovered_via - (GUESSED_DISCOVERY_SOURCES | {"crawl_response", "ai_probe_request"})
+    guess_only_discovery = bool(discovered_via & GUESSED_DISCOVERY_SOURCES) and not non_guess_sources
 
+    resolved_status: int | None = None
     for raw_status in (record.existence_status_code, record.crawl_status_code):
         try:
             status = int(raw_status) if raw_status is not None else None
@@ -3359,9 +3361,20 @@ def derive_exists_for_requested_url(record: UrlInventoryRecord) -> bool:
             status = None
         if status is None:
             continue
-        return status not in configured_not_found_statuses()
+        resolved_status = status
+        break
 
-    return False
+    if resolved_status is not None:
+        if resolved_status in configured_not_found_statuses():
+            return False
+        # For guessed-only URLs (wordlist/AI guesses), require a true success response.
+        # This prevents common catch-all 3xx/4xx/5xx behaviors from being treated as valid pages.
+        if guess_only_discovery:
+            return 200 <= resolved_status < 300
+        # For all other URLs, only 2xx/3xx responses are treated as existing.
+        return 200 <= resolved_status < 400
+
+    return bool(record.exists_confirmed)
 
 
 def build_requests_inventory(root_domain: str, state: CrawlState) -> dict[str, Any]:
@@ -5068,13 +5081,15 @@ def probe_url_existence(
             if method == "HEAD" and status_code == 200:
                 continue
             soft_404_detected, soft_404_reason = detect_soft_not_found_response(status_code, response_body)
-            exists_confirmed = status_code not in configured_not_found_statuses()
+            exists_confirmed = 200 <= status_code < 400
             note = "Confirmed by direct HTTP probe"
             if soft_404_detected:
                 exists_confirmed = False
                 note = f"Soft-404 detected in 200 response: {soft_404_reason}" if soft_404_reason else "Soft-404 detected"
             elif status_code in configured_not_found_statuses():
                 note = "URL returned explicit not-found status"
+            elif status_code >= 400:
+                note = f"URL returned non-success HTTP status {status_code}"
             return {
                 "exists_confirmed": exists_confirmed,
                 "status_code": status_code,
@@ -5163,7 +5178,7 @@ def write_wordlist_guessed_paths_index(site_output_dir: Path, state: CrawlState)
         is_hit = (
             visited
             and code_i is not None
-            and code_i not in configured_not_found_statuses()
+            and 200 <= code_i < 300
             and not bool(rec and rec.soft_404_detected)
         )
         if is_hit:

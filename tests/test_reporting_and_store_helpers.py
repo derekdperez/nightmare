@@ -803,17 +803,17 @@ def test_list_discovered_target_domains_uses_session_inventory_counts():
                     )
                 ]
                 return
-                if "FROM coordinator_sessions" in compact and "WHERE root_domain = %s" in compact:
-                    assert params == ("example.com",)
-                    self._fetchone = (
-                        "example.com",
-                        "https://example.com",
-                        1000,
-                        now,
-                        {
-                            "state": {
-                                "discovered_urls": ["https://example.com/", "https://example.com/admin"],
-                                "link_graph": {"https://example.com/": ["https://example.com/admin"]},
+            if "FROM coordinator_sessions" in compact and "WHERE root_domain = %s" in compact:
+                assert params == ("example.com",)
+                self._fetchone = (
+                    "example.com",
+                    "https://example.com",
+                    1000,
+                    now,
+                    {
+                        "state": {
+                            "discovered_urls": ["https://example.com/", "https://example.com/admin"],
+                            "link_graph": {"https://example.com/": ["https://example.com/admin"]},
                             "url_inventory": {
                                 "https://example.com/": {"discovered_via": ["seed_input"], "was_crawled": True},
                                 "https://example.com/admin": {"discovered_via": ["internal_link"], "exists_confirmed": True},

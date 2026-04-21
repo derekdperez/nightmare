@@ -1117,3 +1117,29 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `pytest -q tests/test_reporting_and_store_helpers.py -k "auth0r_overview_completed_only_uses_type_safe_ordering"` -> 1 passed
   - `python -m py_compile server_app/store.py server.py`
   - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py` -> 20 passed
+
+- Fixed discovered-target sitemap contract drift and completed regression validation cleanup.
+- Root cause: discovered-target sitemap API/UI contract had diverged (`rows` vs `sitemap.pages`, plus field-name differences), and a follow-up regression test fixture was left with an unreachable SQL branch after a bad merge.
+- Changes:
+  - `server_app/store.py`: normalized sitemap output from `get_discovered_target_sitemap(...)` to return `{root_domain,start_url,page_count,pages}` with canonical fields and compatibility aliases.
+  - `server.py`: `/api/coord/discovered-target-sitemap` now returns `sitemap` plus compatibility aliases (`rows`, `pages`).
+  - `templates/discovered_targets.html.j2`: sitemap renderer now accepts either payload shape and legacy/new row keys.
+  - `tests/test_reporting_and_store_helpers.py`: repaired `test_list_discovered_target_domains_uses_session_inventory_counts` fake SQL branch so `load_session` queries are matched and fixture shape is valid.
+- Validation:
+  - `pytest -q tests/test_reporting_and_store_helpers.py -k "list_discovered_target_domains_uses_session_inventory_counts"` -> 1 passed
+  - `pytest -q tests/test_reporting_and_store_helpers.py` -> 32 passed
+  - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py` -> 20 passed
+
+- Tightened URL existence rules to reduce cross-site false positives from wordlist/guess seeds (e.g. `/manager/deploy?path=...`).
+- Root cause: `file_path_wordlist` includes `/manager/deploy?path=foo`, and existence logic treated most non-404 statuses as valid (`status not in {404,410}`), so generic 3xx/4xx catch-all responses were promoted as existing URLs.
+- Changes:
+  - `nightmare.py`:
+    - `derive_exists_for_requested_url(...)` now:
+      - requires 2xx for guess-only discoveries (`file_path_wordlist`/`guessed_url` without stronger non-guess evidence),
+      - requires 2xx/3xx for non-guess URLs,
+      - no longer treats arbitrary 4xx/5xx as existing.
+    - `probe_url_existence(...)` now marks `exists_confirmed=True` only for HTTP 2xx/3xx and emits explicit note for non-success statuses.
+    - `write_wordlist_guessed_paths_index(...)` now counts wordlist "hits" only for 2xx (instead of any non-404/410), excluding soft-404 as before.
+- Validation:
+  - `python -m py_compile nightmare.py`
+  - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py tests/test_reporting_and_store_helpers.py` -> 52 passed

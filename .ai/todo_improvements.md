@@ -13,3 +13,4 @@
 - Add optional asynchronous ingestion worker for log DB writes to decouple source polling latency from API response times.
 
 - Fix `nightmare.py` undefined variable path (`verify_timeout` in `crawl_domain`) and add a regression test so coordinator runs stop failing with repeated `NameError`.
+- Integrate `nightmare_shared/page_classification.py` into crawl/probe existence decisions so catch-all redirect/login/block pages are baseline-classified instead of relying mostly on status-code heuristics.

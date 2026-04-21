@@ -301,3 +301,11 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Extractor UI convention: every visible action button in dashboard templates (for example Pattern Management load/save/add/remove) must have explicit JS handlers bound in the same template script.
 - Extractor page UX convention: do not silently swallow domain/match API load failures; surface actionable error text in-page so empty tables are diagnosable.
 - Domain visibility convention: avoid default-on "hide zero" filters for primary domain selectors when API data may temporarily lack counts; default should favor visibility over hiding.
+
+- Discovered-target sitemap contract convention: `/api/coord/discovered-target-sitemap` should expose canonical `sitemap.pages` while also including `rows`/`pages` aliases during compatibility transitions; template renderers should tolerate either shape and both legacy/canonical row keys (`parent_count`/`inbound_count`, `parents`/`discovered_from`, `status_code`/`crawl_status_code`).
+
+- URL-existence convention for crawl/source-of-truth outputs:
+  - Do not treat generic non-404 statuses as proof of existence.
+  - Guess-only discoveries (`file_path_wordlist`, `guessed_url`) require 2xx status to count as existing.
+  - Non-guess discoveries require at least 2xx/3xx status to count as existing.
+  - Wordlist "hits" reporting should count only true success responses (2xx) and still exclude soft-404.
