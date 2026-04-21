@@ -1085,3 +1085,22 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `pytest -q tests/test_reporting_and_store_helpers.py -k "auth0r_overview_completed_only_uses_type_safe_ordering"` -> 1 passed
   - `python -m py_compile server.py server_app/store.py`
   - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py` -> 20 passed
+
+- Restored extractor pattern-management UI behavior on `/extractor-matches`.
+- Root cause: template rendered Pattern Management controls but had no client-side handlers wired for load/add/save/remove, so buttons were inert and no patterns were shown.
+- Additional reliability issue: domain list load failures were silently swallowed in `refreshDomainsAndMatches`, masking API failures and making the page appear empty.
+- Changes:
+  - `templates/extractor_matches.html.j2`:
+    - Added `apiPost` helper.
+    - Added full pattern table state helpers (`normalizePatternRow`, `readPatternRowsFromDom`, `renderPatternRows`).
+    - Added `loadPatterns()` and `savePatterns()` wired to `/api/coord/extractor-patterns` and `/api/coord/extractor-patterns/save`.
+    - Added Add/Remove row interactions and auto-load patterns on page init.
+    - Improved domain load error handling (show explicit message instead of silent catch).
+    - Changed "Hide 0-result domains" default to unchecked to avoid hiding all domains when match counts are zero/unavailable.
+  - Tests:
+    - `tests/test_refactor_modules.py`: asserts extractor patterns endpoints and pattern controls are present in rendered template.
+    - `tests/test_reporting_and_store_helpers.py`: asserts extractor pattern endpoints are present in extractor page HTML.
+- Validation:
+  - `pytest -q tests/test_refactor_modules.py` -> 14 passed
+  - `pytest -q tests/test_reporting_and_store_helpers.py -k "render_extractor_matches_html_contains_expected_heading"` -> 1 passed
+  - `pytest -q tests/test_server_auth_cookie.py` -> 6 passed

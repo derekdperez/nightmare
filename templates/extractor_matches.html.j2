@@ -40,7 +40,7 @@
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <select id="domainSelect" style="min-width: 320px;"></select>
-    <label><input id="hideZeroDomains" type="checkbox" checked> Hide 0-result domains</label>
+    <label><input id="hideZeroDomains" type="checkbox"> Hide 0-result domains</label>
     <input id="searchText" type="text" placeholder="Global search (all fields)">
     <input id="limit" type="number" min="1" max="2000" value="250" title="Rows per page">
     <button class="primary" onclick="refreshDomainsAndMatches()">Refresh</button>
@@ -261,6 +261,126 @@
       const ct = String(rsp.headers.get("content-type") || "");
       if (ct.includes("application/json")) return rsp.json();
       return rsp.text();
+    }
+    async function apiPost(path, payload) {
+      const rsp = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(payload || {}),
+      });
+      if (!rsp.ok) throw new Error(await rsp.text());
+      const ct = String(rsp.headers.get("content-type") || "");
+      if (ct.includes("application/json")) return rsp.json();
+      return rsp.text();
+    }
+    function normalizePatternRow(row, ruleSet) {
+      const src = row && typeof row === "object" ? row : {};
+      const rawScore = Number(src.importance_score ?? 0);
+      return {
+        rule_set: String(ruleSet || "rules") === "javascript_rules" ? "javascript_rules" : "rules",
+        name: String(src.name || "").trim(),
+        scope: String(src.scope || "request_response").trim() || "request_response",
+        regex: String(src.regex || ""),
+        description: String(src.description || ""),
+        output_filename: String(src.output_filename || ""),
+        importance_score: Number.isFinite(rawScore) ? Math.trunc(rawScore) : 0,
+      };
+    }
+    function readPatternRowsFromDom() {
+      const tbody = document.getElementById("patternRows");
+      const rows = [];
+      tbody.querySelectorAll("tr[data-pattern-row='1']").forEach((tr) => {
+        const scoreValue = Number((tr.querySelector(".pat-importance") || {}).value || 0);
+        rows.push({
+          rule_set: String((tr.querySelector(".pat-rule-set") || {}).value || "rules"),
+          name: String((tr.querySelector(".pat-name") || {}).value || "").trim(),
+          scope: String((tr.querySelector(".pat-scope") || {}).value || "request_response").trim() || "request_response",
+          regex: String((tr.querySelector(".pat-regex") || {}).value || ""),
+          description: String((tr.querySelector(".pat-description") || {}).value || ""),
+          output_filename: String((tr.querySelector(".pat-output") || {}).value || ""),
+          importance_score: Number.isFinite(scoreValue) ? Math.trunc(scoreValue) : 0,
+        });
+      });
+      return rows;
+    }
+    function renderPatternRows(rowsInput) {
+      const rows = Array.isArray(rowsInput) ? rowsInput.map((row) => normalizePatternRow(row, row.rule_set)) : [];
+      const tbody = document.getElementById("patternRows");
+      if (!rows.length) {
+        tbody.innerHTML = "<tr><td colspan='7'>No patterns loaded.</td></tr>";
+        return;
+      }
+      tbody.innerHTML = rows.map((row, idx) => `
+        <tr data-pattern-row="1">
+          <td><input class="pat-name" type="text" value="${esc(row.name)}" placeholder="pattern_name"></td>
+          <td>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <select class="pat-rule-set">
+                <option value="rules"${row.rule_set === "rules" ? " selected" : ""}>HTTP/General</option>
+                <option value="javascript_rules"${row.rule_set === "javascript_rules" ? " selected" : ""}>JavaScript</option>
+              </select>
+              <input class="pat-scope" type="text" value="${esc(row.scope)}" placeholder="request_response">
+            </div>
+          </td>
+          <td><input class="pat-regex" type="text" value="${esc(row.regex)}" placeholder="regex"></td>
+          <td><input class="pat-description" type="text" value="${esc(row.description)}" placeholder="description"></td>
+          <td><input class="pat-output" type="text" value="${esc(row.output_filename)}" placeholder="output file"></td>
+          <td><input class="pat-importance" type="number" value="${esc(row.importance_score)}"></td>
+          <td><button type="button" class="remove-pattern-btn" data-remove-index="${idx}">Remove</button></td>
+        </tr>
+      `).join("");
+      tbody.querySelectorAll(".remove-pattern-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const idx = Math.max(0, Number(btn.getAttribute("data-remove-index") || 0));
+          const current = readPatternRowsFromDom();
+          current.splice(idx, 1);
+          renderPatternRows(current);
+        });
+      });
+    }
+    async function loadPatterns() {
+      const msgNode = document.getElementById("patternsMsg");
+      msgNode.textContent = "Loading patterns...";
+      const payload = await apiGet("/api/coord/extractor-patterns");
+      const rules = Array.isArray(payload.rules) ? payload.rules : [];
+      const jsRules = Array.isArray(payload.javascript_rules) ? payload.javascript_rules : [];
+      const merged = [
+        ...rules.map((row) => normalizePatternRow(row, "rules")),
+        ...jsRules.map((row) => normalizePatternRow(row, "javascript_rules")),
+      ];
+      renderPatternRows(merged);
+      msgNode.textContent = `Loaded ${merged.length} pattern(s): ${rules.length} HTTP/General, ${jsRules.length} JavaScript.`;
+    }
+    async function savePatterns() {
+      const msgNode = document.getElementById("patternsMsg");
+      msgNode.textContent = "Saving patterns...";
+      const rows = readPatternRowsFromDom();
+      const rules = [];
+      const javascriptRules = [];
+      let skipped = 0;
+      rows.forEach((raw) => {
+        const row = normalizePatternRow(raw, raw.rule_set);
+        if (!row.name || !row.regex) {
+          skipped += 1;
+          return;
+        }
+        const out = {
+          name: row.name,
+          scope: row.scope,
+          regex: row.regex,
+          description: row.description,
+          output_filename: row.output_filename,
+          importance_score: row.importance_score,
+        };
+        if (row.rule_set === "javascript_rules") javascriptRules.push(out);
+        else rules.push(out);
+      });
+      await apiPost("/api/coord/extractor-patterns/save", {
+        rules,
+        javascript_rules: javascriptRules,
+      });
+      msgNode.textContent = `Saved ${rules.length + javascriptRules.length} pattern(s)${skipped ? ` (${skipped} skipped missing name/regex)` : ""}.`;
+      await loadPatterns();
     }
     function selectedDomain() {
       return String(document.getElementById("domainSelect").value || "__all__");
@@ -581,7 +701,12 @@
       return Array.isArray(rows) ? rows.length : 0;
     }
     async function refreshDomainsAndMatches(options) {
-      try { await loadDomains(options); } catch (_) {}
+      try {
+        await loadDomains(options);
+      } catch (e) {
+        const msg = document.getElementById("msg");
+        msg.textContent = `Failed to load extractor domains: ${e && e.message ? e.message : e}`;
+      }
       currentOffset = 0;
       await loadMatches(options);
     }
@@ -664,7 +789,27 @@
     document.getElementById("topFilterName").addEventListener("input", () => renderTopFilters(currentTopFilters));
     document.getElementById("filesSearch").addEventListener("input", () => renderFiles(currentFiles));
     document.getElementById("filesPathFilter").addEventListener("input", () => renderFiles(currentFiles));
+    document.getElementById("loadPatternsBtn").addEventListener("click", () => {
+      loadPatterns().catch((e) => {
+        document.getElementById("patternsMsg").textContent = `Load failed: ${e && e.message ? e.message : e}`;
+      });
+    });
+    document.getElementById("addPatternBtn").addEventListener("click", () => {
+      const rows = readPatternRowsFromDom();
+      rows.push(normalizePatternRow({}, "rules"));
+      renderPatternRows(rows);
+      document.getElementById("patternsMsg").textContent = "Added new pattern row.";
+    });
+    document.getElementById("savePatternsBtn").addEventListener("click", () => {
+      savePatterns().catch((e) => {
+        document.getElementById("patternsMsg").textContent = `Save failed: ${e && e.message ? e.message : e}`;
+      });
+    });
     setSortIndicators();
+    loadPatterns().catch((e) => {
+      document.getElementById("patternsMsg").textContent = `Load failed: ${e && e.message ? e.message : e}`;
+      renderPatternRows([]);
+    });
     refreshDomainsAndMatches({ useCacheFirst: true });
   </script>
 </body>

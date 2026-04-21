@@ -97,6 +97,10 @@ def test_extractor_matches_template_renders():
     assert 'href="/fuzzing"' in html
     assert "/api/coord/extractor-matches/domains" in html
     assert "/api/coord/extractor-matches" in html
+    assert "/api/coord/extractor-patterns" in html
+    assert "/api/coord/extractor-patterns/save" in html
+    assert "loadPatternsBtn" in html
+    assert "savePatternsBtn" in html
     assert "hideZeroDomains" in html
     assert "nightmare_coord_token" in html
 

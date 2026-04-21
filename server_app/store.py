@@ -1038,6 +1038,11 @@ LIMIT %s;
 
     def auth0r_overview(self, *, completed_only: bool = False, limit: int = 5000) -> dict[str, Any]:
         safe_limit = max(1, min(5000, int(limit or 5000)))
+        order_by_clause = (
+            "root_domain ASC"
+            if bool(completed_only)
+            else "COALESCE(saved_at_utc, NOW()) DESC, root_domain ASC"
+        )
         sql = """
 WITH target_agg AS (
     SELECT
@@ -1091,16 +1096,13 @@ WHERE discovered_urls_count > 0
     AND failed_targets = 0
     AND completed_targets > 0
   ))
-ORDER BY
-  CASE WHEN (%s = TRUE) THEN root_domain ELSE NULL END DESC,
-  CASE WHEN (%s = FALSE) THEN COALESCE(saved_at_utc, NOW()) ELSE NULL END DESC,
-  root_domain ASC
+ORDER BY {order_by_clause}
 LIMIT %s;
-"""
+""".format(order_by_clause=order_by_clause)
         domains: list[dict[str, Any]] = []
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (bool(completed_only), bool(completed_only), bool(completed_only), safe_limit))
+                cur.execute(sql, (bool(completed_only), safe_limit))
                 rows = cur.fetchall()
         for row in rows:
             domains.append(

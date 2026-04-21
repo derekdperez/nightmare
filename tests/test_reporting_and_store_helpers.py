@@ -66,6 +66,8 @@ def test_render_extractor_matches_html_contains_expected_heading():
     html = render_extractor_matches_html()
     assert "Extractor Matches" in html
     assert "Top Filters (Top 10)" in html
+    assert "/api/coord/extractor-patterns" in html
+    assert "/api/coord/extractor-patterns/save" in html
 
 
 def test_render_fuzzing_html_contains_expected_heading():
@@ -868,9 +870,9 @@ def test_auth0r_overview_completed_only_uses_type_safe_ordering():
         def execute(self, sql, params=None):
             compact = " ".join(str(sql).split())
             if "FROM domain_rows" in compact and "discovered_urls_count > 0" in compact:
-                assert "CASE WHEN (%s = TRUE) THEN root_domain ELSE NULL END DESC" in compact
-                assert "CASE WHEN (%s = FALSE) THEN COALESCE(saved_at_utc, NOW()) ELSE NULL END DESC" in compact
-                assert params == (True, True, True, 25)
+                assert "ORDER BY root_domain ASC" in compact
+                assert "CASE WHEN (%s = TRUE) THEN root_domain ELSE NULL END DESC" not in compact
+                assert params == (True, 25)
                 self._fetchall = [("example.com", "https://example.com/", 9, "completed", now)]
                 return
             raise AssertionError(f"Unexpected SQL in test: {compact}")
