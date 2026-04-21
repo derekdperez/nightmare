@@ -1037,3 +1037,14 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `python -m py_compile server.py`
   - `pytest -q tests/test_server_auth_cookie.py tests/test_refactor_modules.py` -> 20 passed.
 - Why: unblock central compose/server startup so readiness check can pass and full deploy can proceed.
+
+## 2026-04-21
+
+- Fixed auth0r page load failure (`ReferenceError: readCookie is not defined`) in `templates/auth0r.html.j2`.
+- Root cause: page script called `readCookie(TOKEN_COOKIE_NAME)` in `authHeaders()` but did not define `TOKEN_COOKIE_NAME` or cookie helper functions.
+- Added missing token-cookie helpers (`readCookie`, `writeCookie`, `deleteCookie`) and `TOKEN_COOKIE_NAME` constant, aligned with other coordinator UI pages.
+- Updated `authHeaders()` to persist/remove token cookie consistently and added initial token hydration (`#token` input reads cookie on page load).
+- Validation:
+  - `pytest -q tests/test_refactor_modules.py` -> 14 passed.
+  - `pytest -q tests/test_refactor_modules.py tests/test_reporting_and_store_helpers.py` had 1 pre-existing unrelated failure in discovered-target store SQL expectation.
+- Why: auth0r UI could not execute its first API call due to missing shared auth helper definitions.

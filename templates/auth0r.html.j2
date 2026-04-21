@@ -247,10 +247,31 @@
 
 <script>
 (() => {
+  const TOKEN_COOKIE_NAME = "nightmare_coord_token";
   const state = { selectedDomain: "", selectedProfileId: "", selectedIdentityId: "" };
 
+  function readCookie(name) {
+    const needle = `${name}=`;
+    const cookies = String(document.cookie || "").split(";");
+    for (const part of cookies) {
+      const item = part.trim();
+      if (item.startsWith(needle)) return decodeURIComponent(item.slice(needle.length));
+    }
+    return "";
+  }
+  function writeCookie(name, value, days) {
+    const maxAge = Math.max(1, Number(days || 30)) * 24 * 60 * 60;
+    const secure = location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}`;
+  }
+  function deleteCookie(name) {
+    const secure = location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
+  }
   function authHeaders() {
     const token = String(document.getElementById("token").value || readCookie(TOKEN_COOKIE_NAME) || "").trim();
+    if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
+    else deleteCookie(TOKEN_COOKIE_NAME);
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
   async function fetchJson(url, options = {}) {
@@ -471,6 +492,7 @@
   document.getElementById("save-identity").addEventListener("click", () => saveIdentity().catch((e) => alert(e.message)));
   document.getElementById("delete-profile").addEventListener("click", () => deleteProfile().catch((e) => alert(e.message)));
   document.getElementById("delete-identity").addEventListener("click", () => deleteIdentity().catch((e) => alert(e.message)));
+  document.getElementById("token").value = readCookie(TOKEN_COOKIE_NAME);
 
   loadOverview().catch((e) => {
     console.error(e);

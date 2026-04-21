@@ -284,3 +284,6 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 
 - Server startup convention: every object referenced inside `_prepare_server(...)` must be initialized in `main()` before listener creation.
 - Optional service-store convention: feature stores (for example auth0r profile store) should be best-effort initialized with explicit warning and `None` fallback, so unrelated coordinator/dashboard APIs remain available when optional subsystem init fails.
+
+- UI auth token convention: each standalone page script that uses bearer auth must define (or import) `TOKEN_COOKIE_NAME`, `readCookie`, `writeCookie`, and `deleteCookie` helpers before `authHeaders()` references them.
+- Auth-header behavior convention: `authHeaders()` should persist non-empty token to cookie and clear cookie when token input is empty, then return `Authorization` header only when token exists.
