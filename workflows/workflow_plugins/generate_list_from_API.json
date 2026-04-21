@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "generate_list_from_API",
+  "display_name": "Generate List From Api",
+  "description": "Built-in workflow step plugin for 'generate_list_from_API'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

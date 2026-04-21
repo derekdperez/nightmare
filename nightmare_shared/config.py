@@ -154,6 +154,9 @@ class CoordinatorSettings(BaseModel):
     enable_auth0r: bool = True
     fozzy_process_workers: int = 1
     extractor_process_workers: int = 1
+    workflow_config: Path = Path("workflows/coordinator.workflow.json")
+    workflow_scheduler_enabled: bool = True
+    workflow_scheduler_interval_seconds: float = 15.0
 
     @field_validator("server_base_url", mode="before")
     @classmethod
@@ -163,7 +166,13 @@ class CoordinatorSettings(BaseModel):
             raise ValueError("server_base_url is required")
         return normalized
 
-    @field_validator("heartbeat_interval_seconds", "poll_interval_seconds", "upload_session_every_seconds", mode="before")
+    @field_validator(
+        "heartbeat_interval_seconds",
+        "poll_interval_seconds",
+        "upload_session_every_seconds",
+        "workflow_scheduler_interval_seconds",
+        mode="before",
+    )
     @classmethod
     def _normalize_floatish(cls, value: Any) -> float:
         return safe_float(value, 0.0)
@@ -183,6 +192,7 @@ class CoordinatorSettings(BaseModel):
         self.extractor_workers = max(1, self.extractor_workers)
         self.auth0r_workers = max(1, self.auth0r_workers)
         self.upload_session_every_seconds = max(5.0, self.upload_session_every_seconds)
+        self.workflow_scheduler_interval_seconds = max(5.0, self.workflow_scheduler_interval_seconds)
         self.fozzy_process_workers = max(1, self.fozzy_process_workers)
         self.extractor_process_workers = max(1, self.extractor_process_workers)
         self.api_token = str(self.api_token or "").strip()

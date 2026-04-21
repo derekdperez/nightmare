@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "load_agent_context",
+  "display_name": "Load Agent Context",
+  "description": "Built-in workflow step plugin for 'load_agent_context'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "replace_variables_in_file",
+  "display_name": "Replace Variables In File",
+  "description": "Built-in workflow step plugin for 'replace_variables_in_file'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

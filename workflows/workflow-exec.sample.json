@@ -1,0 +1,46 @@
+{
+  "variables": [
+    {
+      "name": "working_folder",
+      "value": "{{project_root}}"
+    },
+    {
+      "name": "prompt_file_path",
+      "value": "{{project_root}}/generate_potential_responses_prompt.txt"
+    },
+    {
+      "name": "instructions",
+      "value": "{{GetFileContents(prompt_file_path)}}"
+    },
+    {
+      "summary_output_path": "{{project_root}}/workflow-summary-output.txt"
+    }
+  ],
+  "steps": [
+    {
+      "type": "save_variable_value",
+      "name": "target_file_name",
+      "value": "generate_potential_responses_prompt.txt"
+    },
+    {
+      "type": "combine_all_files_in_folder",
+      "folder": "{{working_folder}}",
+      "regex_filter": "^{{target_file_name}}$",
+      "recursive": false,
+      "output": "combined_files"
+    },
+    {
+      "type": "send_input_to_API",
+      "system": "You are a helpful workflow assistant.",
+      "input": "Summarize the following materials into a short checklist.",
+      "input_keys": [
+        "instructions",
+        "combined_files"
+      ],
+      "temperature": 0.2,
+      "max_tokens": 600,
+      "output": "summary_text",
+      "output_file": "{{summary_output_path}}"
+    }
+  ]
+}

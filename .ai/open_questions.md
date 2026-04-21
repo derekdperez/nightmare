@@ -14,3 +14,6 @@
 
 - Repeated runtime failure still unresolved in crawler logic: `nightmare.py` crash `NameError: name 'verify_timeout' is not defined` (seen in uploaded nightmare logs, around `crawl_domain` path). This coordinator patch improves reporting but does not fix the underlying crawler bug.
 - If full deploy still reports API unreachable with coordinator container up, likely external dependency: `LOG_DATABASE_URL` path/connectivity (SG/NACL/route/credentials). New probe diagnostics should now show all URL probe codes and reveal this explicitly in server logs.
+
+- Confirm whether stage retry limits should be globally capped beyond per-stage `max_attempts` in workflow config.
+- Confirm whether Nightmare itself should also move into the workflow definition model (currently still uses coordinator target queue semantics).

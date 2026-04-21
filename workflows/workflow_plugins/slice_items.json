@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "slice_items",
+  "display_name": "Slice Items",
+  "description": "Built-in workflow step plugin for 'slice_items'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

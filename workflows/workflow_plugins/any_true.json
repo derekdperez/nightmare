@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "any_true",
+  "display_name": "Any True",
+  "description": "Built-in workflow step plugin for 'any_true'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

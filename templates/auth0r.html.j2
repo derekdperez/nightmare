@@ -249,6 +249,18 @@
 (() => {
   const TOKEN_COOKIE_NAME = "nightmare_coord_token";
   const state = { selectedDomain: "", selectedProfileId: "", selectedIdentityId: "" };
+  const DEFAULT_REPLAY_POLICY = {
+    read_only_mode: false,
+    verify_state_changes: true,
+    allowed_methods: [],
+    denied_methods: [],
+    allow_path_patterns: [],
+    deny_path_patterns: [],
+  };
+  const DEFAULT_DEFAULT_HEADERS = {};
+  const DEFAULT_LOGIN_EXTRA_FIELDS = {};
+  const DEFAULT_CUSTOM_HEADERS = {};
+  const DEFAULT_IMPORTED_COOKIES = [];
 
   function readCookie(name) {
     const needle = `${name}=`;
@@ -290,6 +302,29 @@
   function splitLines(text) {
     return String(text || "").split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
   }
+  function asObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  }
+  function asArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+  function normalizeReplayPolicy(value) {
+    const raw = asObject(value);
+    return {
+      read_only_mode: Boolean(raw.read_only_mode),
+      verify_state_changes: raw.verify_state_changes !== false,
+      allowed_methods: asArray(raw.allowed_methods).map((v) => String(v || "").trim().toUpperCase()).filter(Boolean),
+      denied_methods: asArray(raw.denied_methods).map((v) => String(v || "").trim().toUpperCase()).filter(Boolean),
+      allow_path_patterns: asArray(raw.allow_path_patterns).map((v) => String(v || "").trim()).filter(Boolean),
+      deny_path_patterns: asArray(raw.deny_path_patterns).map((v) => String(v || "").trim()).filter(Boolean),
+    };
+  }
+  function markersToLines(value) {
+    return asArray(value).map((entry) => {
+      if (entry && typeof entry === "object") return String(entry.value || "").trim();
+      return String(entry || "").trim();
+    }).filter(Boolean).join("\n");
+  }
   function setSummaryCards(counts = {}) {
     const cards = [
       ["Sessions", counts.session_count || 0],
@@ -304,17 +339,27 @@
     document.getElementById("summary-cards").innerHTML = cards.map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   }
   function fillProfileForm(profile) {
+    const normalized = profile || {};
+    const allowedHosts = Array.isArray(normalized.allowed_hosts)
+      ? normalized.allowed_hosts
+      : splitLines(normalized.allowed_hosts || "");
+    const replayPolicy = normalizeReplayPolicy({ ...DEFAULT_REPLAY_POLICY, ...asObject(normalized.replay_policy) });
+    const defaultHeaders = { ...DEFAULT_DEFAULT_HEADERS, ...asObject(normalized.default_headers) };
     document.getElementById("profile-id").value = profile?.id || "";
     document.getElementById("profile-label").value = profile?.profile_label || "";
     document.getElementById("profile-root-domain").value = profile?.root_domain || state.selectedDomain || "";
     document.getElementById("profile-enabled").value = String(profile?.enabled ?? true);
-    document.getElementById("profile-allowed-hosts").value = (profile?.allowed_hosts || []).join("\n");
-    document.getElementById("profile-replay-policy").value = JSON.stringify(profile?.replay_policy || {}, null, 2);
-    document.getElementById("profile-default-headers").value = JSON.stringify(profile?.default_headers || {}, null, 2);
+    document.getElementById("profile-allowed-hosts").value = allowedHosts.join("\n");
+    document.getElementById("profile-replay-policy").value = JSON.stringify(replayPolicy, null, 2);
+    document.getElementById("profile-default-headers").value = JSON.stringify(defaultHeaders, null, 2);
     state.selectedProfileId = profile?.id || "";
     if (profile?.id) document.getElementById("identity-profile-id").value = profile.id;
   }
   function fillIdentityForm(identity) {
+    const normalized = identity || {};
+    const loginExtraFields = { ...DEFAULT_LOGIN_EXTRA_FIELDS, ...asObject(normalized.login_extra_fields) };
+    const customHeaders = { ...DEFAULT_CUSTOM_HEADERS, ...asObject(normalized.custom_headers) };
+    const importedCookies = asArray(normalized.imported_cookies);
     document.getElementById("identity-id").value = identity?.id || "";
     document.getElementById("identity-profile-id").value = identity?.profile_id || state.selectedProfileId || "";
     document.getElementById("identity-enabled").value = String(identity?.enabled ?? true);
@@ -330,11 +375,11 @@
     document.getElementById("identity-username-field").value = identity?.login_username_field || "username";
     document.getElementById("identity-password-field").value = identity?.login_password_field || "password";
     document.getElementById("identity-logout-url").value = identity?.logout_url || "";
-    document.getElementById("identity-login-extra-fields").value = JSON.stringify(identity?.login_extra_fields || {}, null, 2);
-    document.getElementById("identity-custom-headers").value = JSON.stringify(identity?.custom_headers || {}, null, 2);
-    document.getElementById("identity-success-markers").value = (identity?.success_markers || []).map((m) => m.value || "").join("\n");
-    document.getElementById("identity-denial-markers").value = (identity?.denial_markers || []).map((m) => m.value || "").join("\n");
-    document.getElementById("identity-imported-cookies").value = JSON.stringify(identity?.imported_cookies || [], null, 2);
+    document.getElementById("identity-login-extra-fields").value = JSON.stringify(loginExtraFields, null, 2);
+    document.getElementById("identity-custom-headers").value = JSON.stringify(customHeaders, null, 2);
+    document.getElementById("identity-success-markers").value = markersToLines(identity?.success_markers);
+    document.getElementById("identity-denial-markers").value = markersToLines(identity?.denial_markers);
+    document.getElementById("identity-imported-cookies").value = JSON.stringify(importedCookies.length ? importedCookies : DEFAULT_IMPORTED_COOKIES, null, 2);
     state.selectedIdentityId = identity?.id || "";
   }
   async function loadOverview() {
@@ -493,6 +538,18 @@
   document.getElementById("delete-profile").addEventListener("click", () => deleteProfile().catch((e) => alert(e.message)));
   document.getElementById("delete-identity").addEventListener("click", () => deleteIdentity().catch((e) => alert(e.message)));
   document.getElementById("token").value = readCookie(TOKEN_COOKIE_NAME);
+  fillProfileForm({ root_domain: "", enabled: true, replay_policy: DEFAULT_REPLAY_POLICY, default_headers: DEFAULT_DEFAULT_HEADERS });
+  fillIdentityForm({
+    profile_id: "",
+    enabled: true,
+    login_strategy: "cookie_import",
+    login_method: "POST",
+    login_username_field: "username",
+    login_password_field: "password",
+    login_extra_fields: DEFAULT_LOGIN_EXTRA_FIELDS,
+    custom_headers: DEFAULT_CUSTOM_HEADERS,
+    imported_cookies: DEFAULT_IMPORTED_COOKIES,
+  });
 
   loadOverview().catch((e) => {
     console.error(e);

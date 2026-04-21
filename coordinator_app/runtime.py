@@ -102,6 +102,9 @@ class CoordinatorConfig:
     enable_auth0r: bool
     fozzy_process_workers: int
     extractor_process_workers: int
+    workflow_config: Path
+    workflow_scheduler_enabled: bool
+    workflow_scheduler_interval_seconds: float
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -187,7 +190,43 @@ class CoordinatorClient:
             "/api/coord/stage/enqueue",
             {"root_domain": root_domain, "stage": stage},
         )
-        return bool(rsp.get("ok"))
+        if not bool(rsp.get("ok")):
+            return False
+        return bool(rsp.get("scheduled", rsp.get("ok")))
+
+    def enqueue_stage_detailed(
+        self,
+        root_domain: str,
+        stage: str,
+        *,
+        worker_id: str = "",
+        reason: str = "",
+        allow_retry_failed: bool = False,
+        max_attempts: int = 0,
+    ) -> dict[str, Any]:
+        rsp = self._request_json(
+            "POST",
+            "/api/coord/stage/enqueue",
+            {
+                "root_domain": root_domain,
+                "stage": stage,
+                "worker_id": str(worker_id or "").strip(),
+                "reason": str(reason or "").strip(),
+                "allow_retry_failed": bool(allow_retry_failed),
+                "max_attempts": int(max_attempts or 0),
+            },
+        )
+        if not isinstance(rsp, dict):
+            return {"ok": False, "scheduled": False}
+        return {
+            "ok": bool(rsp.get("ok")),
+            "scheduled": bool(rsp.get("scheduled", False)),
+            "status": str(rsp.get("status", "") or ""),
+            "reason": str(rsp.get("reason", "") or ""),
+            "attempt_count": safe_int(rsp.get("attempt_count"), 0),
+            "root_domain": str(rsp.get("root_domain", root_domain) or root_domain),
+            "stage": str(rsp.get("stage", stage) or stage),
+        }
 
     def claim_stage(self, worker_id: str, stage: str, lease_seconds: int) -> Optional[dict[str, Any] ]:
         rsp = self._request_json(
@@ -278,6 +317,10 @@ class CoordinatorClient:
 
     def get_fleet_settings(self) -> dict[str, Any]:
         return self._request_json("GET", "/api/coord/fleet-settings")
+
+    def get_workflow_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
+        query = urlencode({"limit": max(1, int(limit or 1))})
+        return self._request_json("GET", f"/api/coord/workflow-snapshot?{query}")
 
     def claim_worker_command(self, worker_id: str, *, worker_state: str = "idle") -> Optional[dict[str, Any]]:
         rsp = self._request_json(
@@ -517,6 +560,9 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
             "enable_auth0r": bool(cfg.get("enable_auth0r", True)),
             "fozzy_process_workers": cfg.get("fozzy_process_workers", 1),
             "extractor_process_workers": cfg.get("extractor_process_workers", 1),
+            "workflow_config": BASE_DIR / str(cfg.get("workflow_config", "workflows/coordinator.workflow.json")),
+            "workflow_scheduler_enabled": cfg.get("workflow_scheduler_enabled", True),
+            "workflow_scheduler_interval_seconds": cfg.get("workflow_scheduler_interval_seconds", 15.0),
         }
     )
     output_root = Path(settings.output_root).expanduser()
@@ -546,4 +592,7 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
         enable_auth0r=settings.enable_auth0r,
         fozzy_process_workers=settings.fozzy_process_workers,
         extractor_process_workers=settings.extractor_process_workers,
+        workflow_config=Path(settings.workflow_config).resolve(),
+        workflow_scheduler_enabled=bool(settings.workflow_scheduler_enabled),
+        workflow_scheduler_interval_seconds=float(settings.workflow_scheduler_interval_seconds),
     )

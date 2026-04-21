@@ -1109,6 +1109,129 @@ ORDER BY ordinal_position;
             "generated_at_utc": _iso_now(),
         }
 
+    def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
+        safe_limit = max(1, min(5000, int(limit or 2000)))
+        domains_sql = """
+SELECT root_domain
+FROM (
+    SELECT DISTINCT root_domain FROM coordinator_targets
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_stage_tasks
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_artifacts
+) d
+WHERE root_domain IS NOT NULL AND root_domain <> ''
+ORDER BY root_domain ASC
+LIMIT %s;
+"""
+        domains: list[str] = []
+        stage_rows: list[Any] = []
+        artifact_rows: list[Any] = []
+        target_rows: list[Any] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(domains_sql, (safe_limit,))
+                domains = [str(row[0] or "").strip().lower() for row in cur.fetchall() if str(row[0] or "").strip()]
+                if domains:
+                    cur.execute(
+                        """
+SELECT root_domain, stage, status, attempt_count, exit_code, error, updated_at_utc, completed_at_utc
+FROM coordinator_stage_tasks
+WHERE root_domain = ANY(%s)
+ORDER BY root_domain ASC, stage ASC;
+""",
+                        (domains,),
+                    )
+                    stage_rows = cur.fetchall()
+                    cur.execute(
+                        """
+SELECT root_domain, artifact_type, updated_at_utc
+FROM coordinator_artifacts
+WHERE root_domain = ANY(%s)
+ORDER BY root_domain ASC, artifact_type ASC;
+""",
+                        (domains,),
+                    )
+                    artifact_rows = cur.fetchall()
+                    cur.execute(
+                        """
+SELECT
+  root_domain,
+  COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
+  COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+  COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
+  COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets
+FROM coordinator_targets
+WHERE root_domain = ANY(%s)
+GROUP BY root_domain
+ORDER BY root_domain ASC;
+""",
+                        (domains,),
+                    )
+                    target_rows = cur.fetchall()
+            conn.commit()
+
+        stage_map: dict[str, dict[str, Any]] = {}
+        for row in stage_rows:
+            rd = str(row[0] or "").strip().lower()
+            stg = str(row[1] or "").strip().lower()
+            if not rd or not stg:
+                continue
+            stage_map.setdefault(rd, {})[stg] = {
+                "stage": stg,
+                "status": str(row[2] or "").strip().lower(),
+                "attempt_count": int(row[3] or 0),
+                "exit_code": (int(row[4]) if row[4] is not None else None),
+                "error": str(row[5] or ""),
+                "updated_at_utc": row[6].isoformat() if row[6] else None,
+                "completed_at_utc": row[7].isoformat() if row[7] else None,
+            }
+
+        artifact_map: dict[str, list[dict[str, Any]]] = {}
+        for row in artifact_rows:
+            rd = str(row[0] or "").strip().lower()
+            artifact_type = str(row[1] or "").strip().lower()
+            if not rd or not artifact_type:
+                continue
+            artifact_map.setdefault(rd, []).append(
+                {
+                    "artifact_type": artifact_type,
+                    "updated_at_utc": row[2].isoformat() if row[2] else None,
+                }
+            )
+
+        target_map: dict[str, dict[str, int]] = {}
+        for row in target_rows:
+            rd = str(row[0] or "").strip().lower()
+            if not rd:
+                continue
+            target_map[rd] = {
+                "pending": int(row[1] or 0),
+                "running": int(row[2] or 0),
+                "completed": int(row[3] or 0),
+                "failed": int(row[4] or 0),
+            }
+
+        domain_rows: list[dict[str, Any]] = []
+        for rd in domains:
+            artifacts = artifact_map.get(rd, [])
+            domain_rows.append(
+                {
+                    "root_domain": rd,
+                    "targets": target_map.get(rd, {"pending": 0, "running": 0, "completed": 0, "failed": 0}),
+                    "stage_tasks": stage_map.get(rd, {}),
+                    "artifact_types": [item["artifact_type"] for item in artifacts],
+                    "artifacts": artifacts,
+                }
+            )
+
+        return {
+            "generated_at_utc": _iso_now(),
+            "limit": safe_limit,
+            "domain_count": len(domain_rows),
+            "domains": domain_rows,
+        }
+
     def crawl_progress_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         safe_limit = max(1, min(2000, int(limit or 2000)))
         sql = """
@@ -2244,44 +2367,146 @@ RETURNING command;
                 )
         return updated > 0
 
-    def enqueue_stage(self, root_domain: str, stage: str) -> bool:
+    def schedule_stage(
+        self,
+        root_domain: str,
+        stage: str,
+        *,
+        worker_id: str = "",
+        reason: str = "",
+        allow_retry_failed: bool = False,
+        max_attempts: int = 0,
+    ) -> dict[str, Any]:
         rd = str(root_domain or "").strip().lower()
         stg = str(stage or "").strip().lower()
+        wid = str(worker_id or "").strip()
+        source_reason = str(reason or "").strip()
+        max_attempts_int = max(0, int(max_attempts or 0))
         if not rd or not stg:
-            return False
-        sql = """
+            return {
+                "ok": False,
+                "scheduled": False,
+                "root_domain": rd,
+                "stage": stg,
+                "status": "",
+                "reason": "invalid_input",
+                "attempt_count": 0,
+            }
+
+        scheduled = False
+        status = ""
+        decision_reason = ""
+        attempt_count = 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if wid:
+                    self._touch_worker_presence(cur, wid, f"schedule_stage_{stg}")
+                cur.execute(
+                    """
+SELECT status, attempt_count
+FROM coordinator_stage_tasks
+WHERE root_domain = %s AND stage = %s
+FOR UPDATE;
+""",
+                    (rd, stg),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute(
+                        """
 INSERT INTO coordinator_stage_tasks(root_domain, stage, status, updated_at_utc)
-VALUES (%s, %s, 'pending', NOW())
-ON CONFLICT (root_domain, stage) DO UPDATE
-SET status = CASE
-      WHEN coordinator_stage_tasks.status = 'completed' THEN coordinator_stage_tasks.status
-      ELSE 'pending'
-    END,
+VALUES (%s, %s, 'pending', NOW());
+""",
+                        (rd, stg),
+                    )
+                    scheduled = True
+                    status = "pending"
+                    decision_reason = "inserted"
+                    attempt_count = 0
+                else:
+                    current_status = str(row[0] or "").strip().lower()
+                    attempt_count = int(row[1] or 0)
+                    status = current_status
+                    if current_status == "completed":
+                        decision_reason = "already_completed"
+                    elif current_status in {"pending", "running"}:
+                        decision_reason = f"already_{current_status}"
+                    elif current_status == "failed":
+                        can_retry = bool(allow_retry_failed)
+                        if max_attempts_int > 0 and attempt_count >= max_attempts_int:
+                            can_retry = False
+                            decision_reason = "max_attempts_reached"
+                        if can_retry:
+                            cur.execute(
+                                """
+UPDATE coordinator_stage_tasks
+SET status = 'pending',
     worker_id = NULL,
     lease_expires_at = NULL,
     heartbeat_at_utc = NULL,
-    completed_at_utc = CASE
-      WHEN coordinator_stage_tasks.status = 'completed' THEN coordinator_stage_tasks.completed_at_utc
-      ELSE NULL
-    END,
-    updated_at_utc = NOW();
-"""
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (rd, stg))
+    completed_at_utc = NULL,
+    updated_at_utc = NOW(),
+    error = NULL
+WHERE root_domain = %s
+  AND stage = %s;
+""",
+                                (rd, stg),
+                            )
+                            scheduled = True
+                            status = "pending"
+                            decision_reason = "retry_enqueued"
+                        elif not decision_reason:
+                            decision_reason = "retry_not_allowed"
+                    else:
+                        decision_reason = f"unsupported_status_{current_status or 'unknown'}"
             conn.commit()
-        self.record_system_event(
-            "stage.enqueued",
-            f"stage:{rd}:{stg}",
-            {
-                "source": "coordinator_store.enqueue_stage",
-                "root_domain": rd,
-                "stage": stg,
-                "status": "pending",
-                "table": "coordinator_stage_tasks",
-            },
+
+        if scheduled:
+            self.record_system_event(
+                "stage.enqueued",
+                f"stage:{rd}:{stg}",
+                {
+                    "source": "coordinator_store.schedule_stage",
+                    "root_domain": rd,
+                    "stage": stg,
+                    "status": "pending",
+                    "worker_id": wid,
+                    "reason": source_reason or decision_reason,
+                    "allow_retry_failed": bool(allow_retry_failed),
+                    "max_attempts": max_attempts_int,
+                    "table": "coordinator_stage_tasks",
+                },
+            )
+
+        return {
+            "ok": True,
+            "scheduled": scheduled,
+            "root_domain": rd,
+            "stage": stg,
+            "status": status,
+            "reason": decision_reason,
+            "attempt_count": attempt_count,
+        }
+
+    def enqueue_stage(
+        self,
+        root_domain: str,
+        stage: str,
+        *,
+        worker_id: str = "",
+        reason: str = "",
+        allow_retry_failed: bool = False,
+        max_attempts: int = 0,
+    ) -> bool:
+        result = self.schedule_stage(
+            root_domain,
+            stage,
+            worker_id=worker_id,
+            reason=reason,
+            allow_retry_failed=allow_retry_failed,
+            max_attempts=max_attempts,
         )
-        return True
+        return bool(result.get("scheduled"))
 
     def claim_stage(self, stage: str, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any]]:
         stg = str(stage or "").strip().lower()

@@ -175,3 +175,9 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - URL-validation boundary refinement:
   - `probe_url_existence` now separates transport strategy (`head_first`) from classification intent (negative-profile compare), allowing GET-first classification workflows while preserving HEAD-first optimization for generic probes.
   - Soft-404 baseline quality is now less sensitive to server-specific HEAD behavior.
+
+- Coordinator scheduling architecture now has two independent lanes:
+  - target-claim lane (Nightmare queue)
+  - workflow stage lane (Auth0r/Fozzy/Extractor) driven by artifact readiness from central snapshot API.
+- Stage scheduling is now centralized through `CoordinatorStore.schedule_stage(...)` decision logic to keep queue state transitions safe across multiple workers.
+- Workflow definition source: `workflows/coordinator.workflow.json` (plugin-style metadata plus prerequisites/retry/parameters).

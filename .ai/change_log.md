@@ -1184,3 +1184,26 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Fixed Auth0r profile-save crash in `auth0r/profile_store.py`:
   - `upsert_profile(...)` now defines and uses `normalized_profile_id` before SQL execution.
 - Why: saving a profile from `/auth0r` could raise a runtime `NameError` and surface in browser as a generic `failed to fetch` alert instead of a normal API error payload.
+
+## 2026-04-21
+
+- Updated `templates/auth0r.html.j2` to pre-populate Auth0r forms with concrete defaults on page load.
+  - Replay policy textarea now renders full default JSON shape (`read_only_mode`, `verify_state_changes`, method/path allow/deny arrays).
+  - Identity JSON fields (`login_extra_fields`, `custom_headers`, `imported_cookies`) now render normalized default JSON values instead of empty placeholders.
+  - Added client-side normalization helpers so loading blank/partial records still shows stable expected JSON structures.
+- Why: make first-time profile/identity creation self-documenting and reduce malformed JSON edits.
+
+## 2026-04-21
+
+- Added workflow-driven stage scheduling for coordinator workers.
+- Changes:
+  - `coordinator.py`: added workflow config loading from `workflows/coordinator.workflow.json`, periodic scheduler loop, data-readiness checks, and stage-parameter overrides per tool.
+  - `coordinator_app/runtime.py`: added workflow scheduler config fields, `/api/coord/workflow-snapshot` client call, and detailed stage enqueue API helper.
+  - `server_app/store.py`: replaced unsafe enqueue semantics with `schedule_stage(...)` decision logic that preserves `running/pending/completed` rows and only retries failed rows when explicitly allowed.
+  - `server.py`: added `GET /api/coord/workflow-snapshot` and enhanced `POST /api/coord/stage/enqueue` payload/response contract.
+  - `workflows/coordinator.workflow.json`: new default workflow definition using plugin-style metadata (`handler`, `config_schema`) and prerequisites/retry/parameters for `auth0r`, `fozzy`, and `extractor`.
+- Why:
+  - Removes hard dependency on sequential success chaining and lets stages start whenever required artifacts are present.
+  - Prevents accidental task clobber/re-enqueue while still allowing controlled retries for failed stages.
+- Validation:
+  - `pytest -q tests/test_config_utils.py tests/test_runtime_unit.py tests/test_reporting_and_store_helpers.py` (56 passed).

@@ -1,0 +1,84 @@
+﻿{
+  "schema_version": "1.0.0",
+  "workflow_type": "coordinator_stage_scheduler",
+  "description": "Data-readiness scheduler for stage tools. Entries use plugin-style metadata and scheduler policy.",
+  "stages": [
+    {
+      "name": "auth0r",
+      "display_name": "Auth0r",
+      "description": "Run auth0r when nightmare session data is available.",
+      "category": "builtin",
+      "contract_version": "1.0.0",
+      "handler": "legacy_step_adapter",
+      "config_schema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "stage": "auth0r",
+      "enabled": true,
+      "prerequisites": {
+        "artifacts_all": [
+          "nightmare_session_json"
+        ]
+      },
+      "retry_failed": true,
+      "max_attempts": 3,
+      "parameters": {
+        "min_delay_seconds": 0.25,
+        "max_seed_actions": 200,
+        "timeout_seconds": 20.0
+      }
+    },
+    {
+      "name": "fozzy",
+      "display_name": "Fozzy",
+      "description": "Run fozzy when nightmare parameter data is available.",
+      "category": "builtin",
+      "contract_version": "1.0.0",
+      "handler": "legacy_step_adapter",
+      "config_schema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "stage": "fozzy",
+      "enabled": true,
+      "prerequisites": {
+        "artifacts_all": [
+          "nightmare_parameters_json"
+        ]
+      },
+      "retry_failed": true,
+      "max_attempts": 3,
+      "parameters": {
+        "max_background_workers": 1,
+        "max_workers_per_domain": 1,
+        "max_workers_per_subdomain": 1
+      }
+    },
+    {
+      "name": "extractor",
+      "display_name": "Extractor",
+      "description": "Run extractor when fozzy result data is available.",
+      "category": "builtin",
+      "contract_version": "1.0.0",
+      "handler": "legacy_step_adapter",
+      "config_schema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "stage": "extractor",
+      "enabled": true,
+      "prerequisites": {
+        "artifacts_all": [
+          "fozzy_results_zip"
+        ]
+      },
+      "retry_failed": true,
+      "max_attempts": 3,
+      "parameters": {
+        "workers": 1,
+        "force": true
+      }
+    }
+  ]
+}

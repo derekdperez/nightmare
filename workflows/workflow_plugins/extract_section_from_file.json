@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "extract_section_from_file",
+  "display_name": "Extract Section From File",
+  "description": "Built-in workflow step plugin for 'extract_section_from_file'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "compare_number",
+  "display_name": "Compare Number",
+  "description": "Built-in workflow step plugin for 'compare_number'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

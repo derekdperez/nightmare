@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "unified_text_diff",
+  "display_name": "Unified Text Diff",
+  "description": "Built-in workflow step plugin for 'unified_text_diff'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

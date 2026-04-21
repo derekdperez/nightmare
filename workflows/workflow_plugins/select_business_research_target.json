@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "select_business_research_target",
+  "display_name": "Select Business Research Target",
+  "description": "Built-in workflow step plugin for 'select_business_research_target'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

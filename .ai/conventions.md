@@ -318,3 +318,7 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Soft-404 baseline-learning convention: for negative-profile training, prefer GET-body probes over HEAD-first probes; HEAD-only responses can be bodyless and produce unusable fingerprints.
 - Soft-404 comparison convention: baseline classification paths should use full-body requests (GET) because body similarity signals are required for reliable catch-all detection.
 - Soft-404 heuristic convention: phrase/regex markers should not be gated exclusively by small-body thresholds; large branded error templates may exceed small-body limits.
+
+- Stage queueing convention: use `schedule_stage(...)` / `POST /api/coord/stage/enqueue` with retry flags instead of forcing status resets; do not overwrite `running` tasks.
+- Workflow scheduling convention: prerequisites are artifact-based (`artifacts_all` / `artifacts_any`), not strict stage-success sequencing.
+- Tool tuning convention: stage-specific runtime knobs should be read from workflow `parameters` first, then fall back to tool config files.

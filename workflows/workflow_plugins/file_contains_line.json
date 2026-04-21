@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "file_contains_line",
+  "display_name": "File Contains Line",
+  "description": "Built-in workflow step plugin for 'file_contains_line'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

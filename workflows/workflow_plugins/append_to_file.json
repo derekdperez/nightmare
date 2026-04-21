@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "append_to_file",
+  "display_name": "Append To File",
+  "description": "Built-in workflow step plugin for 'append_to_file'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

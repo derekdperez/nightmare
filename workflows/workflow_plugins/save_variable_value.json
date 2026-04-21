@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "save_variable_value",
+  "display_name": "Save Variable Value",
+  "description": "Built-in workflow step plugin for 'save_variable_value'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

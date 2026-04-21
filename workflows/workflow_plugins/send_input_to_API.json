@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "send_input_to_API",
+  "display_name": "Send Input To Api",
+  "description": "Built-in workflow step plugin for 'send_input_to_API'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

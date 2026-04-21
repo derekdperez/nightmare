@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "count_items",
+  "display_name": "Count Items",
+  "description": "Built-in workflow step plugin for 'count_items'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

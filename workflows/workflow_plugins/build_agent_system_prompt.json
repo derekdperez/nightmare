@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "build_agent_system_prompt",
+  "display_name": "Build Agent System Prompt",
+  "description": "Built-in workflow step plugin for 'build_agent_system_prompt'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

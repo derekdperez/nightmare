@@ -4215,6 +4215,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json({"root_domain": root_domain, "artifacts": self.coordinator_store.list_artifacts(root_domain)})
             return
+        if path == "/api/coord/workflow-snapshot":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = _safe_int((query.get("limit") or ["2000"])[0], 2000)
+            try:
+                payload = self.coordinator_store.workflow_scheduler_snapshot(limit=limit)
+            except Exception as exc:
+                self.log_message("workflow_scheduler_snapshot failed: %r", exc)
+                self._write_json({"error": "workflow snapshot query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
+            return
         if path == "/api/coord/worker-log-download":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
@@ -4436,8 +4452,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/coord/stage/enqueue":
             root_domain = str(body.get("root_domain", "") or "").strip().lower()
             stage = str(body.get("stage", "") or "").strip().lower()
-            ok = self.coordinator_store.enqueue_stage(root_domain, stage)
-            self._write_json({"ok": bool(ok)})
+            worker_id = str(body.get("worker_id", "") or "").strip()
+            reason = str(body.get("reason", "") or "").strip()
+            allow_retry_failed = bool(body.get("allow_retry_failed", False))
+            max_attempts = _safe_int(body.get("max_attempts", 0), 0)
+            result = self.coordinator_store.schedule_stage(
+                root_domain,
+                stage,
+                worker_id=worker_id,
+                reason=reason,
+                allow_retry_failed=allow_retry_failed,
+                max_attempts=max_attempts,
+            )
+            self._write_json(result)
             return
 
         if path == "/api/coord/stage/claim":

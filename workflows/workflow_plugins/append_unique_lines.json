@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "name": "append_unique_lines",
+  "display_name": "Append Unique Lines",
+  "description": "Built-in workflow step plugin for 'append_unique_lines'.",
+  "category": "builtin",
+  "contract_version": "1.0.0",
+  "handler": "legacy_step_adapter",
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}
