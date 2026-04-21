@@ -3,19 +3,17 @@
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import base64
 import io
 import os
-import re
 import zipfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 try:
     import psycopg
@@ -85,31 +83,6 @@ SUPPORTED_REPROCESS_MODES = {
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _read_json_gzip_dict(path: Path) -> dict[str, Any]:
-    try:
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _coerce_iso_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
-def _evidence_sort_key(path_text: str) -> tuple[int, str]:
-    text = str(path_text or "")
-    match = re.search(r"_(\d+)(?:\.[a-z0-9]+)*$", text, flags=re.IGNORECASE)
-    if match:
-        try:
-            return (int(match.group(1)), text)
-        except Exception:
-            pass
-    return (0, text)
 
 
 def _json_safe_db_value(value: Any) -> Any:
@@ -1028,7 +1001,7 @@ ORDER BY ordinal_position;
                 table_rows = cur.fetchall()
                 tables: list[dict[str, Any]] = []
                 for schema_name, table_name in table_rows:
-                    safe_ident = f'"{str(schema_name).replace('"', '""')}"."{str(table_name).replace('"', '""')}"'
+                    safe_ident = f'{_quote_ident(schema_name)}.{_quote_ident(table_name)}'
                     try:
                         cur.execute(columns_sql, (schema_name, table_name))
                         column_rows = cur.fetchall()
@@ -1487,94 +1460,6 @@ LIMIT %s;
             })
         return rows_out
 
-
-    def _select_discovered_target_response_evidence(
-        self,
-        *,
-        record: dict[str, Any],
-    ) -> tuple[str | None, dict[str, Any]]:
-        evidence_files = record.get("discovery_evidence_files") if isinstance(record.get("discovery_evidence_files"), list) else []
-        candidates = [str(item or "").strip() for item in evidence_files if str(item or "").strip()]
-        if not candidates:
-            return None, {}
-        preferred: list[str] = []
-        for prefix in ("existence_probe_", "crawl_response_", "ai_probe_response_"):
-            preferred.extend([item for item in candidates if Path(item).name.startswith(prefix)])
-        ordered = preferred + [item for item in sorted(candidates, key=_evidence_sort_key, reverse=True) if item not in preferred]
-        for item in ordered:
-            payload = _read_json_gzip_dict(Path(item))
-            response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
-            if response:
-                return item, payload
-        return None, {}
-
-    def _build_discovered_target_response_summary(
-        self,
-        *,
-        root_domain: str,
-        record: dict[str, Any],
-    ) -> dict[str, Any]:
-        evidence_path, payload = self._select_discovered_target_response_evidence(record=record)
-        response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
-        request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
-        probe_result = payload.get("probe_result") if isinstance(payload.get("probe_result"), dict) else {}
-        headers = response.get("headers") if isinstance(response.get("headers"), dict) else {}
-        content_type = str(headers.get("content-type") or headers.get("Content-Type") or record.get("content_type") or "")
-        body_size = int(
-            response.get("body_size_bytes")
-            or response.get("stored_body_size_bytes")
-            or response.get("body_size")
-            or 0
-        )
-        summary = {
-            "exists_status": "exists" if bool(record.get("exists_confirmed")) else ("nonexistent" if bool(record.get("soft_404_detected")) or record.get("existence_status_code") in {404, 410} else "unknown"),
-            "exists_reason": str(record.get("existence_check_note") or record.get("crawl_note") or record.get("soft_404_reason") or "").strip(),
-            "response_available": bool(response),
-            "response_evidence_path": evidence_path,
-            "response_status_code": response.get("status"),
-            "response_url": str(response.get("url") or record.get("url") or ""),
-            "response_elapsed_ms": int(response.get("elapsed_ms") or 0),
-            "response_size_bytes": body_size,
-            "response_content_type": content_type,
-            "body_truncated": bool(response.get("body_truncated", False)),
-            "captured_at_utc": _coerce_iso_text(payload.get("captured_at_utc")),
-            "request_method": str(request.get("method") or record.get("existence_check_method") or "GET"),
-            "probe_note": str(probe_result.get("note") or record.get("existence_check_note") or "").strip(),
-            "soft_404_detected": bool(probe_result.get("soft_404_detected", False) or record.get("soft_404_detected")),
-            "soft_404_reason": str(probe_result.get("soft_404_reason") or record.get("soft_404_reason") or "").strip(),
-            "view_response_path": f"/discovered-target-response?root_domain={root_domain}&url={quote(str(record.get('url') or ''), safe='')}",
-        }
-        return summary
-
-    def get_discovered_target_response(self, root_domain: str, url: str) -> dict[str, Any]:
-        rd = str(root_domain or "").strip().lower()
-        normalized_url = str(url or "").strip()
-        if not rd or not normalized_url:
-            return {"root_domain": rd, "url": normalized_url, "found": False}
-        session = self.load_session(rd) or {}
-        state = session.get("state") if isinstance(session.get("state"), dict) else {}
-        inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
-        record = inventory.get(normalized_url) if isinstance(inventory.get(normalized_url), dict) else None
-        if record is None:
-            return {"root_domain": rd, "url": normalized_url, "found": False}
-        evidence_path, payload = self._select_discovered_target_response_evidence(record=record)
-        response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
-        request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
-        probe_result = payload.get("probe_result") if isinstance(payload.get("probe_result"), dict) else {}
-        summary = self._build_discovered_target_response_summary(root_domain=rd, record={**record, "url": normalized_url})
-        return {
-            "root_domain": rd,
-            "url": normalized_url,
-            "found": True,
-            "record": record,
-            "summary": summary,
-            "evidence_path": evidence_path,
-            "captured_at_utc": _coerce_iso_text(payload.get("captured_at_utc")),
-            "request": request,
-            "response": response,
-            "probe_result": probe_result,
-        }
-
     def get_discovered_target_sitemap(self, root_domain: str) -> dict[str, Any]:
         rd = str(root_domain or "").strip().lower()
         if not rd:
@@ -1603,10 +1488,6 @@ LIMIT %s;
             discovered_from = sorted(set(parents))[:50]
             crawl_status_code = record.get("status_code")
             existence_status_code = record.get("existence_status_code")
-            summary = self._build_discovered_target_response_summary(
-                root_domain=rd,
-                record={**record, "url": url},
-            )
             page = {
                 "url": url,
                 "inbound_count": len(discovered_from),
@@ -1622,16 +1503,7 @@ LIMIT %s;
                 "parent_count": len(discovered_from),
                 "parents": discovered_from,
                 "status_code": crawl_status_code,
-                "content_type": str(record.get("content_type", "") or summary.get("response_content_type") or ""),
-                "exists_status": summary.get("exists_status"),
-                "exists_reason": summary.get("exists_reason"),
-                "response_available": bool(summary.get("response_available")),
-                "response_status_code": summary.get("response_status_code"),
-                "response_elapsed_ms": summary.get("response_elapsed_ms"),
-                "response_size_bytes": summary.get("response_size_bytes"),
-                "response_content_type": summary.get("response_content_type"),
-                "response_url": summary.get("response_url"),
-                "view_response_path": summary.get("view_response_path"),
+                "content_type": str(record.get("content_type", "") or ""),
             }
             pages.append(page)
         return {
