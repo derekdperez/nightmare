@@ -152,3 +152,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - `/errors` is now a dedicated UI surface rendered from `templates/errors.html.j2`.
   - `/api/errors` serves filtered error events from the structured log DB (`LogStore.query_error_events`), while `/api/coord/errors/ingest` is the write-side ingest endpoint.
   - Read/write responsibilities are split cleanly in `server.py` routing while storage remains in `logging_app/store.py`.
+
+- Discovered-files contract hardening:
+  - `server_app/store.py` now emits canonical UI fields for discovered/high-value file listings (`updated_at_utc`/`captured_at_utc`, `content_size_bytes`).
+  - `server.py` discovered/high-value endpoints now return both `rows` (canonical) and `files` (compatibility alias) to decouple API evolution from template rollout timing.

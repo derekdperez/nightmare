@@ -1061,3 +1061,17 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `python -m py_compile server.py reporting/server_pages.py`
   - `pytest -q tests/test_server_auth_cookie.py tests/test_refactor_modules.py` -> 20 passed.
 - Why: expose the existing errors UI and script-based error ingestion path as first-class server endpoints.
+
+- Fixed discovered files page artifact grid rendering on coordinator UI.
+- Root causes:
+  - API/template collection key mismatch (`/api/coord/discovered-files` + `/api/coord/high-value-files` returned `rows`, while template consumed `files`).
+  - Row field mismatch (`updated_at_utc`/`content_size_bytes` expected by template, but store methods returned `discovered_at_utc`/`file_size` only).
+- Changes:
+  - `server_app/store.py`: `list_discovered_files` and `list_high_value_files` now emit template-compatible keys (`updated_at_utc`, `captured_at_utc`, `content_size_bytes`) while preserving legacy aliases.
+  - `server.py`: both discovered/high-value APIs now return both `rows` and `files` keys for compatibility.
+  - `templates/discovered_files.html.j2`: added client-side compatibility helpers (`getRows`, timestamp/size normalization) so the UI tolerates either payload/row shape.
+  - `tests/test_reporting_and_store_helpers.py`: added focused regression tests for discovered-files template contract and both store list methods.
+- Validation:
+  - `python -m py_compile server.py server_app/store.py`
+  - `pytest -q tests/test_reporting_and_store_helpers.py -k "render_discovered_files_html or list_discovered_files_returns_template_compatible_keys or list_high_value_files_returns_template_compatible_keys"` -> 3 passed
+  - `pytest -q tests/test_refactor_modules.py tests/test_server_auth_cookie.py` -> 20 passed

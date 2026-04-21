@@ -291,3 +291,6 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - UI route parity convention: any navbar-visible page template must have a corresponding explicit GET route in `server.py` (avoid orphaned templates/links).
 - Page data contract convention: if a template calls a first-party API path (for example `/api/errors`), that endpoint must be implemented in `server.py` and protected consistently with coordinator auth.
 - Error-ingest convention: shell/runtime diagnostics posted to `/api/coord/errors/ingest` should support both single-event and batch-event payloads and return inserted/received counts.
+
+- Discovered-files payload convention: coordinator list APIs should expose `rows` as the canonical collection key, and may include `files` as a backward-compatibility alias during transitions.
+- Discovered-file row-shape convention: list rows consumed by UI tables should provide `updated_at_utc` and `content_size_bytes` canonical fields; legacy aliases (`discovered_at_utc`, `file_size`) can be preserved only for compatibility.
