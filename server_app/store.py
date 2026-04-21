@@ -7,6 +7,7 @@ import hashlib
 import json
 import base64
 import io
+import os
 import zipfile
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +18,11 @@ try:
     import psycopg
 except Exception:  # pragma: no cover - optional dependency at runtime
     psycopg = None
+
+from nightmare_app.artifacts import FileSystemArtifactStore
+from shared.events import EventStream, build_projection
+from shared.models import EventRecord, RiskScorecard
+from shared.versioning import registry
 
 from nightmare_shared.page_classification import (
     PAGE_CLASS_API_ERROR,
@@ -263,16 +269,54 @@ def _make_target_entry_id(line_no: int, raw: str) -> str:
 
 
 class CoordinatorStore:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, artifact_store_root: str | None = None):
         if psycopg is None:
             raise RuntimeError("psycopg is required for postgres coordinator mode")
         self.database_url = str(database_url or "").strip()
         if not self.database_url:
             raise ValueError("database_url is required for coordinator mode")
+        artifact_root = str(
+            artifact_store_root
+            or os.getenv("NIGHTMARE_ARTIFACT_STORE_ROOT", "").strip()
+            or (Path.cwd() / ".artifact_store")
+        )
+        self._artifact_store = FileSystemArtifactStore(
+            artifact_root,
+            compression_threshold_bytes=int(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_THRESHOLD_BYTES", "1000000") or "1000000"),
+            enable_compression=str(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"},
+        )
+        self._db_inline_artifact_max_bytes = max(0, int(os.getenv("NIGHTMARE_DB_INLINE_ARTIFACT_MAX_BYTES", "262144") or "262144"))
+        self._event_stream = EventStream(Path(artifact_root) / "events.ndjson")
         self._ensure_schema()
 
     def _connect(self):
         return psycopg.connect(self.database_url, autocommit=False)
+
+    def _emit_event(self, event_type: str, aggregate_key: str, payload: dict[str, Any]) -> None:
+        try:
+            event = EventRecord(
+                event_type=str(event_type or ""),
+                aggregate_key=str(aggregate_key or ""),
+                schema_version=registry.current_version("event_record"),
+                payload=dict(payload or {}),
+            )
+            self._event_stream.append(event)
+        except Exception:
+            return
+
+    def projection_snapshot(self) -> dict[str, dict[str, Any]]:
+        return build_projection(self._event_stream.read())
+
+    @staticmethod
+    def _risk_score_for_artifact(artifact_type: str, size_bytes: int) -> float:
+        lowered = str(artifact_type or "").lower()
+        score = 0.0
+        if any(token in lowered for token in ("critical", "high_risk", "secret", "credential")):
+            score += 80.0
+        elif any(token in lowered for token in ("finding", "match", "anomaly")):
+            score += 35.0
+        score += min(20.0, max(0.0, float(size_bytes or 0) / 500_000.0))
+        return round(score, 2)
 
     def _ensure_schema(self) -> None:
         ddl = """
@@ -328,10 +372,15 @@ CREATE TABLE IF NOT EXISTS coordinator_artifacts (
   root_domain TEXT NOT NULL,
   artifact_type TEXT NOT NULL,
   source_worker TEXT,
-  content BYTEA NOT NULL,
+  content BYTEA NOT NULL DEFAULT '',
   content_encoding TEXT NOT NULL DEFAULT 'identity',
   content_sha256 TEXT NOT NULL,
   content_size_bytes BIGINT NOT NULL,
+  storage_backend TEXT NOT NULL DEFAULT 'database_inline',
+  storage_uri TEXT NOT NULL DEFAULT '',
+  media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  compression TEXT NOT NULL DEFAULT 'identity',
+  schema_version INTEGER NOT NULL DEFAULT 1,
   updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY(root_domain, artifact_type)
 );
@@ -380,10 +429,27 @@ CREATE TABLE IF NOT EXISTS coordinator_worker_presence (
 CREATE INDEX IF NOT EXISTS idx_worker_presence_last_seen
   ON coordinator_worker_presence(last_seen_at_utc DESC);
 """
+        migration_statements = [
+            "ALTER TABLE coordinator_artifacts ALTER COLUMN content DROP NOT NULL",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS storage_backend TEXT NOT NULL DEFAULT 'database_inline'",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS storage_uri TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'application/octet-stream'",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS compression TEXT NOT NULL DEFAULT 'identity'",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1",
+            "CREATE TABLE IF NOT EXISTS coordinator_summary_latest (root_domain TEXT NOT NULL, stage_name TEXT NOT NULL, summary_json JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(root_domain, stage_name))",
+            "CREATE TABLE IF NOT EXISTS coordinator_projection_state (aggregate_key TEXT PRIMARY KEY, projection_json JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+        ]
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(ddl)
-            conn.commit()
+                for sql in migration_statements:
+                    try:
+                        cur.execute(sql)
+                    except Exception:
+                        conn.rollback()
+                        with conn.cursor() as retry_cur:
+                            retry_cur.execute(ddl)
+                conn.commit()
 
     @staticmethod
     def _touch_worker_presence(cur: Any, worker_id: str, activity: str) -> None:
@@ -1972,18 +2038,31 @@ WHERE root_domain = %s
         if not rd or not at:
             return False
         data = bytes(content or b"")
-        digest = hashlib.sha256(data).hexdigest()
+        metadata = self._artifact_store.put_bytes(
+            artifact_type=at,
+            root_domain=rd,
+            payload=data,
+            encoding=content_encoding or "binary",
+            worker_id=source_worker or "",
+        )
+        inline_content = data if len(data) <= self._db_inline_artifact_max_bytes else b""
         sql = """
 INSERT INTO coordinator_artifacts(
-    root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes, updated_at_utc
+    root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
+    storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 ON CONFLICT (root_domain, artifact_type) DO UPDATE
 SET source_worker = EXCLUDED.source_worker,
     content = EXCLUDED.content,
     content_encoding = EXCLUDED.content_encoding,
     content_sha256 = EXCLUDED.content_sha256,
     content_size_bytes = EXCLUDED.content_size_bytes,
+    storage_backend = EXCLUDED.storage_backend,
+    storage_uri = EXCLUDED.storage_uri,
+    media_type = EXCLUDED.media_type,
+    compression = EXCLUDED.compression,
+    schema_version = EXCLUDED.schema_version,
     updated_at_utc = NOW();
 """
         with self._connect() as conn:
@@ -1994,14 +2073,53 @@ SET source_worker = EXCLUDED.source_worker,
                         rd,
                         at,
                         str(source_worker or "")[:200],
-                        data,
+                        inline_content,
                         str(content_encoding or "identity")[:120],
-                        digest,
+                        metadata.sha256,
                         len(data),
+                        metadata.storage_backend,
+                        metadata.storage_uri,
+                        metadata.media_type,
+                        metadata.compression,
+                        metadata.schema_version,
                     ),
                 )
+                summary_payload = json.dumps(
+                    {
+                        "schema_version": registry.current_version("summary_envelope"),
+                        "stage": "artifact_upload",
+                        "status": "completed",
+                        "root_domain": rd,
+                        "counts": {"artifacts": 1},
+                        "metrics": {"artifact_bytes": float(len(data)), "risk_score": self._risk_score_for_artifact(at, len(data))},
+                        "output_artifacts": {at: metadata.sha256},
+                    }
+                )
+                cur.execute(
+                    """
+                    INSERT INTO coordinator_summary_latest(root_domain, stage_name, summary_json, updated_at_utc)
+                    VALUES (%s, %s, %s::jsonb, NOW())
+                    ON CONFLICT (root_domain, stage_name) DO UPDATE
+                    SET summary_json = EXCLUDED.summary_json,
+                        updated_at_utc = NOW()
+                    """,
+                    (rd, f"artifact:{at}", summary_payload),
+                )
             conn.commit()
+        self._emit_event(
+            "artifact_written",
+            rd,
+            {
+                "root_domain": rd,
+                "artifact_type": at,
+                "sha256": metadata.sha256,
+                "size_bytes": len(data),
+                "storage_uri": metadata.storage_uri,
+                "compression": metadata.compression,
+            },
+        )
         return True
+
 
     def get_artifact(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()
@@ -2009,7 +2127,8 @@ SET source_worker = EXCLUDED.source_worker,
         if not rd or not at:
             return None
         sql = """
-SELECT root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes, updated_at_utc
+SELECT root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
+       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc
 FROM coordinator_artifacts
 WHERE root_domain = %s AND artifact_type = %s;
 """
@@ -2020,15 +2139,29 @@ WHERE root_domain = %s AND artifact_type = %s;
             conn.commit()
         if row is None:
             return None
+        content = bytes(row[3] or b"")
+        storage_backend = row[7] or "database_inline"
+        storage_uri = row[8] or ""
+        compression = row[10] or "identity"
+        if storage_uri and (not content):
+            try:
+                content = self._artifact_store.get_bytes(storage_uri, compression=compression)
+            except Exception:
+                content = b""
         return {
             "root_domain": row[0],
             "artifact_type": row[1],
             "source_worker": row[2],
-            "content": bytes(row[3] or b""),
+            "content": content,
             "content_encoding": row[4],
             "content_sha256": row[5],
             "content_size_bytes": int(row[6] or 0),
-            "updated_at_utc": row[7].isoformat() if row[7] else None,
+            "storage_backend": storage_backend,
+            "storage_uri": storage_uri,
+            "media_type": row[9] or "application/octet-stream",
+            "compression": compression,
+            "schema_version": int(row[11] or 1),
+            "updated_at_utc": row[12].isoformat() if row[12] else None,
         }
 
     def list_artifacts(self, root_domain: str) -> list[dict[str, Any]]:
@@ -2036,7 +2169,8 @@ WHERE root_domain = %s AND artifact_type = %s;
         if not rd:
             return []
         sql = """
-SELECT artifact_type, source_worker, content_encoding, content_sha256, content_size_bytes, updated_at_utc
+SELECT artifact_type, source_worker, content_encoding, content_sha256, content_size_bytes,
+       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc
 FROM coordinator_artifacts
 WHERE root_domain = %s
 ORDER BY artifact_type ASC;
@@ -2055,7 +2189,12 @@ ORDER BY artifact_type ASC;
                     "content_encoding": row[2],
                     "content_sha256": row[3],
                     "content_size_bytes": int(row[4] or 0),
-                    "updated_at_utc": row[5].isoformat() if row[5] else None,
+                    "storage_backend": row[5] or "database_inline",
+                    "storage_uri": row[6] or "",
+                    "media_type": row[7] or "application/octet-stream",
+                    "compression": row[8] or "identity",
+                    "schema_version": int(row[9] or 1),
+                    "updated_at_utc": row[10].isoformat() if row[10] else None,
                 }
             )
         return out

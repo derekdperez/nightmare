@@ -35,11 +35,29 @@ def _read_log_tail(log_path: Path, *, lines: int = 120, max_chars: int = 16000) 
     return tail
 
 
-def summarize_subprocess_failure(program_name: str, log_path: Path, exit_code: int) -> str:
-    tail = _read_log_tail(log_path)
+def summarize_subprocess_failure(program_name: str, exit_code: int | Path, log_path: Path | int) -> str:
+    """Return a compact failure summary.
+
+    Accept both the legacy argument order ``(program_name, log_path, exit_code)``
+    and the corrected order ``(program_name, exit_code, log_path)`` for backward compatibility.
+    """
+    if isinstance(exit_code, Path) and isinstance(log_path, int):
+        actual_log_path = exit_code
+        actual_exit_code = log_path
+    else:
+        actual_exit_code = int(exit_code)
+        actual_log_path = Path(log_path)
+    tail = _read_log_tail(actual_log_path)
     if tail:
-        return f"{program_name} exit code {int(exit_code)}\n\n{tail}"
-    return f"{program_name} exit code {int(exit_code)}"
+        lines = [line.strip() for line in tail.splitlines() if str(line).strip()]
+        interesting = ""
+        for line in reversed(lines):
+            if any(token in line for token in ("Error:", "Exception", "Traceback", "NameError:", "RuntimeError:", "ValueError:")):
+                interesting = line
+                break
+        if interesting:
+            return f"{program_name} exit code {int(actual_exit_code)}; {interesting}"
+    return f"{program_name} exit code {int(actual_exit_code)}"
 from nightmare_shared.logging_utils import get_logger
 
 BASE_DIR = Path(__file__).resolve().parent.parent

@@ -43,6 +43,7 @@ class HttpRequestQueue:
         retry_max_seconds: float = 60.0,
         client: httpx.Client | None = None,
         worker_id: str | None = None,
+        queue_mode: str = "durable",
     ) -> None:
         self.db_path = Path(db_path)
         self.spool_dir = Path(spool_dir)
@@ -50,6 +51,11 @@ class HttpRequestQueue:
         self.retry_base_seconds = max(0.25, float(retry_base_seconds))
         self.retry_max_seconds = max(self.retry_base_seconds, float(retry_max_seconds))
         self.worker_id = worker_id or f"worker-{os.getpid()}-{threading.get_ident()}"
+        self.queue_mode = str(queue_mode or os.getenv("NIGHTMARE_HTTP_QUEUE_MODE", "durable")).strip().lower() or "durable"
+        if self.queue_mode not in {"durable", "fast"}:
+            self.queue_mode = "durable"
+        self._result_events: dict[str, threading.Event] = {}
+        self._event_lock = threading.Lock()
         self._client = client or get_shared_client()
         self._spool_lock = threading.Lock()
         self._db_lock = threading.Lock()
@@ -134,6 +140,24 @@ class HttpRequestQueue:
                 fh.flush()
                 os.fsync(fh.fileno())
         return (str(spool_path), int(offset))
+
+    def _get_event(self, request_id: str) -> threading.Event:
+        with self._event_lock:
+            event = self._result_events.get(request_id)
+            if event is None:
+                event = threading.Event()
+                self._result_events[request_id] = event
+            return event
+
+    def _notify_result(self, request_id: str) -> None:
+        with self._event_lock:
+            event = self._result_events.get(request_id)
+            if event is not None:
+                event.set()
+
+    def _discard_event(self, request_id: str) -> None:
+        with self._event_lock:
+            self._result_events.pop(request_id, None)
 
     def enqueue(
         self,
@@ -420,6 +444,7 @@ class HttpRequestQueue:
                 """,
                 (now, status_code, error_text, json.dumps(result, ensure_ascii=False), request_id, self.worker_id),
             )
+        self._notify_result(request_id)
 
     def mark_dead_letter(self, request_id: str, result: dict[str, Any], status_code: int | None, error_text: str | None) -> None:
         now = time.time()
@@ -446,6 +471,7 @@ class HttpRequestQueue:
                 """,
                 (now, status_code, error_text, json.dumps(result, ensure_ascii=False), request_id, self.worker_id),
             )
+        self._notify_result(request_id)
 
     @staticmethod
     def is_retryable(status_code: int | None, error_text: str | None) -> bool:
@@ -514,6 +540,62 @@ class HttpRequestQueue:
                 self.mark_dead_letter(job.request_id, result, status_code, str(exc))
             return result
 
+
+    def execute_inline(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        body: bytes | None = None,
+        timeout_seconds: float = 30.0,
+        read_limit: int = 4096,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_id = uuid.uuid4().hex
+        request_summary = {
+            "method": str(method or "GET").upper(),
+            "url": str(url or ""),
+            "headers": dict(headers or {}),
+            "body_base64": base64.b64encode(body or b"").decode("ascii"),
+            "metadata": dict(metadata or {}),
+        }
+        try:
+            response = request_capped(
+                request_summary["method"],
+                request_summary["url"],
+                headers=request_summary["headers"],
+                body=body,
+                timeout_seconds=float(timeout_seconds or 30.0),
+                read_limit=int(read_limit or 4096),
+                client=self._client,
+            )
+            result = {
+                "ok": 200 <= int(response.status_code) < 400,
+                "status_code": int(response.status_code),
+                "request_id": request_id,
+                "request": request_summary,
+                "response": {
+                    "url": str(response.url),
+                    "headers": dict(response.headers or {}),
+                    "body_base64": base64.b64encode(response.body or b"").decode("ascii"),
+                    "elapsed_ms": int(response.elapsed_ms or 0),
+                },
+                "note": None,
+            }
+            if self.is_retryable(result["status_code"], None) and not result["ok"]:
+                result["ok"] = False
+            return result
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status_code": None,
+                "request_id": request_id,
+                "request": request_summary,
+                "response": None,
+                "note": f"HTTP request failed: {exc}",
+            }
+
     def submit_and_wait(
         self,
         *,
@@ -529,6 +611,16 @@ class HttpRequestQueue:
         max_attempts: int = 5,
         wait_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
+        if self.queue_mode == "fast":
+            return self.execute_inline(
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+                read_limit=read_limit,
+                metadata=metadata,
+            )
         request_id = self.enqueue(
             method=method,
             url=url,
@@ -544,26 +636,29 @@ class HttpRequestQueue:
         if wait_timeout_seconds is not None:
             wait_budget = float(wait_timeout_seconds)
         else:
-            # Per-attempt HTTP timeout * attempts, plus retry backoff headroom; avoid spurious timeouts
-            # when the global queue is busy or 5xx retries with sleep.
             ts = float(timeout_seconds or 30.0)
             ma = max(1, int(max_attempts or 5))
             wait_budget = max(180.0, ts * float(ma) * 2.0 + 90.0)
         deadline = time.time() + wait_budget
+        event = self._get_event(request_id)
         while time.time() < deadline:
             self.requeue_expired_leases()
             result = self.load_result(request_id)
             if isinstance(result, dict):
+                self._discard_event(request_id)
                 return result
             own = self.claim_request_if_ready(request_id)
             if own is not None:
                 self.execute_claimed(own)
                 continue
             job = self.claim_next()
-            if job is None:
-                time.sleep(0.05)
+            if job is not None:
+                self.execute_claimed(job)
                 continue
-            self.execute_claimed(job)
+            remaining = max(0.0, deadline - time.time())
+            event.wait(min(0.5, remaining))
+            event.clear()
+        self._discard_event(request_id)
         return {
             "ok": False,
             "status_code": None,
@@ -573,8 +668,9 @@ class HttpRequestQueue:
             "note": "Timed out waiting for queued HTTP request result",
         }
 
+
     def stats(self) -> dict[str, Any]:
         with self._connect() as conn:
             rows = conn.execute("SELECT status, COUNT(*) AS count FROM http_request_queue GROUP BY status").fetchall()
         counts = {str(row["status"]): int(row["count"] or 0) for row in rows}
-        return {"db_path": str(self.db_path), "spool_dir": str(self.spool_dir), "counts": counts}
+        return {"db_path": str(self.db_path), "spool_dir": str(self.spool_dir), "queue_mode": self.queue_mode, "counts": counts}
