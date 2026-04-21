@@ -13,3 +13,4 @@
 - Register-target full-replace currently truncates only `coordinator_targets`. Confirm whether stage/session/artifact tables should also be cleaned when replacing the target list to avoid stale non-target rows for removed domains.
 
 - Repeated runtime failure still unresolved in crawler logic: `nightmare.py` crash `NameError: name 'verify_timeout' is not defined` (seen in uploaded nightmare logs, around `crawl_domain` path). This coordinator patch improves reporting but does not fix the underlying crawler bug.
+- If full deploy still reports API unreachable with coordinator container up, likely external dependency: `LOG_DATABASE_URL` path/connectivity (SG/NACL/route/credentials). New probe diagnostics should now show all URL probe codes and reveal this explicitly in server logs.

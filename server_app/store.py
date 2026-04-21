@@ -276,6 +276,7 @@ class CoordinatorStore:
         self.database_url = str(database_url or "").strip()
         if not self.database_url:
             raise ValueError("database_url is required for coordinator mode")
+        self._connect_timeout_seconds = self._resolve_connect_timeout_seconds()
         artifact_root = str(
             artifact_store_root
             or os.getenv("NIGHTMARE_ARTIFACT_STORE_ROOT", "").strip()
@@ -290,8 +291,27 @@ class CoordinatorStore:
         self._event_stream = EventStream(Path(artifact_root) / "events.ndjson")
         self._ensure_schema()
 
+    @staticmethod
+    def _resolve_connect_timeout_seconds() -> int:
+        raw = str(
+            os.getenv(
+                "COORDINATOR_DB_CONNECT_TIMEOUT_SECONDS",
+                os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "8"),
+            )
+            or "8"
+        ).strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = 8
+        return max(1, min(60, value))
+
     def _connect(self):
-        return psycopg.connect(self.database_url, autocommit=False)
+        return psycopg.connect(
+            self.database_url,
+            autocommit=False,
+            connect_timeout=self._connect_timeout_seconds,
+        )
 
     def _emit_event(self, event_type: str, aggregate_key: str, payload: dict[str, Any]) -> None:
         try:

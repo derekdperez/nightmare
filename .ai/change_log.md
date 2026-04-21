@@ -1152,3 +1152,11 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - Script logic reviewed end-to-end against compose/server startup flow.
   - `bash -n deploy/full_deploy_command.sh` could not be executed in this Windows environment due shell runtime timeout; syntax therefore remains runtime-verified on Linux deploy host.
+- Hardened coordinator startup against indefinite DB-connect hangs that looked like API unreachability.
+- Root cause refinement: when LOG_DATABASE_URL (or coordinator DB URL) is unreachable at TCP/connect level, psycopg default connect behavior could block server initialization before HTTP listeners bind. Deploy readiness then reports HTTP code `none/000` even though container appears running.
+- Changes:
+  - `logging_app/store.py`: added bounded DB connect timeout (`LOG_DB_CONNECT_TIMEOUT_SECONDS`, fallback `DB_CONNECT_TIMEOUT_SECONDS`, default 8s).
+  - `server_app/store.py`: added bounded DB connect timeout (`COORDINATOR_DB_CONNECT_TIMEOUT_SECONDS`, fallback `DB_CONNECT_TIMEOUT_SECONDS`, default 8s).
+  - `deploy/full_deploy_command.sh`: readiness probes now use curl connect/max-time bounds and print per-candidate URL diagnostics; server/postgres logs are emitted separately for clearer failure attribution.
+- Validation:
+  - `python -m py_compile logging_app/store.py server_app/store.py`

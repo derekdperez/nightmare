@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -21,10 +22,30 @@ class LogStore:
             raise ValueError("database_url is required")
         if psycopg is None:
             raise RuntimeError("psycopg is required for LogStore")
+        self.connect_timeout_seconds = self._resolve_connect_timeout_seconds()
         self._ensure_schema()
 
+    @staticmethod
+    def _resolve_connect_timeout_seconds() -> int:
+        raw = str(
+            os.getenv(
+                "LOG_DB_CONNECT_TIMEOUT_SECONDS",
+                os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "8"),
+            )
+            or "8"
+        ).strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = 8
+        return max(1, min(60, value))
+
     def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(self.database_url, autocommit=False)
+        return psycopg.connect(
+            self.database_url,
+            autocommit=False,
+            connect_timeout=self.connect_timeout_seconds,
+        )
 
     def _ensure_schema(self) -> None:
         ddl = """

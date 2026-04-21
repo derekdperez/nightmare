@@ -136,7 +136,7 @@ ids_empty() {
 probe_coordinator_http_code() {
   local base_url="$1"
   local code
-  code="$(curl -k -s -o /dev/null -w "%{http_code}" \
+  code="$(curl -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${COORDINATOR_API_TOKEN}" \
     "${base_url%/}/api/coord/database-status" || true)"
   printf '%s' "$code"
@@ -160,6 +160,22 @@ resolve_local_coordinator_base_url() {
   done
   printf '\n'
   return 1
+}
+
+print_coordinator_probe_diagnostics() {
+  local candidate code
+  local candidates=()
+  candidates+=("${COORDINATOR_BASE_URL%/}")
+  candidates+=("https://127.0.0.1")
+  candidates+=("https://localhost")
+  candidates+=("http://127.0.0.1")
+  candidates+=("http://localhost")
+
+  echo "Coordinator probe diagnostics:" >&2
+  for candidate in "${candidates[@]}"; do
+    code="$(probe_coordinator_http_code "$candidate")"
+    echo "  ${candidate}/api/coord/database-status -> ${code:-none}" >&2
+  done
 }
 
 get_worker_instance_ids() {
@@ -215,14 +231,18 @@ done
 
 if [[ "$api_ready" -ne 1 ]]; then
   echo "Coordinator API did not become ready after 90 seconds (last HTTP code: ${last_code:-none})." >&2
+  print_coordinator_probe_diagnostics
   compose_cmd="$(resolve_compose_cmd || true)"
   docker_access_mode="$(detect_docker_access_mode || true)"
   if [[ -n "$compose_cmd" && -n "$docker_access_mode" ]]; then
     echo "Central compose service status:" >&2
     run_compose "$compose_cmd" "$docker_access_mode" -f deploy/docker-compose.central.yml --env-file deploy/.env ps >&2 || true
     echo >&2
-    echo "Recent central service logs (tail):" >&2
-    run_compose "$compose_cmd" "$docker_access_mode" -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail 120 server postgres >&2 || true
+    echo "Recent central service logs (server tail):" >&2
+    run_compose "$compose_cmd" "$docker_access_mode" -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail 120 server >&2 || true
+    echo >&2
+    echo "Recent central service logs (postgres tail):" >&2
+    run_compose "$compose_cmd" "$docker_access_mode" -f deploy/docker-compose.central.yml --env-file deploy/.env logs --tail 120 postgres >&2 || true
   elif [[ -n "$compose_cmd" ]]; then
     echo "Central compose diagnostics skipped: Docker daemon is not accessible for invoking user/current user and sudo -n docker is unavailable." >&2
   fi

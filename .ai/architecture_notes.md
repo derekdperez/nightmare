@@ -166,3 +166,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Coordinator deploy boundary refinement:
   - `COORDINATOR_BASE_URL` is now treated as the fleet-facing address, not a guaranteed self-call address on the central VM.
   - `deploy/full_deploy_command.sh` now resolves an effective local coordinator URL for control-plane actions executed on the central host (readiness polling, target registration, rollout initiation), reducing false-negative bootstrap failures on EC2 networking topologies that block/flake self-public-endpoint access.
+- Coordinator startup sequencing note:
+  - HTTP listeners are created only after `CoordinatorStore` and `LogStore` initialization.
+  - Any long/blocking DB connect path in those constructors can make the container look healthy while no TCP listener is active.
+  - Bounded connect timeouts now enforce fail-fast behavior so deploy diagnostics surface concrete DB connectivity issues instead of opaque API-unreachable symptoms.

@@ -311,3 +311,5 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Wordlist "hits" reporting should count only true success responses (2xx) and still exclude soft-404.
 - Deploy orchestration convention: in central-host scripts, do not assume `COORDINATOR_BASE_URL` is loopback-reachable from that same VM; probe local listener fallbacks (`https://127.0.0.1`, `http://127.0.0.1`, localhost variants) for host-local automation steps.
 - Deploy flow convention: keep externally advertised coordinator URL (`COORDINATOR_BASE_URL`) for worker/env distribution, but use an effective locally reachable URL for same-host readiness checks and registration/rollout API calls.
+- Startup reliability convention: Postgres connection creation for coordinator/log stores must be bounded with explicit connect timeouts; avoid unbounded startup hangs that prevent listener bind and mask root cause as generic readiness failures.
+- Deploy diagnostics convention: readiness failures should print per-URL probe results (public base + localhost variants) and isolate service logs by container/service to make root-cause triage actionable.
