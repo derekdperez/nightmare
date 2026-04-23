@@ -16,7 +16,7 @@ Public master report:
   Token resolution: ``master_report_regen_token`` in config, else env ``MASTER_REPORT_REGEN_TOKEN``,
   else ``coordinator_api_token`` (must be non-empty; the endpoint is disabled if none are set).
 
-The dashboard provides:
+The web UI provides:
 - aggregate counts (domains discovered, completed/running/pending/failed),
 - per-domain status rows with links to generated HTML reports and JSON artifacts,
 - master-report links when available,
@@ -6360,7 +6360,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return " ".join(str(item or "") for item in parts).lower()
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Nightmare/Fozzy report web dashboard server.")
+    p = argparse.ArgumentParser(description="Nightmare/Fozzy report web UI server.")
     p.add_argument(
         "--config",
         default="server.json",
