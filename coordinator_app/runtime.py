@@ -235,6 +235,28 @@ class CoordinatorClient:
         artifact = rsp.get("artifact")
         return artifact if isinstance(artifact, dict) else None
 
+    def list_artifact_manifest_entries(
+        self,
+        root_domain: str,
+        artifact_type: str,
+        *,
+        shard_key: str = "",
+        logical_role: str = "",
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        query = urlencode(
+            {
+                "root_domain": root_domain,
+                "artifact_type": artifact_type,
+                "shard_key": shard_key,
+                "logical_role": logical_role,
+                "limit": max(1, int(limit or 1000)),
+            }
+        )
+        rsp = self._request_json("GET", f"/api/coord/artifact/manifest-entries?{query}")
+        entries = rsp.get("entries")
+        return entries if isinstance(entries, list) else []
+
     def download_artifact_to_file(self, root_domain: str, artifact_type: str, target_path: Path) -> bool:
         url = f"{self.base_url}/api/coord/artifact/stream"
         with httpx.Client(timeout=None, verify=self.verify_ssl, follow_redirects=True) as client:

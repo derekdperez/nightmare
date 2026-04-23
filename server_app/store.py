@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     ConnectionPool = None  # type: ignore[assignment]
 
 from nightmare_app.artifacts import FileSystemArtifactStore
-from shared.events import EventStream, build_projection
+from shared.events import build_projection
 from shared.models import EventRecord, RiskScorecard
 from shared.versioning import registry
 
@@ -301,8 +301,10 @@ class CoordinatorStore:
             enable_compression=str(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"},
         )
         self._db_inline_artifact_max_bytes = max(0, int(os.getenv("NIGHTMARE_DB_INLINE_ARTIFACT_MAX_BYTES", "65536") or "65536"))
-        self._event_stream = EventStream(Path(artifact_root) / "events.ndjson")
-        self._event_stream_enabled = str(os.getenv("NIGHTMARE_EVENT_STREAM_FALLBACK_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        # Production event queries are DB-backed through coordinator_recent_events.
+        # JSONL event streams were removed from the hot/query path; keep the flag only
+        # as a disabled compatibility marker for older configuration.
+        self._event_stream_enabled = False
         self._worker_presence_min_interval_seconds = max(5, int(os.getenv("NIGHTMARE_WORKER_PRESENCE_INTERVAL_SECONDS", "30") or "30"))
         self._durable_progress_min_interval_seconds = max(15, int(os.getenv("NIGHTMARE_DURABLE_PROGRESS_INTERVAL_SECONDS", "60") or "60"))
         self._ensure_schema()
@@ -355,11 +357,6 @@ class CoordinatorStore:
             schema_version=registry.current_version("event_record"),
             payload=safe_payload,
         )
-        if self._event_stream_enabled:
-            try:
-                self._event_stream.append(event)
-            except Exception:
-                pass
         sql = """
 INSERT INTO coordinator_recent_events(
     event_id, created_at_utc, event_type, aggregate_key, schema_version, source, message, payload_json
@@ -600,6 +597,28 @@ CREATE INDEX IF NOT EXISTS idx_stage_tasks_claim_partial ON coordinator_stage_ta
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_running_domain_lease ON coordinator_stage_tasks(root_domain, lease_expires_at) WHERE status='running';
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_concurrency ON coordinator_stage_tasks(root_domain, concurrency_group, status, lease_expires_at);
 
+CREATE TABLE IF NOT EXISTS coordinator_resource_leases (
+  lease_id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL,
+  root_domain TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  resource_class TEXT NOT NULL DEFAULT 'default',
+  access_mode TEXT NOT NULL DEFAULT 'write',
+  concurrency_group TEXT NOT NULL DEFAULT '',
+  lease_key TEXT NOT NULL,
+  max_parallelism INTEGER NOT NULL DEFAULT 1,
+  leased_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_resource_leases_key
+  ON coordinator_resource_leases(root_domain, lease_key, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_resource_leases_stage
+  ON coordinator_resource_leases(workflow_id, root_domain, stage);
+CREATE INDEX IF NOT EXISTS idx_resource_leases_expiry
+  ON coordinator_resource_leases(lease_expires_at);
+
 CREATE TABLE IF NOT EXISTS coordinator_artifacts (
   root_domain TEXT NOT NULL,
   artifact_type TEXT NOT NULL,
@@ -624,6 +643,39 @@ CREATE TABLE IF NOT EXISTS coordinator_artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_domain ON coordinator_artifacts(root_domain);
 CREATE INDEX IF NOT EXISTS idx_artifacts_retention ON coordinator_artifacts(retention_class);
 CREATE INDEX IF NOT EXISTS idx_artifacts_hot_fields ON coordinator_artifacts(root_domain, artifact_type, summary_match_count, summary_anomaly_count);
+
+CREATE TABLE IF NOT EXISTS coordinator_artifact_objects (
+  content_sha256 TEXT PRIMARY KEY,
+  storage_backend TEXT NOT NULL DEFAULT 'filesystem',
+  storage_uri TEXT NOT NULL,
+  content_size_bytes BIGINT NOT NULL DEFAULT 0,
+  media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  compression TEXT NOT NULL DEFAULT 'identity',
+  ref_count BIGINT NOT NULL DEFAULT 1,
+  created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_objects_storage
+  ON coordinator_artifact_objects(storage_backend, storage_uri);
+
+CREATE TABLE IF NOT EXISTS coordinator_artifact_manifest_entries (
+  root_domain TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  entry_path TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  content_size_bytes BIGINT NOT NULL DEFAULT 0,
+  media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  storage_uri TEXT NOT NULL DEFAULT '',
+  shard_key TEXT NOT NULL DEFAULT '',
+  logical_role TEXT NOT NULL DEFAULT '',
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(root_domain, artifact_type, entry_path)
+);
+CREATE INDEX IF NOT EXISTS idx_manifest_entries_hash
+  ON coordinator_artifact_manifest_entries(content_sha256);
+CREATE INDEX IF NOT EXISTS idx_manifest_entries_shard
+  ON coordinator_artifact_manifest_entries(root_domain, artifact_type, shard_key);
 
 CREATE TABLE IF NOT EXISTS coordinator_recent_events (
   event_id TEXT PRIMARY KEY,
@@ -3854,7 +3906,101 @@ WHERE workflow_id = %s
         )
         return bool(result.get("scheduled"))
 
-    def claim_next_stage(
+
+    def _stage_lease_key(self, row: dict[str, Any]) -> str:
+        group = str(row.get("concurrency_group") or "").strip().lower()
+        resource = str(row.get("resource_class") or "default").strip().lower() or "default"
+        stage = str(row.get("stage") or "").strip().lower()
+        return group or resource or stage or "default"
+
+    def _resource_conflict_exists(
+        self,
+        cur: Any,
+        *,
+        root_domain: str,
+        lease_key: str,
+        access_mode: str,
+        max_parallelism: int,
+    ) -> bool:
+        cur.execute(
+            """
+SELECT access_mode, COUNT(*)
+FROM coordinator_resource_leases
+WHERE root_domain = %s
+  AND lease_key = %s
+  AND lease_expires_at >= NOW()
+GROUP BY access_mode;
+""",
+            (root_domain, lease_key),
+        )
+        rows = cur.fetchall()
+        total = sum(int(row[1] or 0) for row in rows)
+        modes = {str(row[0] or "write").lower() for row in rows}
+        mode = str(access_mode or "write").strip().lower() or "write"
+        if mode == "write":
+            return total > 0
+        if "write" in modes:
+            return True
+        return total >= max(1, int(max_parallelism or 1))
+
+    def release_stage_resources(
+        self,
+        *,
+        workflow_id: str,
+        root_domain: str,
+        stage: str,
+        worker_id: str = "",
+    ) -> int:
+        widf = str(workflow_id or "").strip().lower() or "default"
+        rd = str(root_domain or "").strip().lower()
+        stg = str(stage or "").strip().lower()
+        wid = str(worker_id or "").strip()
+        if not rd or not stg:
+            return 0
+        where = "workflow_id = %s AND root_domain = %s AND stage = %s"
+        params: list[Any] = [widf, rd, stg]
+        if wid:
+            where += " AND worker_id = %s"
+            params.append(wid)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM coordinator_resource_leases WHERE {where};", params)
+                deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
+
+    def refresh_stage_resource_leases(
+        self,
+        *,
+        workflow_id: str,
+        root_domain: str,
+        stage: str,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> bool:
+        widf = str(workflow_id or "").strip().lower() or "default"
+        rd = str(root_domain or "").strip().lower()
+        stg = str(stage or "").strip().lower()
+        wid = str(worker_id or "").strip()
+        lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
+        if not rd or not stg or not wid:
+            return False
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+UPDATE coordinator_resource_leases
+SET lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
+    updated_at_utc = NOW()
+WHERE workflow_id = %s AND root_domain = %s AND stage = %s AND worker_id = %s;
+""",
+                    (lease, widf, rd, stg, wid),
+                )
+                updated = int(cur.rowcount or 0)
+            conn.commit()
+        return updated > 0
+
+    def try_claim_stage_with_resources(
         self,
         *,
         worker_id: str,
@@ -3872,99 +4018,107 @@ WHERE workflow_id = %s
             for item in (plugin_allowlist or [])
             if str(item or "").strip()
         ]
-        allowlist_param: Optional[list[str]] = allowlist if allowlist else None
-        sql = """
-WITH candidate AS (
-    SELECT t.workflow_id, t.root_domain, t.stage
-    FROM coordinator_stage_tasks t
-    WHERE (
-        t.status = 'pending'
-        OR (t.status = 'running' AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at < NOW())
-    )
-      AND (%s = '' OR t.workflow_id = %s)
-      AND (%s::text[] IS NULL OR t.stage = ANY(%s))
-      AND NOT EXISTS (
-          SELECT 1
-          FROM coordinator_targets q
-          WHERE q.root_domain = t.root_domain
-            AND q.status = 'running'
-            AND q.lease_expires_at IS NOT NULL
-            AND q.lease_expires_at >= NOW()
-            AND COALESCE(t.resource_class, 'default') IN ('crawl', 'network_scan')
-      )
-      AND NOT EXISTS (
-          SELECT 1
-          FROM coordinator_stage_tasks r
-          WHERE r.root_domain = t.root_domain
-            AND r.status = 'running'
-            AND r.lease_expires_at IS NOT NULL
-            AND r.lease_expires_at >= NOW()
-            AND NOT (r.workflow_id = t.workflow_id AND r.stage = t.stage)
-            AND (
-                COALESCE(r.concurrency_group, '') = COALESCE(NULLIF(t.concurrency_group, ''), t.stage)
-                OR (
-                    COALESCE(r.resource_class, 'default') = COALESCE(t.resource_class, 'default')
-                    AND ('write' IN (COALESCE(r.access_mode, 'write'), COALESCE(t.access_mode, 'write')))
-                )
-            )
-      )
-      AND (
-          SELECT COUNT(*)
-          FROM coordinator_stage_tasks rp
-          WHERE rp.root_domain = t.root_domain
-            AND rp.status = 'running'
-            AND rp.lease_expires_at IS NOT NULL
-            AND rp.lease_expires_at >= NOW()
-            AND COALESCE(rp.concurrency_group, '') = COALESCE(NULLIF(t.concurrency_group, ''), t.stage)
-      ) < GREATEST(COALESCE(t.max_parallelism, 1), 1)
-    ORDER BY t.created_at_utc ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT 1
+        candidates_sql = """
+SELECT workflow_id, root_domain, stage, status, worker_id, attempt_count, lease_expires_at,
+       checkpoint_json, progress_json, progress_artifact_type, resume_mode,
+       COALESCE(resource_class, 'default'), COALESCE(access_mode, 'write'),
+       COALESCE(concurrency_group, ''), GREATEST(COALESCE(max_parallelism, 1), 1)
+FROM coordinator_stage_tasks
+WHERE (
+    status = 'pending'
+    OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
 )
-UPDATE coordinator_stage_tasks t
+  AND (%s = '' OR workflow_id = %s)
+  AND (%s::text[] IS NULL OR stage = ANY(%s))
+ORDER BY created_at_utc ASC
+FOR UPDATE SKIP LOCKED
+LIMIT 50;
+"""
+        update_sql = """
+UPDATE coordinator_stage_tasks
 SET status = 'running',
     worker_id = %s,
     lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
-    started_at_utc = COALESCE(t.started_at_utc, NOW()),
+    started_at_utc = COALESCE(started_at_utc, NOW()),
     completed_at_utc = NULL,
     heartbeat_at_utc = NOW(),
-    attempt_count = t.attempt_count + 1,
+    attempt_count = attempt_count + 1,
     updated_at_utc = NOW(),
     error = NULL
-FROM candidate
-WHERE t.workflow_id = candidate.workflow_id
-  AND t.root_domain = candidate.root_domain
-  AND t.stage = candidate.stage
-RETURNING
-    t.workflow_id,
-    t.root_domain,
-    t.stage,
-    t.status,
-    t.worker_id,
-    t.attempt_count,
-    t.lease_expires_at,
-    t.checkpoint_json,
-    t.progress_json,
-    t.progress_artifact_type,
-    t.resume_mode,
-    t.resource_class,
-    t.access_mode,
-    t.concurrency_group,
-    t.max_parallelism;
+WHERE workflow_id = %s
+  AND root_domain = %s
+  AND stage = %s
+RETURNING workflow_id, root_domain, stage, status, worker_id, attempt_count, lease_expires_at,
+          checkpoint_json, progress_json, progress_artifact_type, resume_mode,
+          resource_class, access_mode, concurrency_group, max_parallelism;
 """
+        claimed = None
         with self._connect() as conn:
             with conn.cursor() as cur:
                 self._touch_worker_presence(cur, wid, "claim_stage")
-                cur.execute(sql, (widf, widf, allowlist_param, allowlist_param, wid, lease))
-                row = cur.fetchone()
+                cur.execute("DELETE FROM coordinator_resource_leases WHERE lease_expires_at < NOW();")
+                cur.execute(candidates_sql, (widf, widf, allowlist or None, allowlist or None))
+                rows = cur.fetchall()
+                for row in rows:
+                    row_map = {
+                        "workflow_id": str(row[0] or "default"),
+                        "root_domain": str(row[1] or "").strip().lower(),
+                        "stage": str(row[2] or "").strip().lower(),
+                        "resource_class": str(row[11] or "default").strip().lower() or "default",
+                        "access_mode": str(row[12] or "write").strip().lower() or "write",
+                        "concurrency_group": str(row[13] or "").strip().lower(),
+                        "max_parallelism": int(row[14] or 1),
+                    }
+                    lease_key = self._stage_lease_key(row_map)
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", (f"{row_map['root_domain']}:{lease_key}",))
+                    if self._resource_conflict_exists(
+                        cur,
+                        root_domain=row_map["root_domain"],
+                        lease_key=lease_key,
+                        access_mode=row_map["access_mode"],
+                        max_parallelism=row_map["max_parallelism"],
+                    ):
+                        continue
+                    cur.execute(update_sql, (wid, lease, row_map["workflow_id"], row_map["root_domain"], row_map["stage"]))
+                    updated = cur.fetchone()
+                    if updated is None:
+                        continue
+                    cur.execute(
+                        """
+INSERT INTO coordinator_resource_leases(
+    lease_id, workflow_id, root_domain, stage, worker_id, resource_class,
+    access_mode, concurrency_group, lease_key, max_parallelism, lease_expires_at
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW() + ((%s)::text || ' seconds')::interval)
+ON CONFLICT (lease_id) DO UPDATE
+SET lease_expires_at = EXCLUDED.lease_expires_at,
+    updated_at_utc = NOW();
+""",
+                        (
+                            f"{updated[0]}:{updated[1]}:{updated[2]}",
+                            updated[0],
+                            updated[1],
+                            updated[2],
+                            wid,
+                            row_map["resource_class"],
+                            row_map["access_mode"],
+                            row_map["concurrency_group"],
+                            lease_key,
+                            row_map["max_parallelism"],
+                            lease,
+                        ),
+                    )
+                    claimed = updated
+                    break
             conn.commit()
-        if row is None:
+        if claimed is None:
             return None
+        row = claimed
         self.record_system_event(
             "workflow.task.claimed",
             f"workflow_task:{row[0]}:{row[1]}:{row[2]}",
             {
-                "source": "coordinator_store.claim_next_stage",
+                "source": "coordinator_store.try_claim_stage_with_resources",
                 "workflow_id": row[0],
                 "root_domain": row[1],
                 "stage": row[2],
@@ -3998,6 +4152,22 @@ RETURNING
             "concurrency_group": str(row[13] or ""),
             "max_parallelism": int(row[14] or 1),
         }
+
+    def claim_next_stage(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        workflow_id: str = "",
+        plugin_allowlist: Optional[list[str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        return self.try_claim_stage_with_resources(
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            workflow_id=workflow_id,
+            plugin_allowlist=plugin_allowlist,
+        )
+
 
     def claim_stage(
         self,
@@ -4038,6 +4208,13 @@ RETURNING
         progress: Optional[dict[str, Any]] = None,
         progress_artifact_type: str = "",
     ) -> bool:
+        """Refresh only volatile liveness/lease state.
+
+        Durable checkpoint/progress writes are intentionally handled by
+        update_stage_progress() or complete_stage(); callers may still pass the
+        legacy checkpoint/progress arguments, but heartbeat does not persist
+        those JSON blobs on every tick.
+        """
         rd = str(root_domain or "").strip().lower()
         stg = str(stage or "").strip().lower()
         wid = str(worker_id or "").strip()
@@ -4045,42 +4222,10 @@ RETURNING
         lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
         if not rd or not stg or not wid:
             return False
-        checkpoint_dict = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
-        progress_dict = dict(progress or {}) if isinstance(progress, dict) else {}
-        checkpoint_json = json.dumps(checkpoint_dict, ensure_ascii=False) if checkpoint_dict else None
-        progress_json = json.dumps(progress_dict, ensure_ascii=False) if progress_dict else None
-        artifact_type_text = str(progress_artifact_type or "").strip().lower()
-        progress_percent = float(progress_dict.get("percent", progress_dict.get("progress_percent", 0.0)) or 0.0)
-        current_unit = str(progress_dict.get("current_unit", progress_dict.get("unit", "")) or "")
-        last_milestone = str(progress_dict.get("last_milestone", progress_dict.get("milestone", "")) or "")
         sql = """
 UPDATE coordinator_stage_tasks
 SET heartbeat_at_utc = NOW(),
     lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
-    checkpoint_json = COALESCE(%s::jsonb, checkpoint_json),
-    progress_json = COALESCE(%s::jsonb, progress_json),
-    progress_percent = CASE WHEN %s >= 0 THEN %s ELSE progress_percent END,
-    current_unit = CASE WHEN %s <> '' THEN %s ELSE current_unit END,
-    last_milestone = CASE WHEN %s <> '' THEN %s ELSE last_milestone END,
-    progress_artifact_type = CASE
-      WHEN %s <> '' THEN %s
-      ELSE progress_artifact_type
-    END,
-    durable_checkpoint_json = CASE
-      WHEN durable_progress_updated_at_utc IS NULL OR durable_progress_updated_at_utc < NOW() - ((%s)::text || ' seconds')::interval OR %s <> ''
-      THEN COALESCE(%s::jsonb, durable_checkpoint_json)
-      ELSE durable_checkpoint_json
-    END,
-    durable_progress_json = CASE
-      WHEN durable_progress_updated_at_utc IS NULL OR durable_progress_updated_at_utc < NOW() - ((%s)::text || ' seconds')::interval OR %s <> ''
-      THEN COALESCE(%s::jsonb, durable_progress_json)
-      ELSE durable_progress_json
-    END,
-    durable_progress_updated_at_utc = CASE
-      WHEN durable_progress_updated_at_utc IS NULL OR durable_progress_updated_at_utc < NOW() - ((%s)::text || ' seconds')::interval OR %s <> ''
-      THEN NOW()
-      ELSE durable_progress_updated_at_utc
-    END,
     updated_at_utc = NOW()
 WHERE workflow_id = %s
   AND root_domain = %s
@@ -4091,37 +4236,21 @@ WHERE workflow_id = %s
         with self._connect() as conn:
             with conn.cursor() as cur:
                 self._touch_worker_presence(cur, wid, f"heartbeat_stage_{stg}")
-                cur.execute(
-                    sql,
-                    (
-                        lease,
-                        checkpoint_json,
-                        progress_json,
-                        progress_percent,
-                        progress_percent,
-                        current_unit,
-                        current_unit,
-                        last_milestone,
-                        last_milestone,
-                        artifact_type_text,
-                        artifact_type_text,
-                        self._durable_progress_min_interval_seconds,
-                        last_milestone,
-                        checkpoint_json,
-                        self._durable_progress_min_interval_seconds,
-                        last_milestone,
-                        progress_json,
-                        self._durable_progress_min_interval_seconds,
-                        last_milestone,
-                        widf,
-                        rd,
-                        stg,
-                        wid,
-                    ),
-                )
+                cur.execute(sql, (lease, widf, rd, stg, wid))
                 updated = int(cur.rowcount or 0)
+                if updated > 0:
+                    cur.execute(
+                        """
+UPDATE coordinator_resource_leases
+SET lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
+    updated_at_utc = NOW()
+WHERE workflow_id = %s AND root_domain = %s AND stage = %s AND worker_id = %s;
+""",
+                        (lease, widf, rd, stg, wid),
+                    )
             conn.commit()
         return updated > 0
+
     def update_stage_progress(
         self,
         *,
@@ -4301,6 +4430,11 @@ WHERE workflow_id = %s
                     ),
                 )
                 updated = int(cur.rowcount or 0)
+                if updated > 0:
+                    cur.execute(
+                        "DELETE FROM coordinator_resource_leases WHERE workflow_id = %s AND root_domain = %s AND stage = %s AND worker_id = %s;",
+                        (widf, rd, stg, wid),
+                    )
             conn.commit()
         if updated > 0:
             self.record_system_event(
@@ -4499,6 +4633,65 @@ SET source_worker = EXCLUDED.source_worker,
                         summary_request_count,
                     ),
                 )
+                if storage_uri:
+                    cur.execute(
+                        """
+INSERT INTO coordinator_artifact_objects(
+    content_sha256, storage_backend, storage_uri, content_size_bytes, media_type, compression, ref_count, updated_at_utc
+)
+VALUES (%s, %s, %s, %s, %s, %s, 1, NOW())
+ON CONFLICT (content_sha256) DO UPDATE
+SET ref_count = coordinator_artifact_objects.ref_count + 1,
+    updated_at_utc = NOW();
+""",
+                        (sha256, storage_backend, storage_uri, size_bytes, media_type_text, compression),
+                    )
+                manifest_entries = manifest_dict.get("entries")
+                if not isinstance(manifest_entries, list):
+                    manifest_entries = manifest_dict.get("files") if isinstance(manifest_dict.get("files"), list) else []
+                for entry in manifest_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_path = str(entry.get("path") or entry.get("entry_path") or entry.get("name") or "").strip()
+                    entry_hash = str(entry.get("content_sha256") or entry.get("sha256") or "").strip().lower()
+                    if not entry_path:
+                        continue
+                    if not entry_hash:
+                        entry_hash = hashlib.sha256(entry_path.encode("utf-8")).hexdigest()
+                    entry_size = int(entry.get("content_size_bytes") or entry.get("size_bytes") or entry.get("size") or 0)
+                    entry_uri = str(entry.get("storage_uri") or "").strip()
+                    entry_media = str(entry.get("media_type") or media_type_text or "application/octet-stream")
+                    shard_key = str(entry.get("shard_key") or entry.get("bucket") or "").strip()
+                    logical_role = str(entry.get("logical_role") or entry.get("role") or "").strip()
+                    cur.execute(
+                        """
+INSERT INTO coordinator_artifact_manifest_entries(
+    root_domain, artifact_type, entry_path, content_sha256, content_size_bytes,
+    media_type, storage_uri, shard_key, logical_role, metadata_json
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+ON CONFLICT (root_domain, artifact_type, entry_path) DO UPDATE
+SET content_sha256 = EXCLUDED.content_sha256,
+    content_size_bytes = EXCLUDED.content_size_bytes,
+    media_type = EXCLUDED.media_type,
+    storage_uri = EXCLUDED.storage_uri,
+    shard_key = EXCLUDED.shard_key,
+    logical_role = EXCLUDED.logical_role,
+    metadata_json = EXCLUDED.metadata_json;
+""",
+                        (
+                            rd,
+                            at,
+                            entry_path,
+                            entry_hash,
+                            entry_size,
+                            entry_media,
+                            entry_uri,
+                            shard_key,
+                            logical_role,
+                            json.dumps(entry, ensure_ascii=False, default=str),
+                        ),
+                    )
                 summary_payload = json.dumps(
                     {
                         "schema_version": registry.current_version("summary_envelope"),
@@ -4540,6 +4733,54 @@ SET source_worker = EXCLUDED.source_worker,
             },
         )
         return True
+
+    def list_artifact_manifest_entries(
+        self,
+        root_domain: str,
+        artifact_type: str,
+        *,
+        shard_key: str = "",
+        logical_role: str = "",
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        rd = str(root_domain or "").strip().lower()
+        at = str(artifact_type or "").strip().lower()
+        if not rd or not at:
+            return []
+        filters = ["root_domain = %s", "artifact_type = %s"]
+        params: list[Any] = [rd, at]
+        if shard_key:
+            filters.append("shard_key = %s")
+            params.append(str(shard_key).strip())
+        if logical_role:
+            filters.append("logical_role = %s")
+            params.append(str(logical_role).strip())
+        params.append(max(1, min(10000, int(limit or 1000))))
+        sql = f"""
+SELECT entry_path, content_sha256, content_size_bytes, media_type, storage_uri, shard_key, logical_role, metadata_json
+FROM coordinator_artifact_manifest_entries
+WHERE {' AND '.join(filters)}
+ORDER BY entry_path ASC
+LIMIT %s;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            conn.commit()
+        return [
+            {
+                "path": str(row[0] or ""),
+                "content_sha256": str(row[1] or ""),
+                "content_size_bytes": int(row[2] or 0),
+                "media_type": str(row[3] or "application/octet-stream"),
+                "storage_uri": str(row[4] or ""),
+                "shard_key": str(row[5] or ""),
+                "logical_role": str(row[6] or ""),
+                "metadata": row[7] if isinstance(row[7], dict) else {},
+            }
+            for row in rows
+        ]
 
     def get_artifact_metadata(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()

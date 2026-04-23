@@ -23,10 +23,10 @@ import socket
 import subprocess
 import sys
 import threading
+import queue
 import time
 import tempfile
 import uuid
-import zipfile
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode, urlparse
@@ -399,6 +399,9 @@ class DistributedCoordinator:
         self._worker_state_lock = threading.Lock()
         self._worker_states: dict[str, str] = {}
         self._workflow_lock = threading.Lock()
+        self._workflow_reschedule_queue: "queue.Queue[str]" = queue.Queue()
+        self._workflow_reschedule_pending: set[str] = set()
+        self._workflow_reschedule_lock = threading.Lock()
         self._workflow_id = "default"
         self._workflow_catalog: dict[str, list[dict[str, Any]]] = {}
         self._workflow_entries: list[dict[str, Any]] = []
@@ -495,6 +498,16 @@ class DistributedCoordinator:
             )
         except Exception:
             pass
+
+    def _enqueue_domain_workflow_schedule(self, root_domain: str) -> None:
+        safe_domain = str(root_domain or "").strip().lower()
+        if not safe_domain:
+            return
+        with self._workflow_reschedule_lock:
+            if safe_domain in self._workflow_reschedule_pending:
+                return
+            self._workflow_reschedule_pending.add(safe_domain)
+            self._workflow_reschedule_queue.put(safe_domain)
 
     def _refresh_domain_workflow_schedule(self, *, root_domain: str, worker_id: str) -> int:
         safe_domain = str(root_domain or "").strip().lower()
@@ -866,6 +879,7 @@ class DistributedCoordinator:
             workflow_ids=sorted(self._workflow_catalog.keys()),
             workflow_config=str(self.cfg.workflow_config),
             interval_seconds=float(self.cfg.workflow_scheduler_interval_seconds),
+            mode="domain_event_queue",
         )
         while not self.stop_event.is_set():
             state = self._poll_worker_commands(worker_id)
@@ -879,41 +893,36 @@ class DistributedCoordinator:
                 self.stop_event.wait(self.cfg.workflow_scheduler_interval_seconds)
                 continue
             try:
-                snapshot = self.client.get_workflow_snapshot(limit=5000)
-                domain_rows = snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else []
-            except Exception as exc:
-                self.logger.error("workflow_scheduler_snapshot_failed", worker_id=worker_id, error=str(exc))
-                self.stop_event.wait(self.cfg.workflow_scheduler_interval_seconds)
+                root_domain = self._workflow_reschedule_queue.get(timeout=float(self.cfg.workflow_scheduler_interval_seconds))
+            except queue.Empty:
                 continue
-            scheduled = 0
-            for row in domain_rows:
-                if not isinstance(row, dict):
-                    continue
-                try:
-                    scheduled += self._schedule_domain_workflows(row, worker_id=worker_id)
-                except Exception as exc:
-                    root_domain = str(row.get("root_domain", "") or "").strip().lower()
-                    self.logger.error(
-                        "workflow_scheduler_domain_failed",
-                        worker_id=worker_id,
-                        root_domain=root_domain,
-                        error=str(exc),
-                    )
-                    self._record_worker_error(
-                        worker_id=worker_id,
-                        description=f"Workflow scheduler failed while processing {root_domain or 'unknown-domain'}",
-                        exception=exc,
-                        metadata={"root_domain": root_domain, "source": "workflow_scheduler_loop"},
-                        mark_errored=False,
-                    )
+            with self._workflow_reschedule_lock:
+                self._workflow_reschedule_pending.discard(root_domain)
+            try:
+                scheduled = self._refresh_domain_workflow_schedule(root_domain=root_domain, worker_id=worker_id)
+            except Exception as exc:
+                self.logger.error(
+                    "workflow_scheduler_domain_failed",
+                    worker_id=worker_id,
+                    root_domain=root_domain,
+                    error=str(exc),
+                )
+                self._record_worker_error(
+                    worker_id=worker_id,
+                    description=f"Workflow scheduler failed while processing {root_domain or 'unknown-domain'}",
+                    exception=exc,
+                    metadata={"root_domain": root_domain, "source": "workflow_scheduler_loop"},
+                    mark_errored=False,
+                )
+                scheduled = 0
             self.logger.info(
-                "workflow_scheduler_cycle_complete",
+                "workflow_scheduler_domain_complete",
                 worker_id=worker_id,
                 workflow_id=self._workflow_id,
-                domains_checked=len(domain_rows),
+                root_domain=root_domain,
                 tasks_scheduled=scheduled,
             )
-            self.stop_event.wait(self.cfg.workflow_scheduler_interval_seconds)
+
 
     def _artifact_paths(self, root_domain: str) -> dict[str, Path]:
         domain_dir = _domain_output_dir(root_domain, self.cfg.output_root)
@@ -945,10 +954,6 @@ class DistributedCoordinator:
             "recon_subdomain_enumeration_log": recon_dir / "subdomain_enumeration.log",
             "recon_subdomain_enumeration_progress_json": recon_dir / "subdomain_enumeration.progress.json",
             "recon_subdomain_enumeration_complete_flag": recon_dir / "subdomain_enumeration.complete.json",
-            "recon_subdomain_takeover_log": recon_dir / "subdomain_takeover.log",
-            "recon_subdomain_takeover_summary_json": recon_dir / "subdomain_takeover.summary.json",
-            "recon_subdomain_takeover_progress_json": recon_dir / "subdomain_takeover.progress.json",
-            "recon_subdomain_takeover_complete_flag": recon_dir / "subdomain_takeover.complete.json",
             "recon_spider_source_tags_log": recon_dir / "spider_source_tags.log",
             "recon_spider_source_tags_progress_json": recon_dir / "spider_source_tags.progress.json",
             "recon_spider_source_tags_complete_flag": recon_dir / "spider_source_tags.complete.json",
@@ -1017,66 +1022,68 @@ class DistributedCoordinator:
             bytes=path.stat().st_size,
         )
 
-    def _upload_zip_artifact(self, root_domain: str, artifact_type: str, path: Path, worker_id: str) -> None:
+    def _upload_directory_manifest_artifact(self, root_domain: str, artifact_type: str, path: Path, worker_id: str) -> None:
         if not path.is_dir():
             self.logger.info(
-                "artifact_zip_source_not_found",
+                "artifact_manifest_source_not_found",
                 root_domain=root_domain,
                 worker_id=worker_id,
                 artifact_type=artifact_type,
                 source_path=str(path),
             )
             return
-        shard_manifest = {"files": []}
+        entries: list[dict[str, Any]] = []
         for file_path in sorted(path.rglob("*")):
             if not file_path.is_file():
                 continue
             rel = file_path.relative_to(path).as_posix()
-            size = int(file_path.stat().st_size)
-            shard_manifest["files"].append({"path": rel, "size_bytes": size, "mtime_ns": int(file_path.stat().st_mtime_ns)})
+            digest_hash = hashlib.sha256()
+            with file_path.open("rb") as digest_handle:
+                for chunk in iter(lambda: digest_handle.read(1024 * 1024), b""):
+                    digest_hash.update(chunk)
+            digest = digest_hash.hexdigest()
+            shard_artifact_type = f"{artifact_type}__shard__{digest[:24]}"
+            self.client.upload_artifact_from_file(
+                root_domain,
+                shard_artifact_type,
+                file_path,
+                source_worker=worker_id,
+                content_encoding="binary",
+                retention_class="derived_rebuildable",
+                media_type="application/octet-stream",
+            )
+            entries.append(
+                {
+                    "path": rel,
+                    "artifact_type": shard_artifact_type,
+                    "content_sha256": digest,
+                    "size_bytes": int(file_path.stat().st_size),
+                    "mtime_ns": int(file_path.stat().st_mtime_ns),
+                    "shard_key": rel.split("/", 1)[0] if "/" in rel else rel,
+                    "logical_role": artifact_type,
+                }
+            )
         self.client.upload_artifact_manifest(
             root_domain,
-            f"{artifact_type}_manifest",
+            artifact_type,
             {
-                "format": "directory_manifest",
+                "format": "content_addressed_directory_manifest",
                 "root": str(path),
-                "file_count": len(shard_manifest["files"]),
-                "files": shard_manifest["files"],
+                "file_count": len(entries),
+                "entries": entries,
             },
             source_worker=worker_id,
             media_type="application/json",
             retention_class="summary_index",
         )
-        with tempfile.NamedTemporaryFile(prefix="artifact-", suffix=".zip", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        try:
-            with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-                for file_path in sorted(path.rglob("*")):
-                    if file_path.is_file():
-                        zf.write(file_path, arcname=file_path.relative_to(path).as_posix())
-            self.client.upload_artifact_from_file(
-                root_domain,
-                artifact_type,
-                tmp_path,
-                source_worker=worker_id,
-                content_encoding="zip",
-                retention_class="derived_rebuildable",
-                media_type="application/zip",
-            )
-            self.logger.info(
-                "artifact_zip_upload_complete",
-                root_domain=root_domain,
-                worker_id=worker_id,
-                artifact_type=artifact_type,
-                source_path=str(path),
-                bytes=tmp_path.stat().st_size,
-                file_count=len(shard_manifest["files"]),
-            )
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        self.logger.info(
+            "artifact_manifest_upload_complete",
+            root_domain=root_domain,
+            worker_id=worker_id,
+            artifact_type=artifact_type,
+            source_path=str(path),
+            file_count=len(entries),
+        )
 
     def _download_file_artifact(self, root_domain: str, artifact_type: str, path: Path) -> bool:
         self.logger.info(
@@ -1103,41 +1110,45 @@ class DistributedCoordinator:
         )
         return True
 
-    def _download_zip_artifact(self, root_domain: str, artifact_type: str, target_dir: Path) -> bool:
+    def _materialize_manifest_artifact(self, root_domain: str, artifact_type: str, target_dir: Path) -> bool:
         self.logger.info(
-            "artifact_zip_download_start",
+            "artifact_manifest_materialize_start",
             root_domain=root_domain,
             artifact_type=artifact_type,
             target_dir=str(target_dir),
         )
-        with tempfile.NamedTemporaryFile(prefix="artifact-", suffix=".zip", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        try:
-            ok = self.client.download_artifact_to_file(root_domain, artifact_type, tmp_path)
-            if not ok:
-                self.logger.warning(
-                    "artifact_zip_download_missing",
-                    root_domain=root_domain,
-                    artifact_type=artifact_type,
-                    target_dir=str(target_dir),
-                )
-                return False
-            target_dir.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(tmp_path, mode="r") as zf:
-                zf.extractall(target_dir)
-            self.logger.info(
-                "artifact_zip_download_complete",
+        artifact = self.client.get_artifact_metadata(root_domain, artifact_type)
+        manifest = artifact.get("manifest") if isinstance(artifact, dict) else None
+        entries = manifest.get("entries") if isinstance(manifest, dict) else None
+        if not isinstance(entries, list):
+            entries = manifest.get("files") if isinstance(manifest, dict) and isinstance(manifest.get("files"), list) else None
+        if not entries:
+            self.logger.warning(
+                "artifact_manifest_missing",
                 root_domain=root_domain,
                 artifact_type=artifact_type,
                 target_dir=str(target_dir),
-                bytes=tmp_path.stat().st_size,
             )
-            return True
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            return False
+        target_dir.mkdir(parents=True, exist_ok=True)
+        materialized = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            rel = str(entry.get("path") or entry.get("entry_path") or "").strip().lstrip("/")
+            shard_type = str(entry.get("artifact_type") or "").strip().lower()
+            if not rel or not shard_type:
+                continue
+            if self.client.download_artifact_to_file(root_domain, shard_type, target_dir / rel):
+                materialized += 1
+        self.logger.info(
+            "artifact_manifest_materialize_complete",
+            root_domain=root_domain,
+            artifact_type=artifact_type,
+            target_dir=str(target_dir),
+            files=materialized,
+        )
+        return materialized > 0
 
     @staticmethod
     def _recon_progress_artifact_type(plugin_name: str) -> str:
@@ -1215,7 +1226,7 @@ class DistributedCoordinator:
         self._upload_file_artifact(root_domain, "nightmare_scrapy_log", paths["nightmare_scrapy_log"], worker_id)
         hv_dir = paths.get("nightmare_high_value_dir")
         if hv_dir is not None and hv_dir.is_dir():
-            self._upload_zip_artifact(root_domain, "nightmare_high_value_zip", hv_dir, worker_id)
+            self._upload_directory_manifest_artifact(root_domain, "nightmare_high_value_zip", hv_dir, worker_id)
 
     def _nightmare_worker_loop(self, idx: int) -> None:
         worker_id = f"{self.worker_prefix}-nightmare-{idx}"
@@ -1787,354 +1798,6 @@ class DistributedCoordinator:
             deduped.append(clean)
         return deduped
 
-    @staticmethod
-    def _recon_takeover_fingerprints() -> list[dict[str, Any]]:
-        return [
-            {
-                "provider": "GitHub Pages",
-                "cname_suffixes": ("github.io",),
-                "body_markers": ("there isn't a github pages site here", "for root urls (like http://example.com/) you must provide an index.html file"),
-                "confidence": "high",
-            },
-            {
-                "provider": "Heroku",
-                "cname_suffixes": ("herokuapp.com", "herokudns.com", "herokussl.com"),
-                "body_markers": ("no such app", "heroku | no such app"),
-                "confidence": "high",
-            },
-            {
-                "provider": "Fastly",
-                "cname_suffixes": ("fastly.net", "fastlylb.net"),
-                "body_markers": ("fastly error: unknown domain",),
-                "confidence": "high",
-            },
-            {
-                "provider": "Pantheon",
-                "cname_suffixes": ("pantheonsite.io",),
-                "body_markers": ("the gods are wise", "404 error unknown site!"),
-                "confidence": "medium",
-            },
-            {
-                "provider": "Shopify",
-                "cname_suffixes": ("myshopify.com",),
-                "body_markers": ("sorry, this shop is currently unavailable",),
-                "confidence": "high",
-            },
-            {
-                "provider": "Zendesk",
-                "cname_suffixes": ("zendesk.com",),
-                "body_markers": ("help center closed", "this zendesk account is no longer available"),
-                "confidence": "medium",
-            },
-            {
-                "provider": "Surge",
-                "cname_suffixes": ("surge.sh",),
-                "body_markers": ("project not found",),
-                "confidence": "medium",
-            },
-            {
-                "provider": "Tumblr",
-                "cname_suffixes": ("domains.tumblr.com",),
-                "body_markers": ("there's nothing here",),
-                "confidence": "medium",
-            },
-            {
-                "provider": "WordPress.com",
-                "cname_suffixes": ("wordpress.com",),
-                "body_markers": ("do you want to register",),
-                "confidence": "medium",
-            },
-            {
-                "provider": "ReadMe",
-                "cname_suffixes": ("readme.io",),
-                "body_markers": ("project doesnt exist", "project doesn't exist"),
-                "confidence": "medium",
-            },
-            {
-                "provider": "Statuspage",
-                "cname_suffixes": ("statuspage.io",),
-                "body_markers": ("you are being redirected", "statuspage"),
-                "confidence": "low",
-            },
-            {
-                "provider": "AWS S3",
-                "cname_suffixes": ("amazonaws.com",),
-                "body_markers": ("nosuchbucket", "the specified bucket does not exist"),
-                "confidence": "high",
-            },
-            {
-                "provider": "AWS CloudFront",
-                "cname_suffixes": ("cloudfront.net",),
-                "body_markers": ("the request could not be satisfied", "bad request."),
-                "confidence": "low",
-            },
-        ]
-
-    @staticmethod
-    def _lookup_cname_records(hostname: str, timeout_seconds: float = 8.0) -> tuple[list[str], str]:
-        host = str(hostname or "").strip().rstrip(".")
-        if not host:
-            return [], "empty hostname"
-        commands = (
-            ["dig", "+short", "CNAME", host],
-            ["host", "-t", "CNAME", host],
-            ["nslookup", "-type=CNAME", host],
-        )
-        errors: list[str] = []
-        records: set[str] = set()
-        for command in commands:
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=BASE_DIR,
-                    capture_output=True,
-                    text=True,
-                    timeout=max(1.0, timeout_seconds),
-                    check=False,
-                )
-            except FileNotFoundError:
-                continue
-            except Exception as exc:
-                errors.append(str(exc))
-                continue
-            output = "\n".join([completed.stdout or "", completed.stderr or ""])
-            for line in output.splitlines():
-                clean = str(line or "").strip().lower().rstrip(".")
-                if not clean:
-                    continue
-                if "canonical name =" in clean:
-                    clean = clean.split("canonical name =", 1)[1].strip().rstrip(".")
-                elif "is an alias for" in clean:
-                    clean = clean.split("is an alias for", 1)[1].strip().rstrip(".")
-                elif "name =" in clean:
-                    clean = clean.split("name =", 1)[1].strip().rstrip(".")
-                elif "can't find" in clean or "not found" in clean or "nxdomain" in clean:
-                    errors.append(clean)
-                    continue
-                if clean and " " not in clean and "." in clean:
-                    records.add(clean)
-            if records:
-                return sorted(records), ""
-        return sorted(records), "; ".join(errors[-3:])
-
-    def _run_recon_subdomain_takeover_plugin_task(
-        self,
-        *,
-        worker_id: str,
-        root_domain: str,
-        plugin_name: str,
-    ) -> tuple[int, str]:
-        paths = self._artifact_paths(root_domain)
-        recon_dir = paths["recon_dir"]
-        recon_dir.mkdir(parents=True, exist_ok=True)
-        subdomains_payload = self._load_json_file_or_artifact(
-            root_domain=root_domain,
-            artifact_type="recon_subdomains_json",
-            path=paths["recon_subdomains_json"],
-        )
-        if not subdomains_payload:
-            return 1, "missing recon_subdomains_json artifact"
-
-        params = self._workflow_stage_parameters(plugin_name)
-        probe_timeout = max(1.0, _safe_float(params.get("probe_timeout_seconds", 10.0), 10.0))
-        dns_timeout = max(1.0, _safe_float(params.get("dns_timeout_seconds", 8.0), 8.0))
-        probe_verify_tls = bool(params.get("probe_verify_tls", True))
-        response_read_limit = max(4096, _safe_int(params.get("response_read_limit_bytes", 131072), 131072))
-        max_logged_requests = max(100, _safe_int(params.get("max_request_log_entries", 4000), 4000))
-
-        progress_path = self._recon_progress_path_for_plugin(root_domain, plugin_name)
-        progress_state = self._load_json_file_or_artifact(
-            root_domain=root_domain,
-            artifact_type=self._recon_progress_artifact_type(plugin_name),
-            path=progress_path,
-        )
-        if not progress_state:
-            progress_state = {
-                "schema_version": 1,
-                "plugin_name": plugin_name,
-                "root_domain": root_domain,
-                "status": "running",
-                "phase": "takeover_probe",
-                "started_at_utc": _now_iso(),
-                "requests_made": [],
-                "results": {},
-            }
-
-        subdomains: set[str] = set()
-        for item in (subdomains_payload.get("subdomains") if isinstance(subdomains_payload.get("subdomains"), list) else []):
-            host = str(item or "").strip().lower().lstrip("*.").rstrip(".")
-            if host and (host == root_domain or host.endswith(f".{root_domain}")):
-                subdomains.add(host)
-        for row in (subdomains_payload.get("entries") if isinstance(subdomains_payload.get("entries"), list) else []):
-            if not isinstance(row, dict):
-                continue
-            host = str(row.get("subdomain", "") or "").strip().lower().lstrip("*.").rstrip(".")
-            if host and (host == root_domain or host.endswith(f".{root_domain}")):
-                subdomains.add(host)
-        if not subdomains:
-            return 1, "recon_subdomains_json did not contain any in-scope subdomains"
-
-        entries_by_host = {
-            str(row.get("subdomain", "") or "").strip().lower().lstrip("*.").rstrip("."): row
-            for row in (subdomains_payload.get("entries") if isinstance(subdomains_payload.get("entries"), list) else [])
-            if isinstance(row, dict)
-        }
-        fingerprints = self._recon_takeover_fingerprints()
-        results = dict(progress_state.get("results") or {}) if isinstance(progress_state.get("results"), dict) else {}
-
-        progress_state["status"] = "running"
-        progress_state["phase"] = "takeover_probe"
-        progress_state["subdomain_count"] = len(subdomains)
-        self._persist_recon_progress(
-            worker_id=worker_id,
-            root_domain=root_domain,
-            plugin_name=plugin_name,
-            payload=progress_state,
-        )
-
-        for subdomain in sorted(subdomains):
-            prior = results.get(subdomain)
-            if isinstance(prior, dict) and bool(prior.get("checked")):
-                continue
-
-            cname_records, cname_error = self._lookup_cname_records(subdomain, dns_timeout)
-            candidate_urls: list[str] = []
-            row = entries_by_host.get(subdomain) if isinstance(entries_by_host.get(subdomain), dict) else {}
-            start_url = str(row.get("start_url", "") or "").strip()
-            if start_url:
-                candidate_urls.append(start_url)
-            candidate_urls.extend([f"https://{subdomain}/", f"http://{subdomain}/"])
-
-            seen_urls: set[str] = set()
-            http_observations: list[dict[str, Any]] = []
-            body_text = ""
-            for url in candidate_urls:
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                attempt = {
-                    "type": "takeover_probe",
-                    "url": url,
-                    "started_at_utc": _now_iso(),
-                }
-                try:
-                    rsp = request_capped(
-                        "GET",
-                        url,
-                        timeout_seconds=probe_timeout,
-                        read_limit=response_read_limit,
-                        follow_redirects=True,
-                        verify=probe_verify_tls,
-                    )
-                    raw_body = bytes(rsp.body or b"")
-                    decoded = raw_body.decode("utf-8", errors="replace")
-                    if not body_text and decoded:
-                        body_text = decoded
-                    attempt.update(
-                        {
-                            "status_code": int(rsp.status_code),
-                            "resolved_url": str(rsp.url or url),
-                            "content_type": str(rsp.headers.get("content-type", "") if hasattr(rsp, "headers") else ""),
-                            "body_sample_sha256": hashlib.sha256(raw_body[:response_read_limit]).hexdigest() if raw_body else "",
-                        }
-                    )
-                except Exception as exc:
-                    attempt["error"] = str(exc)
-                http_observations.append(attempt)
-                progress_state.setdefault("requests_made", []).append(attempt)
-                progress_state["requests_made"] = list(progress_state["requests_made"])[-max_logged_requests:]
-
-            normalized_body = body_text.lower()
-            normalized_cnames = [record.lower().rstrip(".") for record in cname_records]
-            matches: list[dict[str, Any]] = []
-            for fingerprint in fingerprints:
-                cname_hit = any(
-                    cname.endswith(str(suffix).lower().rstrip("."))
-                    for cname in normalized_cnames
-                    for suffix in fingerprint.get("cname_suffixes", ())
-                )
-                marker_hits = [
-                    marker
-                    for marker in fingerprint.get("body_markers", ())
-                    if str(marker or "").lower() in normalized_body
-                ]
-                if cname_hit or marker_hits:
-                    matches.append(
-                        {
-                            "provider": fingerprint.get("provider"),
-                            "confidence": fingerprint.get("confidence", "medium"),
-                            "cname_match": bool(cname_hit),
-                            "body_marker_matches": marker_hits,
-                        }
-                    )
-
-            vulnerable = any(
-                bool(match.get("cname_match")) and bool(match.get("body_marker_matches"))
-                for match in matches
-            )
-            suspected = bool(matches)
-            results[subdomain] = {
-                "subdomain": subdomain,
-                "checked": True,
-                "cname_records": cname_records,
-                "cname_error": cname_error,
-                "http_observations": http_observations,
-                "matches": matches,
-                "suspected_takeover": suspected,
-                "probable_takeover": vulnerable,
-            }
-            progress_state["results"] = results
-            self._persist_recon_progress(
-                worker_id=worker_id,
-                root_domain=root_domain,
-                plugin_name=plugin_name,
-                payload=progress_state,
-            )
-
-        findings = [
-            result
-            for result in results.values()
-            if isinstance(result, dict) and bool(result.get("suspected_takeover"))
-        ]
-        summary_payload = {
-            "schema_version": 1,
-            "plugin_name": plugin_name,
-            "root_domain": root_domain,
-            "generated_at_utc": _now_iso(),
-            "subdomain_count": len(subdomains),
-            "checked_count": len([r for r in results.values() if isinstance(r, dict) and bool(r.get("checked"))]),
-            "suspected_count": len(findings),
-            "probable_count": len([r for r in findings if bool(r.get("probable_takeover"))]),
-            "findings": sorted(findings, key=lambda item: (not bool(item.get("probable_takeover")), str(item.get("subdomain", "")))),
-            "results": results,
-        }
-        summary_path = paths["recon_subdomain_takeover_summary_json"]
-        _atomic_write_json(summary_path, summary_payload)
-        self._upload_file_artifact(root_domain, "recon_subdomain_takeover_summary_json", summary_path, worker_id)
-
-        progress_state["phase"] = "complete"
-        progress_state["status"] = "completed"
-        progress_state["suspected_count"] = summary_payload["suspected_count"]
-        progress_state["probable_count"] = summary_payload["probable_count"]
-        self._persist_recon_progress(
-            worker_id=worker_id,
-            root_domain=root_domain,
-            plugin_name=plugin_name,
-            payload=progress_state,
-        )
-        self._write_recon_completion_flag(
-            worker_id=worker_id,
-            root_domain=root_domain,
-            plugin_name=plugin_name,
-            details={
-                "subdomain_count": summary_payload["subdomain_count"],
-                "checked_count": summary_payload["checked_count"],
-                "suspected_count": summary_payload["suspected_count"],
-                "probable_count": summary_payload["probable_count"],
-            },
-        )
-        return 0, ""
-
     def _run_recon_spider_plugin_task(
         self,
         *,
@@ -2615,13 +2278,13 @@ class DistributedCoordinator:
                 worker_id,
             )
             self._upload_file_artifact(root_domain, "extractor_summary_json", summary_path, worker_id)
-            self._upload_zip_artifact(
+            self._upload_directory_manifest_artifact(
                 root_domain,
                 "recon_extractor_high_value_matches_zip",
                 matches_dir,
                 worker_id,
             )
-            self._upload_zip_artifact(root_domain, "extractor_matches_zip", matches_dir, worker_id)
+            self._upload_directory_manifest_artifact(root_domain, "extractor_matches_zip", matches_dir, worker_id)
         except Exception as exc:
             progress_state["status"] = "failed"
             progress_state["error"] = f"failed to upload extractor artifacts: {exc}"
@@ -2674,7 +2337,7 @@ class DistributedCoordinator:
         hv_dir = paths.get("nightmare_high_value_dir")
         if hv_dir is not None:
             hv_dir.mkdir(parents=True, exist_ok=True)
-            self._download_zip_artifact(root_domain, "nightmare_high_value_zip", hv_dir)
+            self._materialize_manifest_artifact(root_domain, "nightmare_high_value_zip", hv_dir)
         self._download_file_artifact(root_domain, "nightmare_post_requests_json", paths["nightmare_post_requests_json"])
 
         fozzy_params = self._workflow_stage_parameters(plugin_name)
@@ -2720,7 +2383,7 @@ class DistributedCoordinator:
             self._upload_file_artifact(root_domain, "fozzy_summary_json", paths["fozzy_summary_json"], worker_id)
             self._upload_file_artifact(root_domain, "fozzy_inventory_json", paths["fozzy_inventory_json"], worker_id)
             self._upload_file_artifact(root_domain, "fozzy_log", paths["fozzy_log"], worker_id)
-            self._upload_zip_artifact(root_domain, "fozzy_results_zip", paths["fozzy_results_dir"], worker_id)
+            self._upload_directory_manifest_artifact(root_domain, "fozzy_results_zip", paths["fozzy_results_dir"], worker_id)
         except Exception as exc:
             self.logger.error(
                 "fozzy_artifact_upload_failed",
@@ -2805,7 +2468,7 @@ class DistributedCoordinator:
         domain_dir = _domain_output_dir(root_domain, self.cfg.output_root)
         fozzy_results_dir = paths["fozzy_results_dir"]
         if not fozzy_results_dir.is_dir():
-            self._download_zip_artifact(root_domain, "fozzy_results_zip", fozzy_results_dir)
+            self._materialize_manifest_artifact(root_domain, "fozzy_results_zip", fozzy_results_dir)
         if not fozzy_results_dir.is_dir():
             return 1, "missing fozzy results artifact"
 
@@ -2850,7 +2513,7 @@ class DistributedCoordinator:
             return 1, str(exc)
         try:
             self._upload_file_artifact(root_domain, "extractor_summary_json", paths["extractor_summary_json"], worker_id)
-            self._upload_zip_artifact(root_domain, "extractor_matches_zip", paths["extractor_matches_dir"], worker_id)
+            self._upload_directory_manifest_artifact(root_domain, "extractor_matches_zip", paths["extractor_matches_dir"], worker_id)
         except Exception as exc:
             self.logger.error(
                 "extractor_artifact_upload_failed",
@@ -2951,6 +2614,7 @@ class DistributedCoordinator:
                 error=str(err_text or ""),
             )
             try:
+                self._enqueue_domain_workflow_schedule(root_domain)
                 scheduled_count = self._refresh_domain_workflow_schedule(root_domain=root_domain, worker_id=worker_id)
                 self.logger.info(
                     "workflow_domain_rescheduled_after_task_completion",
@@ -3122,7 +2786,7 @@ class DistributedCoordinator:
             hv_dir = paths.get("nightmare_high_value_dir")
             if hv_dir is not None:
                 hv_dir.mkdir(parents=True, exist_ok=True)
-                self._download_zip_artifact(root_domain, "nightmare_high_value_zip", hv_dir)
+                self._materialize_manifest_artifact(root_domain, "nightmare_high_value_zip", hv_dir)
             self._download_file_artifact(root_domain, "nightmare_post_requests_json", paths["nightmare_post_requests_json"])
 
             self._begin_job()
@@ -3206,7 +2870,7 @@ class DistributedCoordinator:
                     self._upload_file_artifact(root_domain, "fozzy_summary_json", paths["fozzy_summary_json"], worker_id)
                     self._upload_file_artifact(root_domain, "fozzy_inventory_json", paths["fozzy_inventory_json"], worker_id)
                     self._upload_file_artifact(root_domain, "fozzy_log", paths["fozzy_log"], worker_id)
-                    self._upload_zip_artifact(root_domain, "fozzy_results_zip", paths["fozzy_results_dir"], worker_id)
+                    self._upload_directory_manifest_artifact(root_domain, "fozzy_results_zip", paths["fozzy_results_dir"], worker_id)
                 except Exception as exc:
                     self.logger.error(
                         "fozzy_artifact_upload_failed",
@@ -3461,7 +3125,7 @@ class DistributedCoordinator:
             domain_dir = _domain_output_dir(root_domain, self.cfg.output_root)
             fozzy_results_dir = paths["fozzy_results_dir"]
             if not fozzy_results_dir.is_dir():
-                self._download_zip_artifact(root_domain, "fozzy_results_zip", fozzy_results_dir)
+                self._materialize_manifest_artifact(root_domain, "fozzy_results_zip", fozzy_results_dir)
             if not fozzy_results_dir.is_dir():
                 self.client.complete_stage(
                     worker_id,
@@ -3551,7 +3215,7 @@ class DistributedCoordinator:
 
                 try:
                     self._upload_file_artifact(root_domain, "extractor_summary_json", paths["extractor_summary_json"], worker_id)
-                    self._upload_zip_artifact(root_domain, "extractor_matches_zip", paths["extractor_matches_dir"], worker_id)
+                    self._upload_directory_manifest_artifact(root_domain, "extractor_matches_zip", paths["extractor_matches_dir"], worker_id)
                 except Exception as exc:
                     self.logger.error(
                         "extractor_artifact_upload_failed",

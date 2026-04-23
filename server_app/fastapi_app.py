@@ -12,21 +12,6 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Reques
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 from server_app.store import CoordinatorStore, _stream_file_chunks
-from nightmare_shared.templating import render_template
-from workflow_app.store import (
-    create_workflow_run,
-    ensure_workflow_schema,
-    get_workflow_definition,
-    get_workflow_run,
-    list_plugin_definitions,
-    list_workflow_definitions,
-    list_workflow_runs,
-    publish_workflow_definition,
-    save_workflow_definition,
-    seed_builtin_plugins,
-    upsert_plugin_definition,
-)
-from workflow_app.validation import validate_workflow_definition
 
 
 def _bearer_token(header_value: str | None) -> str:
@@ -264,6 +249,28 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         )
         return {"ok": bool(ok)}
 
+    @app.get("/api/coord/artifact/manifest-entries")
+    def artifact_manifest_entries(
+        root_domain: str = Query(default=""),
+        artifact_type: str = Query(default=""),
+        shard_key: str = Query(default=""),
+        logical_role: str = Query(default=""),
+        limit: int = Query(default=1000),
+        _auth: None = Depends(require_auth),
+        store: CoordinatorStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        return {
+            "root_domain": root_domain,
+            "artifact_type": artifact_type,
+            "entries": store.list_artifact_manifest_entries(
+                root_domain,
+                artifact_type,
+                shard_key=shard_key,
+                logical_role=logical_role,
+                limit=limit,
+            ),
+        }
+
     @app.post("/api/coord/artifact/stream")
     async def upload_artifact_stream(
         request: Request,
@@ -380,90 +387,5 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             error=str(body.get("error") or ""),
         )
         return {"ok": bool(ok)}
-
-
-    @app.get("/workflow-definitions", response_class=HTMLResponse)
-    def workflow_definitions_page(_auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> str:
-        seed_builtin_plugins(store)
-        return render_template("workflow_definitions.html.j2")
-
-    @app.get("/plugin-definitions", response_class=HTMLResponse)
-    def plugin_definitions_page(_auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> str:
-        seed_builtin_plugins(store)
-        return render_template("plugin_definitions.html.j2")
-
-    @app.get("/workflow-runs", response_class=HTMLResponse)
-    def workflow_runs_page(_auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> str:
-        ensure_workflow_schema(store)
-        return render_template("workflow_runs.html.j2")
-
-    @app.get("/api/workflow-definitions")
-    def api_list_workflow_definitions(_auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        ensure_workflow_schema(store)
-        return {"items": list_workflow_definitions(store)}
-
-    @app.get("/api/workflow-definitions/{workflow_key}")
-    def api_get_workflow_definition(workflow_key: str, _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        item = get_workflow_definition(store, workflow_key)
-        if not item:
-            raise HTTPException(status_code=404, detail="workflow definition not found")
-        return {"item": item}
-
-    @app.post("/api/workflow-definitions")
-    def api_save_workflow_definition(body: dict[str, Any] = Body(default_factory=dict), _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        errors = validate_workflow_definition(body)
-        if errors:
-            raise HTTPException(status_code=400, detail={"errors": errors})
-        try:
-            return {"ok": True, "item": save_workflow_definition(store, body)}
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.put("/api/workflow-definitions/{workflow_key}")
-    def api_update_workflow_definition(workflow_key: str, body: dict[str, Any] = Body(default_factory=dict), _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        body["workflow_key"] = workflow_key
-        errors = validate_workflow_definition(body)
-        if errors:
-            raise HTTPException(status_code=400, detail={"errors": errors})
-        return {"ok": True, "item": save_workflow_definition(store, body)}
-
-    @app.post("/api/workflow-definitions/{workflow_key}/publish")
-    def api_publish_workflow_definition(workflow_key: str, _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        try:
-            return {"ok": True, "item": publish_workflow_definition(store, workflow_key)}
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.get("/api/plugin-definitions")
-    def api_list_plugin_definitions(_auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        seed_builtin_plugins(store)
-        return {"items": list_plugin_definitions(store)}
-
-    @app.post("/api/plugin-definitions")
-    def api_save_plugin_definition(body: dict[str, Any] = Body(default_factory=dict), _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        return {"ok": True, "item": upsert_plugin_definition(store, body)}
-
-    @app.post("/api/workflow-runs")
-    def api_create_workflow_run(body: dict[str, Any] = Body(default_factory=dict), _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        try:
-            return {"ok": True, "item": create_workflow_run(store, body)}
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.get("/api/workflow-runs")
-    def api_list_workflow_runs(limit: int = Query(default=100), _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        return {"items": list_workflow_runs(store, limit=limit)}
-
-    @app.get("/api/workflow-runs/{run_id}")
-    def api_get_workflow_run(run_id: str, _auth: None = Depends(require_auth), store: CoordinatorStore = Depends(get_store)) -> dict[str, Any]:
-        item = get_workflow_run(store, run_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="workflow run not found")
-        return {"item": item}
-
 
     return app
