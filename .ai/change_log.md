@@ -1260,3 +1260,16 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - Kept monitor + control interactions (`enqueue`, `reset`) in same page and shared refresh loop.
 - Validation:
   - `pytest -q tests/test_refactor_modules.py tests/test_reporting_and_store_helpers.py tests/test_module_decomposition.py`
+
+## 2026-04-22
+
+- Fixed coordinator startup crash on legacy databases during workflow schema rollout.
+  - Root cause: base `_ensure_schema` DDL referenced `coordinator_stage_tasks.workflow_id` in a bootstrap index before legacy stage-task tables had that column.
+  - Change: base DDL now uses legacy-safe stage index shape (`stage, status`) and leaves workflow-aware index creation to migration statements.
+  - Change: schema migrations now run as individually committed statements (rollback per statement only), preventing one migration failure from undoing successful prior migrations.
+- Added regression guard:
+  - `tests/test_reporting_and_store_helpers.py::test_ensure_schema_bootstrap_stage_index_is_legacy_safe`
+- Validation:
+  - `python -m py_compile server_app/store.py server.py`
+  - `pytest -q tests/test_reporting_and_store_helpers.py -k "workflows or ensure_schema_bootstrap_stage_index_is_legacy_safe"`
+  - `pytest -q tests/test_module_decomposition.py tests/test_refactor_modules.py`

@@ -497,7 +497,7 @@ CREATE TABLE IF NOT EXISTS coordinator_stage_tasks (
   updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY(workflow_id, root_domain, stage)
 );
-CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(workflow_id, stage, status);
+CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(stage, status);
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_lease ON coordinator_stage_tasks(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_domain_status ON coordinator_stage_tasks(root_domain, status, lease_expires_at);
 
@@ -598,14 +598,14 @@ END $$;
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(ddl)
-                for sql in migration_statements:
-                    try:
+            conn.commit()
+            for sql in migration_statements:
+                try:
+                    with conn.cursor() as cur:
                         cur.execute(sql)
-                    except Exception:
-                        conn.rollback()
-                        with conn.cursor() as retry_cur:
-                            retry_cur.execute(ddl)
-                conn.commit()
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
 
     @staticmethod
     def _touch_worker_presence(cur: Any, worker_id: str, activity: str) -> None:

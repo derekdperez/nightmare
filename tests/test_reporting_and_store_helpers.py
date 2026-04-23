@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 import io
 import zipfile
@@ -108,6 +109,11 @@ def test_render_workflows_html_contains_expected_heading():
     assert "/api/coord/events" in html
     assert "/api/coord/stage/enqueue" in html
     assert "/api/coord/stage/reset" in html
+
+
+def test_ensure_schema_bootstrap_stage_index_is_legacy_safe():
+    source = inspect.getsource(CoordinatorStore._ensure_schema)
+    assert "CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(stage, status);" in source
 
 
 def test_extractor_report_html_escapes_script_content():

@@ -191,3 +191,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - Page is read/write against coordinator APIs (`workflow-snapshot`, `stage/enqueue`, `stage/reset`) and does not duplicate scheduler logic in the frontend.
   - Route rendering stays centralized through `reporting/server_pages.py` helpers, matching existing server page decomposition.
   - `/workflows` now includes a separate timeline pane fed by `/api/coord/events` (`workflow.task.*`) so task lifecycle observability is colocated with workflow controls.
+- Schema bootstrap/migration boundary refinement (2026-04-22):
+  - Base schema bootstrap SQL must remain backward-compatible with prior table shapes.
+  - Workflow-aware index/constraint upgrades for `coordinator_stage_tasks` are migration responsibilities, not base bootstrap assumptions.
+  - Migration statements now commit independently to avoid full rollback of already-applied schema upgrades when a later migration statement fails.
