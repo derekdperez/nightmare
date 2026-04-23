@@ -21,7 +21,7 @@ try:
     from psycopg_pool import ConnectionPool
 except Exception:  # pragma: no cover - optional dependency at runtime
     psycopg = None
-    ConnectionPool = None
+    ConnectionPool = None  # type: ignore[assignment]
 
 from nightmare_app.artifacts import FileSystemArtifactStore
 from shared.events import EventStream, build_projection
@@ -86,6 +86,15 @@ SUPPORTED_REPROCESS_MODES = {
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _stream_file_chunks(path: str | Path, *, chunk_size: int = 1024 * 1024):
+    with Path(path).open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
 
 def _json_safe_db_value(value: Any) -> Any:
@@ -274,8 +283,8 @@ def _make_target_entry_id(line_no: int, raw: str) -> str:
 
 class CoordinatorStore:
     def __init__(self, database_url: str, *, artifact_store_root: str | None = None):
-        if psycopg is None:
-            raise RuntimeError("psycopg is required for postgres coordinator mode")
+        if psycopg is None or ConnectionPool is None:
+            raise RuntimeError("psycopg and psycopg_pool are required for postgres coordinator mode")
         self.database_url = str(database_url or "").strip()
         if not self.database_url:
             raise ValueError("database_url is required for coordinator mode")
@@ -291,28 +300,12 @@ class CoordinatorStore:
             compression_threshold_bytes=int(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_THRESHOLD_BYTES", "1000000") or "1000000"),
             enable_compression=str(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"},
         )
-        self._db_inline_artifact_max_bytes = max(0, int(os.getenv("NIGHTMARE_DB_INLINE_ARTIFACT_MAX_BYTES", "16384") or "16384"))
+        self._db_inline_artifact_max_bytes = max(0, int(os.getenv("NIGHTMARE_DB_INLINE_ARTIFACT_MAX_BYTES", "65536") or "65536"))
         self._event_stream = EventStream(Path(artifact_root) / "events.ndjson")
-        self._presence_update_interval_seconds = max(5, int(os.getenv("COORDINATOR_WORKER_PRESENCE_INTERVAL_SECONDS", "15") or "15"))
-        self._durable_checkpoint_interval_seconds = max(15, int(os.getenv("COORDINATOR_PROGRESS_PERSIST_INTERVAL_SECONDS", "60") or "60"))
+        self._event_stream_enabled = str(os.getenv("NIGHTMARE_EVENT_STREAM_FALLBACK_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        self._worker_presence_min_interval_seconds = max(5, int(os.getenv("NIGHTMARE_WORKER_PRESENCE_INTERVAL_SECONDS", "30") or "30"))
+        self._durable_progress_min_interval_seconds = max(15, int(os.getenv("NIGHTMARE_DURABLE_PROGRESS_INTERVAL_SECONDS", "60") or "60"))
         self._ensure_schema()
-
-    def _build_pool(self):
-        if ConnectionPool is None:
-            raise RuntimeError("psycopg_pool is required for CoordinatorStore")
-        min_size = max(1, int(str(os.getenv("COORDINATOR_DB_POOL_MIN_SIZE", "1") or "1").strip() or "1"))
-        max_size = max(min_size, int(str(os.getenv("COORDINATOR_DB_POOL_MAX_SIZE", "12") or "12").strip() or "12"))
-        kwargs = {
-            "autocommit": False,
-            "connect_timeout": self._connect_timeout_seconds,
-        }
-        return ConnectionPool(
-            conninfo=self.database_url,
-            min_size=min_size,
-            max_size=max_size,
-            kwargs=kwargs,
-            open=True,
-        )
 
     @staticmethod
     def _resolve_connect_timeout_seconds() -> int:
@@ -329,53 +322,106 @@ class CoordinatorStore:
             value = 8
         return max(1, min(60, value))
 
+    def _build_pool(self):
+        min_size = max(1, int(os.getenv("COORDINATOR_DB_POOL_MIN_SIZE", "1") or "1"))
+        max_size = max(min_size, int(os.getenv("COORDINATOR_DB_POOL_MAX_SIZE", "12") or "12"))
+        return ConnectionPool(
+            conninfo=self.database_url,
+            min_size=min_size,
+            max_size=max_size,
+            open=True,
+            kwargs={
+                "autocommit": False,
+                "connect_timeout": self._connect_timeout_seconds,
+                "prepare_threshold": None,
+            },
+        )
+
     def _connect(self):
         return self._pool.connection()
 
+    def close(self) -> None:
+        try:
+            self._pool.close()
+        except Exception:
+            pass
+
 
     def _emit_event(self, event_type: str, aggregate_key: str, payload: dict[str, Any]) -> None:
-        try:
-            event = EventRecord(
-                event_type=str(event_type or ""),
-                aggregate_key=str(aggregate_key or ""),
-                schema_version=registry.current_version("event_record"),
-                payload=dict(payload or {}),
-            )
-            self._event_stream.append(event)
-            with self._connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
+        safe_payload = self._safe_event_payload(payload or {})
+        event = EventRecord(
+            event_type=str(event_type or ""),
+            aggregate_key=str(aggregate_key or ""),
+            schema_version=registry.current_version("event_record"),
+            payload=safe_payload,
+        )
+        if self._event_stream_enabled:
+            try:
+                self._event_stream.append(event)
+            except Exception:
+                pass
+        sql = """
 INSERT INTO coordinator_recent_events(
     event_id, created_at_utc, event_type, aggregate_key, schema_version, source, message, payload_json
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-ON CONFLICT (event_id) DO UPDATE
-SET created_at_utc = EXCLUDED.created_at_utc,
-    event_type = EXCLUDED.event_type,
-    aggregate_key = EXCLUDED.aggregate_key,
-    schema_version = EXCLUDED.schema_version,
-    source = EXCLUDED.source,
-    message = EXCLUDED.message,
-    payload_json = EXCLUDED.payload_json;
+VALUES (%s, NOW(), %s, %s, %s, %s, %s, %s::jsonb)
+ON CONFLICT (event_id) DO NOTHING;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    (
+                        str(event.event_id),
+                        str(event.event_type),
+                        str(event.aggregate_key),
+                        int(event.schema_version or 1),
+                        str(safe_payload.get("source") or "")[:120],
+                        str(safe_payload.get("message") or "")[:1000],
+                        json.dumps(safe_payload, ensure_ascii=False, default=str),
+                    ),
+                )
+                cur.execute(
+                    """
+INSERT INTO coordinator_projection_state(aggregate_key, projection_json, updated_at_utc)
+VALUES (%s, %s::jsonb, NOW())
+ON CONFLICT (aggregate_key) DO UPDATE
+SET projection_json = EXCLUDED.projection_json,
+    updated_at_utc = NOW();
 """,
-                        (
-                            str(getattr(event, "event_id", "") or ""),
-                            getattr(event, "created_at", None),
-                            str(event_type or ""),
-                            str(aggregate_key or ""),
-                            int(registry.current_version("event_record") or 1),
-                            str(payload.get("source") or "")[:256],
-                            str(payload.get("message") or "")[:2000],
-                            json.dumps(dict(payload or {}), ensure_ascii=False),
+                    (
+                        str(event.aggregate_key),
+                        json.dumps(
+                            {
+                                "event_type": str(event.event_type),
+                                "aggregate_key": str(event.aggregate_key),
+                                "source": str(safe_payload.get("source") or ""),
+                                "message": str(safe_payload.get("message") or ""),
+                                "payload": safe_payload,
+                                "updated_at_utc": _iso_now(),
+                            },
+                            ensure_ascii=False,
+                            default=str,
                         ),
-                    )
-                conn.commit()
-        except Exception:
-            return
+                    ),
+                )
+            conn.commit()
 
     def projection_snapshot(self) -> dict[str, dict[str, Any]]:
-        return build_projection(self.list_events(limit=5000).get("events", []))
+        sql = """
+SELECT aggregate_key, projection_json
+FROM coordinator_projection_state
+ORDER BY updated_at_utc DESC;
+"""
+        out: dict[str, dict[str, Any]] = {}
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+            conn.commit()
+        for aggregate_key, projection_json in rows:
+            out[str(aggregate_key)] = projection_json if isinstance(projection_json, dict) else {}
+        return out
 
     @staticmethod
     def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -428,180 +474,60 @@ SET created_at_utc = EXCLUDED.created_at_utc,
     ) -> dict[str, Any]:
         requested = max(1, min(5000, int(limit or 250)))
         skip = max(0, int(offset or 0))
-        clauses: list[str] = ["1=1"]
+        filters: list[str] = []
         params: list[Any] = []
-        if search:
-            needle = f"%{str(search).strip().lower()}%"
-            clauses.append(
-                "(LOWER(event_type) LIKE %s OR LOWER(aggregate_key) LIKE %s OR LOWER(source) LIKE %s OR LOWER(message) LIKE %s OR LOWER(payload_json::text) LIKE %s)"
-            )
-            params.extend([needle, needle, needle, needle, needle])
         if event_type:
-            clauses.append("LOWER(event_type) LIKE %s")
+            filters.append("LOWER(event_type) LIKE %s")
             params.append(f"%{str(event_type).strip().lower()}%")
         if aggregate_key:
-            clauses.append("LOWER(aggregate_key) LIKE %s")
+            filters.append("LOWER(aggregate_key) LIKE %s")
             params.append(f"%{str(aggregate_key).strip().lower()}%")
         if source:
-            clauses.append("LOWER(source) LIKE %s")
+            filters.append("LOWER(source) LIKE %s")
             params.append(f"%{str(source).strip().lower()}%")
-        where_sql = " AND ".join(clauses)
-        order_sql = "ASC" if str(sort_dir or "desc").strip().lower() == "asc" else "DESC"
-        sql = f"""
+        if search:
+            needle = f"%{str(search).strip().lower()}%"
+            filters.append("(LOWER(event_type) LIKE %s OR LOWER(aggregate_key) LIKE %s OR LOWER(source) LIKE %s OR LOWER(message) LIKE %s OR LOWER(payload_json::text) LIKE %s)")
+            params.extend([needle, needle, needle, needle, needle])
+        where = "WHERE " + " AND ".join(filters) if filters else ""
+        order = "ASC" if str(sort_dir or "desc").strip().lower() == "asc" else "DESC"
+        count_sql = f"SELECT COUNT(*) FROM coordinator_recent_events {where};"
+        list_sql = f"""
 SELECT event_id, created_at_utc, event_type, aggregate_key, schema_version, source, message, payload_json
 FROM coordinator_recent_events
-WHERE {where_sql}
-ORDER BY created_at_utc {order_sql}, event_id {order_sql}
+{where}
+ORDER BY created_at_utc {order}, event_id {order}
 LIMIT %s OFFSET %s;
 """
-        count_sql = f"SELECT COUNT(*) FROM coordinator_recent_events WHERE {where_sql};"
+        page: list[dict[str, Any]] = []
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(count_sql, params)
                 total_row = cur.fetchone()
-                total = int(total_row[0] or 0) if total_row else 0
-                cur.execute(sql, [*params, requested, skip])
+                cur.execute(list_sql, [*params, requested, skip])
                 rows = cur.fetchall()
             conn.commit()
-        if not rows and total == 0:
-            reverse = order_sql == "DESC"
-            fallback = self._event_stream.read(limit=min(20000, max(requested + skip, requested * 4, 1000)), reverse=reverse)
-            filtered: list[dict[str, Any]] = []
-            needle = str(search or "").strip().lower()
-            event_type_q = str(event_type or "").strip().lower()
-            aggregate_q = str(aggregate_key or "").strip().lower()
-            source_q = str(source or "").strip().lower()
-            for item in fallback:
-                if not isinstance(item, dict):
-                    continue
-                payload = item.get("payload")
-                payload_dict = payload if isinstance(payload, dict) else {}
-                normalized = {
-                    "event_id": str(item.get("event_id") or ""),
-                    "created_at": str(item.get("created_at") or ""),
-                    "event_type": str(item.get("event_type") or ""),
-                    "aggregate_key": str(item.get("aggregate_key") or ""),
-                    "schema_version": int(item.get("schema_version") or 1),
-                    "source": str(payload_dict.get("source") or "").strip(),
-                    "message": str(payload_dict.get("message") or "").strip(),
-                    "payload": payload_dict,
+        for row in rows:
+            page.append(
+                {
+                    "event_id": str(row[0] or ""),
+                    "created_at": row[1].isoformat() if row[1] else None,
+                    "event_type": str(row[2] or ""),
+                    "aggregate_key": str(row[3] or ""),
+                    "schema_version": int(row[4] or 1),
+                    "source": str(row[5] or ""),
+                    "message": str(row[6] or ""),
+                    "payload": row[7] if isinstance(row[7], dict) else {},
                 }
-                if event_type_q and event_type_q not in normalized["event_type"].lower():
-                    continue
-                if aggregate_q and aggregate_q not in normalized["aggregate_key"].lower():
-                    continue
-                if source_q and source_q not in normalized["source"].lower():
-                    continue
-                if needle and needle not in json.dumps(normalized, sort_keys=True, default=str).lower():
-                    continue
-                filtered.append(normalized)
-            total = len(filtered)
-            rows_payload = filtered[skip : skip + requested]
-            return {
-                "generated_at_utc": _iso_now(),
-                "total": total,
-                "offset": skip,
-                "limit": requested,
-                "events": rows_payload,
-            }
-        page = [
-            {
-                "event_id": str(row[0] or ""),
-                "created_at": row[1].isoformat() if row[1] else "",
-                "event_type": str(row[2] or ""),
-                "aggregate_key": str(row[3] or ""),
-                "schema_version": int(row[4] or 1),
-                "source": str(row[5] or ""),
-                "message": str(row[6] or ""),
-                "payload": row[7] if isinstance(row[7], dict) else {},
-            }
-            for row in rows
-        ]
+            )
         return {
             "generated_at_utc": _iso_now(),
-            "total": total,
+            "total": int(total_row[0] or 0) if total_row else 0,
             "offset": skip,
             "limit": requested,
             "events": page,
+            "source": "coordinator_recent_events",
         }
-
-    def _refresh_domain_projection(self, root_domain: str, *, conn: Any | None = None) -> None:
-        payload = self._build_workflow_domain_payload(root_domain, conn=conn)
-        if not payload:
-            return
-        owns_conn = conn is None
-        if owns_conn:
-            conn = self._connect()
-            conn.__enter__()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-INSERT INTO coordinator_domain_projection(root_domain, summary_json, updated_at_utc)
-VALUES (%s, %s::jsonb, NOW())
-ON CONFLICT (root_domain) DO UPDATE
-SET summary_json = EXCLUDED.summary_json,
-    updated_at_utc = NOW();
-""",
-                    (str(root_domain or "").strip().lower(), json.dumps(payload, ensure_ascii=False)),
-                )
-            if owns_conn:
-                conn.commit()
-        finally:
-            if owns_conn:
-                conn.__exit__(None, None, None)
-
-    def _upsert_stage_hot_status(
-        self,
-        *,
-        conn: Any,
-        workflow_id: str,
-        root_domain: str,
-        stage: str,
-        state: str,
-        progress: Optional[dict[str, Any]] = None,
-    ) -> None:
-        progress = dict(progress or {}) if isinstance(progress, dict) else {}
-        percent_raw = progress.get("percent") if isinstance(progress, dict) else 0
-        try:
-            percent = float(percent_raw or 0)
-        except Exception:
-            percent = 0.0
-        current_unit = str(progress.get("current_unit") or progress.get("unit") or "")[:256]
-        last_milestone = str(progress.get("milestone") or progress.get("message") or "")[:512]
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-INSERT INTO coordinator_stage_status_hot(workflow_id, root_domain, stage, state, progress_percent, current_unit, last_milestone, updated_at_utc)
-VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-ON CONFLICT (workflow_id, root_domain, stage) DO UPDATE
-SET state = EXCLUDED.state,
-    progress_percent = EXCLUDED.progress_percent,
-    current_unit = EXCLUDED.current_unit,
-    last_milestone = EXCLUDED.last_milestone,
-    updated_at_utc = NOW();
-""",
-                (
-                    str(workflow_id or "default").strip().lower() or "default",
-                    str(root_domain or "").strip().lower(),
-                    str(stage or "").strip().lower(),
-                    str(state or ""),
-                    float(percent),
-                    current_unit,
-                    last_milestone,
-                ),
-            )
-
-    @staticmethod
-    def _risk_score_for_artifact(artifact_type: str, size_bytes: int) -> float:
-        lowered = str(artifact_type or "").lower()
-        score = 0.0
-        if any(token in lowered for token in ("critical", "high_risk", "secret", "credential")):
-            score += 80.0
-        elif any(token in lowered for token in ("finding", "match", "anomaly")):
-            score += 35.0
-        score += min(20.0, max(0.0, float(size_bytes or 0) / 500_000.0))
-        return round(score, 2)
 
     def _ensure_schema(self) -> None:
         ddl = """
@@ -625,6 +551,8 @@ CREATE TABLE IF NOT EXISTS coordinator_targets (
 );
 CREATE INDEX IF NOT EXISTS idx_coordinator_targets_status ON coordinator_targets(status);
 CREATE INDEX IF NOT EXISTS idx_coordinator_targets_lease ON coordinator_targets(lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_targets_claim_partial ON coordinator_targets(line_number, created_at_utc) WHERE status IN ('pending','running');
+CREATE INDEX IF NOT EXISTS idx_targets_running_domain_lease ON coordinator_targets(root_domain, lease_expires_at) WHERE status='running';
 
 CREATE TABLE IF NOT EXISTS coordinator_sessions (
   root_domain TEXT PRIMARY KEY,
@@ -651,31 +579,64 @@ CREATE TABLE IF NOT EXISTS coordinator_stage_tasks (
   progress_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   progress_artifact_type TEXT NOT NULL DEFAULT '',
   resume_mode TEXT NOT NULL DEFAULT 'exact',
+  resource_class TEXT NOT NULL DEFAULT 'default',
+  access_mode TEXT NOT NULL DEFAULT 'write',
+  concurrency_group TEXT NOT NULL DEFAULT '',
+  max_parallelism INTEGER NOT NULL DEFAULT 1,
+  progress_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+  current_unit TEXT NOT NULL DEFAULT '',
+  last_milestone TEXT NOT NULL DEFAULT '',
+  durable_checkpoint_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  durable_progress_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  durable_progress_updated_at_utc TIMESTAMPTZ,
   created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY(workflow_id, root_domain, stage)
 );
-CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(stage, status);
+CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(workflow_id, stage, status);
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_lease ON coordinator_stage_tasks(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_domain_status ON coordinator_stage_tasks(root_domain, status, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_stage_tasks_claim_partial ON coordinator_stage_tasks(workflow_id, created_at_utc) WHERE status IN ('pending','running');
+CREATE INDEX IF NOT EXISTS idx_stage_tasks_running_domain_lease ON coordinator_stage_tasks(root_domain, lease_expires_at) WHERE status='running';
+CREATE INDEX IF NOT EXISTS idx_stage_tasks_concurrency ON coordinator_stage_tasks(root_domain, concurrency_group, status, lease_expires_at);
 
 CREATE TABLE IF NOT EXISTS coordinator_artifacts (
   root_domain TEXT NOT NULL,
   artifact_type TEXT NOT NULL,
   source_worker TEXT,
-  content BYTEA NOT NULL DEFAULT '',
+  content BYTEA,
   content_encoding TEXT NOT NULL DEFAULT 'identity',
   content_sha256 TEXT NOT NULL,
   content_size_bytes BIGINT NOT NULL,
-  storage_backend TEXT NOT NULL DEFAULT 'database_inline',
+  storage_backend TEXT NOT NULL DEFAULT 'filesystem',
   storage_uri TEXT NOT NULL DEFAULT '',
   media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
   compression TEXT NOT NULL DEFAULT 'identity',
   schema_version INTEGER NOT NULL DEFAULT 1,
+  manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  retention_class TEXT NOT NULL DEFAULT 'derived_rebuildable',
+  summary_match_count INTEGER NOT NULL DEFAULT 0,
+  summary_anomaly_count INTEGER NOT NULL DEFAULT 0,
+  summary_request_count INTEGER NOT NULL DEFAULT 0,
   updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY(root_domain, artifact_type)
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_domain ON coordinator_artifacts(root_domain);
+CREATE INDEX IF NOT EXISTS idx_artifacts_retention ON coordinator_artifacts(retention_class);
+CREATE INDEX IF NOT EXISTS idx_artifacts_hot_fields ON coordinator_artifacts(root_domain, artifact_type, summary_match_count, summary_anomaly_count);
+
+CREATE TABLE IF NOT EXISTS coordinator_recent_events (
+  event_id TEXT PRIMARY KEY,
+  created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  event_type TEXT NOT NULL,
+  aggregate_key TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  source TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_recent_events_created ON coordinator_recent_events(created_at_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_recent_events_lookup ON coordinator_recent_events(event_type, aggregate_key, source);
 
 CREATE TABLE IF NOT EXISTS coordinator_fleet_settings (
   singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
@@ -708,8 +669,6 @@ CREATE TABLE IF NOT EXISTS coordinator_worker_commands (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_commands_worker_created
   ON coordinator_worker_commands(worker_id, created_at_utc DESC);
-ALTER TABLE coordinator_worker_commands ADD COLUMN IF NOT EXISTS result_error TEXT;
-ALTER TABLE coordinator_worker_commands ADD COLUMN IF NOT EXISTS completed_at_utc TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS coordinator_worker_presence (
   worker_id TEXT PRIMARY KEY,
@@ -719,57 +678,52 @@ CREATE TABLE IF NOT EXISTS coordinator_worker_presence (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_presence_last_seen
   ON coordinator_worker_presence(last_seen_at_utc DESC);
+
+CREATE TABLE IF NOT EXISTS coordinator_summary_latest (
+  root_domain TEXT NOT NULL,
+  stage_name TEXT NOT NULL,
+  summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(root_domain, stage_name)
+);
+
+CREATE TABLE IF NOT EXISTS coordinator_projection_state (
+  aggregate_key TEXT PRIMARY KEY,
+  projection_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
         migration_statements = [
             "ALTER TABLE coordinator_artifacts ALTER COLUMN content DROP NOT NULL",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS storage_backend TEXT NOT NULL DEFAULT 'database_inline'",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS storage_uri TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'application/octet-stream'",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS compression TEXT NOT NULL DEFAULT 'identity'",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS retention_class TEXT NOT NULL DEFAULT 'derived_rebuildable'",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS summary_match_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS summary_anomaly_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS summary_request_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS workflow_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS checkpoint_json JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS progress_json JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS progress_artifact_type TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS resume_mode TEXT NOT NULL DEFAULT 'exact'",
-
-            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT 'workflow_stage'",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'write'",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS concurrency_group TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS max_parallelism INTEGER NOT NULL DEFAULT 1",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS retention_class TEXT NOT NULL DEFAULT 'important_raw'",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS local_path TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS local_available_on_worker TEXT NOT NULL DEFAULT ''",
-            "CREATE TABLE IF NOT EXISTS coordinator_recent_events (event_id TEXT PRIMARY KEY, created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), event_type TEXT NOT NULL, aggregate_key TEXT NOT NULL DEFAULT '', schema_version INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', payload_json JSONB NOT NULL DEFAULT '{}'::jsonb)",
-            "CREATE INDEX IF NOT EXISTS idx_coordinator_recent_events_created ON coordinator_recent_events(created_at_utc DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_coordinator_recent_events_type ON coordinator_recent_events(event_type, created_at_utc DESC)",
-            "CREATE TABLE IF NOT EXISTS coordinator_domain_projection (root_domain TEXT PRIMARY KEY, summary_json JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-            "CREATE TABLE IF NOT EXISTS coordinator_stage_status_hot (workflow_id TEXT NOT NULL DEFAULT 'default', root_domain TEXT NOT NULL, stage TEXT NOT NULL, state TEXT NOT NULL DEFAULT '', progress_percent DOUBLE PRECISION NOT NULL DEFAULT 0, current_unit TEXT NOT NULL DEFAULT '', last_milestone TEXT NOT NULL DEFAULT '', updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(workflow_id, root_domain, stage))",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS progress_percent DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS current_unit TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS last_milestone TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS durable_checkpoint_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS durable_progress_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS durable_progress_updated_at_utc TIMESTAMPTZ",
+            "CREATE TABLE IF NOT EXISTS coordinator_recent_events (event_id TEXT PRIMARY KEY, created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), event_type TEXT NOT NULL, aggregate_key TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', payload_json JSONB NOT NULL DEFAULT '{}'::jsonb)",
+            "CREATE INDEX IF NOT EXISTS idx_recent_events_created ON coordinator_recent_events(created_at_utc DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_recent_events_lookup ON coordinator_recent_events(event_type, aggregate_key, source)",
             "CREATE INDEX IF NOT EXISTS idx_targets_claim_partial ON coordinator_targets(line_number, created_at_utc) WHERE status IN ('pending','running')",
+            "CREATE INDEX IF NOT EXISTS idx_targets_running_domain_lease ON coordinator_targets(root_domain, lease_expires_at) WHERE status='running'",
             "CREATE INDEX IF NOT EXISTS idx_stage_tasks_claim_partial ON coordinator_stage_tasks(workflow_id, created_at_utc) WHERE status IN ('pending','running')",
-            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_running_domain_partial ON coordinator_stage_tasks(root_domain, lease_expires_at) WHERE status = 'running'",
-            "CREATE INDEX IF NOT EXISTS idx_targets_running_domain_partial ON coordinator_targets(root_domain, lease_expires_at) WHERE status = 'running'",
-            """
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conname = 'coordinator_stage_tasks_pkey'
-  ) THEN
-    ALTER TABLE coordinator_stage_tasks DROP CONSTRAINT coordinator_stage_tasks_pkey;
-  END IF;
-EXCEPTION WHEN undefined_table THEN
-  NULL;
-END $$;
-""",
-            "ALTER TABLE coordinator_stage_tasks ADD CONSTRAINT coordinator_stage_tasks_pkey PRIMARY KEY(workflow_id, root_domain, stage)",
-            "DROP INDEX IF EXISTS idx_stage_tasks_status_stage",
-            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(workflow_id, stage, status)",
-            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_domain_status ON coordinator_stage_tasks(root_domain, status, lease_expires_at)",
-            "CREATE TABLE IF NOT EXISTS coordinator_summary_latest (root_domain TEXT NOT NULL, stage_name TEXT NOT NULL, summary_json JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(root_domain, stage_name))",
-            "CREATE TABLE IF NOT EXISTS coordinator_projection_state (aggregate_key TEXT PRIMARY KEY, projection_json JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_running_domain_lease ON coordinator_stage_tasks(root_domain, lease_expires_at) WHERE status='running'",
+            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_concurrency ON coordinator_stage_tasks(root_domain, concurrency_group, status, lease_expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_hot_fields ON coordinator_artifacts(root_domain, artifact_type, summary_match_count, summary_anomaly_count)",
         ]
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -783,7 +737,7 @@ END $$;
                 except Exception:
                     conn.rollback()
 
-    def _touch_worker_presence(self, cur: Any, worker_id: str, activity: str, *, force: bool = False) -> None:
+    def _touch_worker_presence(self, cur: Any, worker_id: str, activity: str) -> None:
         wid = str(worker_id or "").strip()
         if not wid:
             return
@@ -793,15 +747,16 @@ INSERT INTO coordinator_worker_presence(worker_id, last_seen_at_utc, last_activi
 VALUES (%s, NOW(), %s, NOW())
 ON CONFLICT (worker_id) DO UPDATE
 SET last_seen_at_utc = CASE
-      WHEN %s THEN NOW()
-      WHEN coordinator_worker_presence.last_seen_at_utc IS NULL THEN NOW()
       WHEN coordinator_worker_presence.last_seen_at_utc < NOW() - ((%s)::text || ' seconds')::interval THEN NOW()
       ELSE coordinator_worker_presence.last_seen_at_utc
     END,
     last_activity = EXCLUDED.last_activity,
-    updated_at_utc = NOW();
+    updated_at_utc = CASE
+      WHEN coordinator_worker_presence.last_seen_at_utc < NOW() - ((%s)::text || ' seconds')::interval THEN NOW()
+      ELSE coordinator_worker_presence.updated_at_utc
+    END;
 """
-        cur.execute(sql, (wid, act[:64], bool(force), int(self._presence_update_interval_seconds or 15)))
+        cur.execute(sql, (wid, act[:64], self._worker_presence_min_interval_seconds, self._worker_presence_min_interval_seconds))
 
     def register_targets(self, targets: list[str], *, replace_existing: bool = False) -> dict[str, Any]:
         inserted = 0
@@ -873,10 +828,8 @@ WITH candidate AS (
             AND s.status = 'running'
             AND s.lease_expires_at IS NOT NULL
             AND s.lease_expires_at >= NOW()
-            AND (
-                COALESCE(s.resource_class, 'workflow_stage') IN ('crawl', 'network_scan')
-                OR COALESCE(s.access_mode, 'write') <> 'read'
-            )
+            AND s.resource_class IN ('crawl', 'network_scan')
+            AND s.access_mode <> 'read'
       )
     ORDER BY ct.line_number ASC, ct.created_at_utc ASC
     FOR UPDATE SKIP LOCKED
@@ -949,6 +902,18 @@ WHERE entry_id = %s
                 cur.execute(sql, (lease, str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                "target.heartbeat",
+                f"target:{str(entry_id)}",
+                {
+                    "source": "coordinator_store.heartbeat",
+                    "entry_id": str(entry_id),
+                    "worker_id": str(worker_id),
+                    "lease_seconds": lease,
+                    "status": "running",
+                },
+            )
         return updated > 0
 
     def finish(self, entry_id: str, worker_id: str, *, exit_code: int, error: str = "") -> bool:
@@ -968,14 +933,9 @@ WHERE entry_id = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                self._touch_worker_presence(cur, str(worker_id), "complete_target", force=True)
+                self._touch_worker_presence(cur, str(worker_id), "complete_target")
                 cur.execute(sql, (status, int(exit_code), str(error or "")[:2000], str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
-                if updated > 0:
-                    cur.execute("SELECT root_domain FROM coordinator_targets WHERE entry_id = %s;", (str(entry_id),))
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        self._refresh_domain_projection(str(row[0]), conn=conn)
             conn.commit()
         if updated > 0:
             self.record_system_event(
@@ -1311,7 +1271,6 @@ SET start_url = EXCLUDED.start_url,
                         json.dumps(payload, ensure_ascii=False),
                     ),
                 )
-                self._refresh_domain_projection(rd, conn=conn)
             conn.commit()
         self.record_system_event(
             "session.saved",
@@ -1579,23 +1538,156 @@ ORDER BY ordinal_position;
             "generated_at_utc": _iso_now(),
         }
 
-    def _build_workflow_domain_payload(self, root_domain: str, *, conn: Any | None = None) -> dict[str, Any]:
+    def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
+        safe_limit = max(1, min(5000, int(limit or 2000)))
+        domains_sql = """
+SELECT root_domain
+FROM (
+    SELECT DISTINCT root_domain FROM coordinator_targets
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_stage_tasks
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_artifacts
+) d
+WHERE root_domain IS NOT NULL AND root_domain <> ''
+ORDER BY root_domain ASC
+LIMIT %s;
+"""
+        domains: list[str] = []
+        stage_rows: list[Any] = []
+        artifact_rows: list[Any] = []
+        target_rows: list[Any] = []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(domains_sql, (safe_limit,))
+                domains = [str(row[0] or "").strip().lower() for row in cur.fetchall() if str(row[0] or "").strip()]
+                if domains:
+                    cur.execute(
+                        """
+SELECT workflow_id, root_domain, stage, status, attempt_count, exit_code, error, updated_at_utc, completed_at_utc,
+       checkpoint_json, progress_json, progress_artifact_type, resume_mode, worker_id
+FROM coordinator_stage_tasks
+WHERE root_domain = ANY(%s)
+ORDER BY workflow_id ASC, root_domain ASC, stage ASC;
+""",
+                        (domains,),
+                    )
+                    stage_rows = cur.fetchall()
+                    cur.execute(
+                        """
+SELECT root_domain, artifact_type, updated_at_utc
+FROM coordinator_artifacts
+WHERE root_domain = ANY(%s)
+ORDER BY root_domain ASC, artifact_type ASC;
+""",
+                        (domains,),
+                    )
+                    artifact_rows = cur.fetchall()
+                    cur.execute(
+                        """
+SELECT
+  root_domain,
+  COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
+  COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+  COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
+  COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets
+FROM coordinator_targets
+WHERE root_domain = ANY(%s)
+GROUP BY root_domain
+ORDER BY root_domain ASC;
+""",
+                        (domains,),
+                    )
+                    target_rows = cur.fetchall()
+            conn.commit()
+
+        stage_map: dict[str, dict[str, dict[str, Any]]] = {}
+        legacy_stage_map: dict[str, dict[str, Any]] = {}
+        for row in stage_rows:
+            workflow_id = str(row[0] or "default").strip().lower() or "default"
+            rd = str(row[1] or "").strip().lower()
+            stg = str(row[2] or "").strip().lower()
+            if not rd or not stg:
+                continue
+            row_payload = {
+                "workflow_id": workflow_id,
+                "stage": stg,
+                "plugin_name": stg,
+                "status": str(row[3] or "").strip().lower(),
+                "attempt_count": int(row[4] or 0),
+                "exit_code": (int(row[5]) if row[5] is not None else None),
+                "error": str(row[6] or ""),
+                "updated_at_utc": row[7].isoformat() if row[7] else None,
+                "completed_at_utc": row[8].isoformat() if row[8] else None,
+                "checkpoint": row[9] if isinstance(row[9], dict) else {},
+                "progress": row[10] if isinstance(row[10], dict) else {},
+                "progress_artifact_type": str(row[11] or ""),
+                "resume_mode": str(row[12] or "exact"),
+                "worker_id": str(row[13] or ""),
+            }
+            stage_map.setdefault(rd, {}).setdefault(workflow_id, {})[stg] = row_payload
+            if workflow_id == "default":
+                legacy_stage_map.setdefault(rd, {})[stg] = row_payload
+
+        artifact_map: dict[str, list[dict[str, Any]]] = {}
+        for row in artifact_rows:
+            rd = str(row[0] or "").strip().lower()
+            artifact_type = str(row[1] or "").strip().lower()
+            if not rd or not artifact_type:
+                continue
+            artifact_map.setdefault(rd, []).append(
+                {
+                    "artifact_type": artifact_type,
+                    "updated_at_utc": row[2].isoformat() if row[2] else None,
+                }
+            )
+
+        target_map: dict[str, dict[str, int]] = {}
+        for row in target_rows:
+            rd = str(row[0] or "").strip().lower()
+            if not rd:
+                continue
+            target_map[rd] = {
+                "pending": int(row[1] or 0),
+                "running": int(row[2] or 0),
+                "completed": int(row[3] or 0),
+                "failed": int(row[4] or 0),
+            }
+
+        domain_rows: list[dict[str, Any]] = []
+        for rd in domains:
+            artifacts = artifact_map.get(rd, [])
+            domain_rows.append(
+                {
+                    "root_domain": rd,
+                    "targets": target_map.get(rd, {"pending": 0, "running": 0, "completed": 0, "failed": 0}),
+                    "plugin_tasks": stage_map.get(rd, {}),
+                    "stage_tasks": legacy_stage_map.get(rd, {}),
+                    "artifact_types": [item["artifact_type"] for item in artifacts],
+                    "artifacts": artifacts,
+                }
+            )
+
+        return {
+            "generated_at_utc": _iso_now(),
+            "limit": safe_limit,
+            "domain_count": len(domain_rows),
+            "domains": domain_rows,
+            "mode": "admin_snapshot",
+        }
+
+    def workflow_domain_scheduler_state(self, root_domain: str) -> dict[str, Any]:
         rd = str(root_domain or "").strip().lower()
         if not rd:
-            return {}
-        owns_conn = conn is None
-        if owns_conn:
-            conn = self._connect()
-            conn.__enter__()
-        try:
+            return {"generated_at_utc": _iso_now(), "found": False, "root_domain": rd}
+        with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-SELECT workflow_id, stage, status, attempt_count, exit_code, error, updated_at_utc, completed_at_utc,
+SELECT workflow_id, root_domain, stage, status, attempt_count, exit_code, error, updated_at_utc, completed_at_utc,
        checkpoint_json, progress_json, progress_artifact_type, resume_mode, worker_id,
-       COALESCE(resource_class, 'workflow_stage') AS resource_class,
-       COALESCE(access_mode, 'write') AS access_mode,
-       COALESCE(concurrency_group, '') AS concurrency_group
+       resource_class, access_mode, concurrency_group, max_parallelism,
+       progress_percent, current_unit, last_milestone
 FROM coordinator_stage_tasks
 WHERE root_domain = %s
 ORDER BY workflow_id ASC, stage ASC;
@@ -1605,8 +1697,8 @@ ORDER BY workflow_id ASC, stage ASC;
                 stage_rows = cur.fetchall()
                 cur.execute(
                     """
-SELECT artifact_type, updated_at_utc, content_sha256, content_size_bytes, storage_backend, storage_uri,
-       retention_class, manifest_json
+SELECT artifact_type, updated_at_utc, storage_backend, storage_uri, content_sha256, content_size_bytes,
+       manifest_json, retention_class, summary_match_count, summary_anomaly_count, summary_request_count
 FROM coordinator_artifacts
 WHERE root_domain = %s
 ORDER BY artifact_type ASC;
@@ -1627,121 +1719,298 @@ WHERE root_domain = %s;
                     (rd,),
                 )
                 target_row = cur.fetchone()
-                cur.execute(
-                    """
-SELECT summary_json, updated_at_utc
-FROM coordinator_domain_projection
-WHERE root_domain = %s;
-""",
-                    (rd,),
-                )
-                proj_row = cur.fetchone()
-            if owns_conn:
-                conn.commit()
-        finally:
-            if owns_conn:
-                conn.__exit__(None, None, None)
-        stage_map: dict[str, dict[str, dict[str, Any]]] = {}
-        legacy_stage_map: dict[str, dict[str, Any]] = {}
+            conn.commit()
+        stage_map: dict[str, dict[str, Any]] = {}
+        workflows: dict[str, dict[str, Any]] = {}
         for row in stage_rows:
-            workflow_id = str(row[0] or "default").strip().lower() or "default"
-            stg = str(row[1] or "").strip().lower()
-            if not stg:
-                continue
-            item = {
-                "workflow_id": workflow_id,
+            wid = str(row[0] or "default").strip().lower() or "default"
+            stg = str(row[2] or "").strip().lower()
+            payload = {
+                "workflow_id": wid,
                 "stage": stg,
                 "plugin_name": stg,
-                "status": str(row[2] or "").strip().lower(),
-                "attempt_count": int(row[3] or 0),
-                "exit_code": (int(row[4]) if row[4] is not None else None),
-                "error": str(row[5] or ""),
-                "updated_at_utc": row[6].isoformat() if row[6] else None,
-                "completed_at_utc": row[7].isoformat() if row[7] else None,
-                "checkpoint": row[8] if isinstance(row[8], dict) else {},
-                "progress": row[9] if isinstance(row[9], dict) else {},
-                "progress_artifact_type": str(row[10] or ""),
-                "resume_mode": str(row[11] or "exact"),
-                "worker_id": str(row[12] or ""),
-                "resource_class": str(row[13] or "workflow_stage"),
-                "access_mode": str(row[14] or "write"),
-                "concurrency_group": str(row[15] or ""),
+                "status": str(row[3] or "").strip().lower(),
+                "attempt_count": int(row[4] or 0),
+                "exit_code": (int(row[5]) if row[5] is not None else None),
+                "error": str(row[6] or ""),
+                "updated_at_utc": row[7].isoformat() if row[7] else None,
+                "completed_at_utc": row[8].isoformat() if row[8] else None,
+                "checkpoint": row[9] if isinstance(row[9], dict) else {},
+                "progress": row[10] if isinstance(row[10], dict) else {},
+                "progress_artifact_type": str(row[11] or ""),
+                "resume_mode": str(row[12] or "exact"),
+                "worker_id": str(row[13] or ""),
+                "resource_class": str(row[14] or "default"),
+                "access_mode": str(row[15] or "write"),
+                "concurrency_group": str(row[16] or ""),
+                "max_parallelism": int(row[17] or 1),
+                "progress_percent": float(row[18] or 0.0),
+                "current_unit": str(row[19] or ""),
+                "last_milestone": str(row[20] or ""),
             }
-            stage_map.setdefault(workflow_id, {})[stg] = item
-            legacy_stage_map[stg] = item
-        artifacts = [
-            {
-                "artifact_type": str(row[0] or ""),
-                "updated_at_utc": row[1].isoformat() if row[1] else None,
-                "sha256": str(row[2] or ""),
-                "size_bytes": int(row[3] or 0),
-                "storage_backend": str(row[4] or ""),
-                "storage_uri": str(row[5] or ""),
-                "retention_class": str(row[6] or "important_raw"),
-                "manifest": row[7] if isinstance(row[7], dict) else {},
-            }
-            for row in artifact_rows
-            if str(row[0] or "")
-        ]
-        projection = proj_row[0] if proj_row and isinstance(proj_row[0], dict) else {}
-        pending_targets = int((target_row[0] if target_row else 0) or 0)
-        running_targets = int((target_row[1] if target_row else 0) or 0)
-        completed_targets = int((target_row[2] if target_row else 0) or 0)
-        failed_targets = int((target_row[3] if target_row else 0) or 0)
-        return {
-            "root_domain": rd,
-            "target_counts": {
-                "pending": pending_targets,
-                "running": running_targets,
-                "completed": completed_targets,
-                "failed": failed_targets,
-            },
-            "stages_by_workflow": stage_map,
-            "stages": legacy_stage_map,
-            "artifacts": artifacts,
-            "summary": projection if isinstance(projection, dict) else {},
+            workflows.setdefault(wid, {})[stg] = payload
+            if wid == "default":
+                stage_map[stg] = payload
+        artifacts = []
+        for row in artifact_rows:
+            artifacts.append(
+                {
+                    "artifact_type": str(row[0] or "").strip().lower(),
+                    "updated_at_utc": row[1].isoformat() if row[1] else None,
+                    "storage_backend": str(row[2] or ""),
+                    "storage_uri": str(row[3] or ""),
+                    "content_sha256": str(row[4] or ""),
+                    "content_size_bytes": int(row[5] or 0),
+                    "manifest": row[6] if isinstance(row[6], dict) else {},
+                    "retention_class": str(row[7] or "derived_rebuildable"),
+                    "summary_match_count": int(row[8] or 0),
+                    "summary_anomaly_count": int(row[9] or 0),
+                    "summary_request_count": int(row[10] or 0),
+                }
+            )
+        targets = {
+            "pending": int(target_row[0] or 0) if target_row else 0,
+            "running": int(target_row[1] or 0) if target_row else 0,
+            "completed": int(target_row[2] or 0) if target_row else 0,
+            "failed": int(target_row[3] or 0) if target_row else 0,
         }
-
-    def workflow_domain_snapshot(self, root_domain: str) -> dict[str, Any]:
-        payload = self._build_workflow_domain_payload(root_domain)
         return {
             "generated_at_utc": _iso_now(),
-            "found": bool(payload),
-            "domain": payload,
+            "found": bool(stage_rows or artifact_rows or sum(targets.values()) > 0),
+            "root_domain": rd,
+            "targets": targets,
+            "plugin_tasks": workflows,
+            "stage_tasks": stage_map,
+            "artifact_types": [item["artifact_type"] for item in artifacts],
+            "artifacts": artifacts,
         }
 
-    def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
-        safe_limit = max(1, min(5000, int(limit or 2000)))
-        domains_sql = """
-SELECT root_domain
-FROM (
+    
+    def crawl_progress_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
+        safe_limit = max(1, min(2000, int(limit or 2000)))
+        sql = """
+WITH domain_set AS (
     SELECT DISTINCT root_domain FROM coordinator_targets
     UNION
     SELECT DISTINCT root_domain FROM coordinator_stage_tasks
     UNION
-    SELECT DISTINCT root_domain FROM coordinator_artifacts
-) d
-WHERE root_domain IS NOT NULL AND root_domain <> ''
-ORDER BY root_domain ASC
+    SELECT DISTINCT root_domain FROM coordinator_sessions
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_artifacts WHERE artifact_type = 'nightmare_session_json'
+),
+target_agg AS (
+    SELECT
+      root_domain,
+      COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
+      COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets,
+      MAX(heartbeat_at_utc) AS last_target_heartbeat,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN worker_id ELSE NULL END), NULL) AS target_workers,
+      MIN(start_url) FILTER (WHERE start_url IS NOT NULL AND start_url <> '') AS sample_start_url
+    FROM coordinator_targets
+    GROUP BY root_domain
+),
+stage_agg AS (
+    SELECT
+      root_domain,
+      COUNT(*) FILTER (WHERE status = 'pending') AS pending_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'failed') AS failed_stage_tasks,
+      MAX(heartbeat_at_utc) AS last_stage_heartbeat,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN stage ELSE NULL END), NULL) AS active_stages,
+      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN worker_id ELSE NULL END), NULL) AS stage_workers
+    FROM coordinator_stage_tasks
+    GROUP BY root_domain
+),
+artifact_agg AS (
+    SELECT
+      root_domain,
+      MAX(updated_at_utc) FILTER (WHERE artifact_type = 'nightmare_session_json') AS nightmare_session_updated_at_utc
+    FROM coordinator_artifacts
+    GROUP BY root_domain
+)
+SELECT
+  d.root_domain,
+  COALESCE(t.sample_start_url, sess.start_url, '') AS start_url,
+  sess.saved_at_utc,
+  COALESCE(
+    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, sess.saved_at_utc, art.nightmare_session_updated_at_utc),
+    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, sess.saved_at_utc),
+    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, art.nightmare_session_updated_at_utc),
+    GREATEST(t.last_target_heartbeat, sess.saved_at_utc, art.nightmare_session_updated_at_utc),
+    GREATEST(st.last_stage_heartbeat, sess.saved_at_utc, art.nightmare_session_updated_at_utc),
+    t.last_target_heartbeat,
+    st.last_stage_heartbeat,
+    sess.saved_at_utc,
+    art.nightmare_session_updated_at_utc
+  ) AS last_activity_at_utc,
+  COALESCE(t.pending_targets, 0) AS pending_targets,
+  COALESCE(t.running_targets, 0) AS running_targets,
+  COALESCE(t.completed_targets, 0) AS completed_targets,
+  COALESCE(t.failed_targets, 0) AS failed_targets,
+  COALESCE(st.pending_stage_tasks, 0) AS pending_stage_tasks,
+  COALESCE(st.running_stage_tasks, 0) AS running_stage_tasks,
+  COALESCE(st.completed_stage_tasks, 0) AS completed_stage_tasks,
+  COALESCE(st.failed_stage_tasks, 0) AS failed_stage_tasks,
+  COALESCE(st.active_stages, ARRAY[]::text[]) AS active_stages,
+  COALESCE(t.target_workers, ARRAY[]::text[]) AS target_workers,
+  COALESCE(st.stage_workers, ARRAY[]::text[]) AS stage_workers,
+  art.nightmare_session_updated_at_utc
+FROM domain_set d
+LEFT JOIN target_agg t ON t.root_domain = d.root_domain
+LEFT JOIN stage_agg st ON st.root_domain = d.root_domain
+LEFT JOIN coordinator_sessions sess ON sess.root_domain = d.root_domain
+LEFT JOIN artifact_agg art ON art.root_domain = d.root_domain
+ORDER BY last_activity_at_utc DESC NULLS LAST, d.root_domain ASC
 LIMIT %s;
 """
-        domains: list[str] = []
-        payloads: list[dict[str, Any]] = []
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(domains_sql, (safe_limit,))
-                domains = [str(row[0] or "").strip().lower() for row in cur.fetchall() if str(row[0] or "").strip()]
-            for domain in domains:
-                payload = self._build_workflow_domain_payload(domain, conn=conn)
-                if payload:
-                    payloads.append(payload)
+                cur.execute(sql, (safe_limit,))
+                rows = cur.fetchall()
             conn.commit()
+
+        row_map: dict[str, tuple[Any, ...]] = {}
+        ordered_domains: list[str] = []
+        for row in rows:
+            root_domain = str(row[0] or "").strip().lower()
+            if not root_domain:
+                continue
+            ordered_domains.append(root_domain)
+            row_map[root_domain] = row
+
+        sessions_by_domain = self._bulk_load_sessions(
+            ordered_domains,
+            include_artifact_fallback=True,
+            artifact_fallback_limit=max(25, min(250, len(ordered_domains))),
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        domains: list[dict[str, Any]] = []
+        running_domains = 0
+        queued_domains = 0
+        failed_domains = 0
+        completed_domains = 0
+
+        for root_domain in ordered_domains:
+            row = row_map[root_domain]
+            session = sessions_by_domain.get(root_domain) or {}
+            metrics = self._session_url_metrics(session)
+            discovered_urls_count = int(metrics.get("discovered_urls_count") or 0)
+            visited_urls_count = int(metrics.get("visited_urls_count") or 0)
+            frontier_count = int(metrics.get("frontier_count") or 0)
+            spider_stats = metrics.get("spider_stats") if isinstance(metrics.get("spider_stats"), dict) else {}
+
+            active_stages_raw = row[12] if isinstance(row[12], list) else []
+            active_stages = [str(item).strip() for item in active_stages_raw if str(item or "").strip()]
+            target_workers_raw = row[13] if isinstance(row[13], list) else []
+            stage_workers_raw = row[14] if isinstance(row[14], list) else []
+            active_workers = sorted({
+                str(item).strip()
+                for item in [*target_workers_raw, *stage_workers_raw]
+                if str(item or "").strip()
+            })
+
+            last_activity = row[3]
+            for raw_ts in (
+                session.get("saved_at_utc"),
+                row[15].isoformat() if row[15] else None,
+                row[2].isoformat() if row[2] else None,
+            ):
+                if not raw_ts:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if last_activity is None or dt > last_activity:
+                    last_activity = dt
+
+            last_activity_iso: Optional[str] = None
+            seconds_since_activity: Optional[int] = None
+            if last_activity is not None:
+                last_activity_iso = last_activity.isoformat()
+                seconds_since_activity = max(0, int((now_utc - last_activity).total_seconds()))
+
+            pending_targets = int(row[4] or 0)
+            running_targets = int(row[5] or 0)
+            completed_targets = int(row[6] or 0)
+            failed_targets = int(row[7] or 0)
+            pending_stage_tasks = int(row[8] or 0)
+            running_stage_tasks = int(row[9] or 0)
+            completed_stage_tasks = int(row[10] or 0)
+            failed_stage_tasks = int(row[11] or 0)
+
+            phase = "idle"
+            if running_targets > 0:
+                phase = "nightmare_running"
+            elif running_stage_tasks > 0:
+                if any(str(item).startswith("nightmare_") for item in active_stages):
+                    phase = "nightmare_plugin_running"
+                elif "fozzy" in active_stages:
+                    phase = "fozzy_running"
+                elif "extractor" in active_stages:
+                    phase = "extractor_running"
+                else:
+                    phase = "stage_running"
+            elif pending_targets > 0:
+                phase = "nightmare_pending"
+            elif pending_stage_tasks > 0:
+                phase = "stage_pending"
+            elif failed_targets > 0 or failed_stage_tasks > 0:
+                phase = "failed"
+            elif completed_targets > 0 or completed_stage_tasks > 0 or discovered_urls_count > 0:
+                phase = "completed"
+
+            if phase.endswith("_running"):
+                running_domains += 1
+            elif phase.endswith("_pending"):
+                queued_domains += 1
+            elif phase == "failed":
+                failed_domains += 1
+            elif phase == "completed":
+                completed_domains += 1
+
+            domains.append({
+                "root_domain": root_domain,
+                "start_url": str(session.get("start_url") or row[1] or ""),
+                "phase": phase,
+                "discovered_urls_count": discovered_urls_count,
+                "visited_urls_count": visited_urls_count,
+                "frontier_count": frontier_count,
+                "spider_stats": spider_stats,
+                "session_saved_at_utc": session.get("saved_at_utc") or (row[2].isoformat() if row[2] else None),
+                "last_activity_at_utc": last_activity_iso,
+                "seconds_since_activity": seconds_since_activity,
+                "pending_targets": pending_targets,
+                "running_targets": running_targets,
+                "completed_targets": completed_targets,
+                "failed_targets": failed_targets,
+                "pending_stage_tasks": pending_stage_tasks,
+                "running_stage_tasks": running_stage_tasks,
+                "completed_stage_tasks": completed_stage_tasks,
+                "failed_stage_tasks": failed_stage_tasks,
+                "active_stages": active_stages,
+                "active_workers": active_workers,
+            })
+
         return {
             "generated_at_utc": _iso_now(),
             "limit": safe_limit,
-            "domains": payloads,
+            "counts": {
+                "total_domains": len(domains),
+                "running_domains": running_domains,
+                "queued_domains": queued_domains,
+                "failed_domains": failed_domains,
+                "completed_domains": completed_domains,
+            },
+            "domains": domains,
         }
 
+
+    
     def list_discovered_target_domains(self, *, limit: int = 5000, q: str = "") -> list[dict[str, Any]]:
         safe_limit = max(1, min(20000, int(limit or 5000)))
         needle = str(q or "").strip().lower()
@@ -3363,6 +3632,22 @@ RETURNING command;
                 )
         return updated > 0
 
+    
+    @staticmethod
+    def _stage_execution_profile(stage: str) -> dict[str, Any]:
+        stg = str(stage or "").strip().lower()
+        if stg.startswith("recon_spider") or stg.startswith("recon_subdomain"):
+            return {"resource_class": "network_scan", "access_mode": "read", "concurrency_group": "recon_network", "max_parallelism": 4}
+        if stg.startswith("nightmare"):
+            return {"resource_class": "crawl", "access_mode": "write", "concurrency_group": "crawl", "max_parallelism": 1}
+        if stg == "fozzy":
+            return {"resource_class": "read_artifacts", "access_mode": "read", "concurrency_group": "fozzy", "max_parallelism": 2}
+        if stg == "extractor":
+            return {"resource_class": "read_artifacts", "access_mode": "read", "concurrency_group": "extractor", "max_parallelism": 4}
+        if stg == "auth0r":
+            return {"resource_class": "write_artifacts", "access_mode": "write", "concurrency_group": "auth0r", "max_parallelism": 1}
+        return {"resource_class": "default", "access_mode": "write", "concurrency_group": stg, "max_parallelism": 1}
+
     def schedule_stage(
         self,
         root_domain: str,
@@ -3400,6 +3685,7 @@ RETURNING command;
         progress_obj = dict(progress or {}) if isinstance(progress, dict) else {}
         progress_artifact_type_text = str(progress_artifact_type or "").strip().lower()
         resume_mode_text = str(resume_mode or "exact").strip().lower() or "exact"
+        profile = self._stage_execution_profile(stg)
 
         scheduled = False
         status = ""
@@ -3423,9 +3709,10 @@ FOR UPDATE;
                     cur.execute(
                         """
 INSERT INTO coordinator_stage_tasks(
-    workflow_id, root_domain, stage, status, checkpoint_json, progress_json, progress_artifact_type, resume_mode, updated_at_utc
+    workflow_id, root_domain, stage, status, checkpoint_json, progress_json, progress_artifact_type, resume_mode,
+    resource_class, access_mode, concurrency_group, max_parallelism, updated_at_utc
 )
-VALUES (%s, %s, %s, 'pending', %s::jsonb, %s::jsonb, %s, %s, NOW());
+VALUES (%s, %s, %s, 'pending', %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, NOW());
 """,
                         (
                             widf,
@@ -3435,6 +3722,10 @@ VALUES (%s, %s, %s, 'pending', %s::jsonb, %s::jsonb, %s, %s, NOW());
                             json.dumps(progress_obj, ensure_ascii=False),
                             progress_artifact_type_text,
                             resume_mode_text,
+                            profile["resource_class"],
+                            profile["access_mode"],
+                            profile["concurrency_group"],
+                            int(profile["max_parallelism"]),
                         ),
                     )
                     scheduled = True
@@ -3468,7 +3759,11 @@ SET status = 'pending',
     checkpoint_json = %s::jsonb,
     progress_json = %s::jsonb,
     progress_artifact_type = %s,
-    resume_mode = %s
+    resume_mode = %s,
+    resource_class = %s,
+    access_mode = %s,
+    concurrency_group = %s,
+    max_parallelism = %s
 WHERE workflow_id = %s
   AND root_domain = %s
   AND stage = %s;
@@ -3478,6 +3773,10 @@ WHERE workflow_id = %s
                                     json.dumps(progress_obj, ensure_ascii=False),
                                     progress_artifact_type_text,
                                     resume_mode_text,
+                                    profile["resource_class"],
+                                    profile["access_mode"],
+                                    profile["concurrency_group"],
+                                    int(profile["max_parallelism"]),
                                     widf,
                                     rd,
                                     stg,
@@ -3576,14 +3875,23 @@ WHERE workflow_id = %s
         allowlist_param: Optional[list[str]] = allowlist if allowlist else None
         sql = """
 WITH candidate AS (
-    SELECT workflow_id, root_domain, stage
+    SELECT t.workflow_id, t.root_domain, t.stage
     FROM coordinator_stage_tasks t
     WHERE (
-        status = 'pending'
-        OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
+        t.status = 'pending'
+        OR (t.status = 'running' AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at < NOW())
     )
-      AND (%s = '' OR workflow_id = %s)
-      AND (%s::text[] IS NULL OR stage = ANY(%s))
+      AND (%s = '' OR t.workflow_id = %s)
+      AND (%s::text[] IS NULL OR t.stage = ANY(%s))
+      AND NOT EXISTS (
+          SELECT 1
+          FROM coordinator_targets q
+          WHERE q.root_domain = t.root_domain
+            AND q.status = 'running'
+            AND q.lease_expires_at IS NOT NULL
+            AND q.lease_expires_at >= NOW()
+            AND COALESCE(t.resource_class, 'default') IN ('crawl', 'network_scan')
+      )
       AND NOT EXISTS (
           SELECT 1
           FROM coordinator_stage_tasks r
@@ -3593,24 +3901,23 @@ WITH candidate AS (
             AND r.lease_expires_at >= NOW()
             AND NOT (r.workflow_id = t.workflow_id AND r.stage = t.stage)
             AND (
-                COALESCE(r.access_mode, 'write') = 'write'
-                OR COALESCE(t.access_mode, 'write') = 'write'
+                COALESCE(r.concurrency_group, '') = COALESCE(NULLIF(t.concurrency_group, ''), t.stage)
                 OR (
-                    COALESCE(r.resource_class, 'workflow_stage') = COALESCE(t.resource_class, 'workflow_stage')
-                    AND COALESCE(r.concurrency_group, '') = COALESCE(t.concurrency_group, '')
+                    COALESCE(r.resource_class, 'default') = COALESCE(t.resource_class, 'default')
+                    AND ('write' IN (COALESCE(r.access_mode, 'write'), COALESCE(t.access_mode, 'write')))
                 )
             )
       )
-      AND NOT EXISTS (
-          SELECT 1
-          FROM coordinator_targets q
-          WHERE q.root_domain = t.root_domain
-            AND q.status = 'running'
-            AND q.lease_expires_at IS NOT NULL
-            AND q.lease_expires_at >= NOW()
-            AND COALESCE(t.resource_class, 'workflow_stage') IN ('crawl', 'network_scan')
-      )
-    ORDER BY created_at_utc ASC
+      AND (
+          SELECT COUNT(*)
+          FROM coordinator_stage_tasks rp
+          WHERE rp.root_domain = t.root_domain
+            AND rp.status = 'running'
+            AND rp.lease_expires_at IS NOT NULL
+            AND rp.lease_expires_at >= NOW()
+            AND COALESCE(rp.concurrency_group, '') = COALESCE(NULLIF(t.concurrency_group, ''), t.stage)
+      ) < GREATEST(COALESCE(t.max_parallelism, 1), 1)
+    ORDER BY t.created_at_utc ASC
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
@@ -3639,7 +3946,11 @@ RETURNING
     t.checkpoint_json,
     t.progress_json,
     t.progress_artifact_type,
-    t.resume_mode;
+    t.resume_mode,
+    t.resource_class,
+    t.access_mode,
+    t.concurrency_group,
+    t.max_parallelism;
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -3663,6 +3974,10 @@ RETURNING
                 "attempt_count": int(row[5] or 0),
                 "lease_expires_at": row[6].isoformat() if row[6] else None,
                 "resume_mode": str(row[10] or "exact"),
+                "resource_class": str(row[11] or "default"),
+                "access_mode": str(row[12] or "write"),
+                "concurrency_group": str(row[13] or ""),
+                "max_parallelism": int(row[14] or 1),
             },
         )
         return {
@@ -3678,6 +3993,10 @@ RETURNING
             "progress": row[8] if isinstance(row[8], dict) else {},
             "progress_artifact_type": str(row[9] or ""),
             "resume_mode": str(row[10] or "exact"),
+            "resource_class": str(row[11] or "default"),
+            "access_mode": str(row[12] or "write"),
+            "concurrency_group": str(row[13] or ""),
+            "max_parallelism": int(row[14] or 1),
         }
 
     def claim_stage(
@@ -3726,26 +4045,41 @@ RETURNING
         lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
         if not rd or not stg or not wid:
             return False
-        checkpoint_json = (
-            json.dumps(dict(checkpoint), ensure_ascii=False)
-            if isinstance(checkpoint, dict)
-            else None
-        )
-        progress_json = (
-            json.dumps(dict(progress), ensure_ascii=False)
-            if isinstance(progress, dict)
-            else None
-        )
+        checkpoint_dict = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
+        progress_dict = dict(progress or {}) if isinstance(progress, dict) else {}
+        checkpoint_json = json.dumps(checkpoint_dict, ensure_ascii=False) if checkpoint_dict else None
+        progress_json = json.dumps(progress_dict, ensure_ascii=False) if progress_dict else None
         artifact_type_text = str(progress_artifact_type or "").strip().lower()
+        progress_percent = float(progress_dict.get("percent", progress_dict.get("progress_percent", 0.0)) or 0.0)
+        current_unit = str(progress_dict.get("current_unit", progress_dict.get("unit", "")) or "")
+        last_milestone = str(progress_dict.get("last_milestone", progress_dict.get("milestone", "")) or "")
         sql = """
 UPDATE coordinator_stage_tasks
 SET heartbeat_at_utc = NOW(),
     lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
     checkpoint_json = COALESCE(%s::jsonb, checkpoint_json),
     progress_json = COALESCE(%s::jsonb, progress_json),
+    progress_percent = CASE WHEN %s >= 0 THEN %s ELSE progress_percent END,
+    current_unit = CASE WHEN %s <> '' THEN %s ELSE current_unit END,
+    last_milestone = CASE WHEN %s <> '' THEN %s ELSE last_milestone END,
     progress_artifact_type = CASE
       WHEN %s <> '' THEN %s
       ELSE progress_artifact_type
+    END,
+    durable_checkpoint_json = CASE
+      WHEN durable_progress_updated_at_utc IS NULL OR durable_progress_updated_at_utc < NOW() - ((%s)::text || ' seconds')::interval OR %s <> ''
+      THEN COALESCE(%s::jsonb, durable_checkpoint_json)
+      ELSE durable_checkpoint_json
+    END,
+    durable_progress_json = CASE
+      WHEN durable_progress_updated_at_utc IS NULL OR durable_progress_updated_at_utc < NOW() - ((%s)::text || ' seconds')::interval OR %s <> ''
+      THEN COALESCE(%s::jsonb, durable_progress_json)
+      ELSE durable_progress_json
+    END,
+    durable_progress_updated_at_utc = CASE
+      WHEN durable_progress_updated_at_utc IS NULL OR durable_progress_updated_at_utc < NOW() - ((%s)::text || ' seconds')::interval OR %s <> ''
+      THEN NOW()
+      ELSE durable_progress_updated_at_utc
     END,
     updated_at_utc = NOW()
 WHERE workflow_id = %s
@@ -3763,8 +4097,22 @@ WHERE workflow_id = %s
                         lease,
                         checkpoint_json,
                         progress_json,
+                        progress_percent,
+                        progress_percent,
+                        current_unit,
+                        current_unit,
+                        last_milestone,
+                        last_milestone,
                         artifact_type_text,
                         artifact_type_text,
+                        self._durable_progress_min_interval_seconds,
+                        last_milestone,
+                        checkpoint_json,
+                        self._durable_progress_min_interval_seconds,
+                        last_milestone,
+                        progress_json,
+                        self._durable_progress_min_interval_seconds,
+                        last_milestone,
                         widf,
                         rd,
                         stg,
@@ -3774,7 +4122,6 @@ WHERE workflow_id = %s
                 updated = int(cur.rowcount or 0)
             conn.commit()
         return updated > 0
-
     def update_stage_progress(
         self,
         *,
@@ -3792,27 +4139,30 @@ WHERE workflow_id = %s
         widf = str(workflow_id or "").strip().lower() or "default"
         if not rd or not stg or not wid:
             return False
-        checkpoint_json = (
-            json.dumps(dict(checkpoint), ensure_ascii=False)
-            if isinstance(checkpoint, dict)
-            else None
-        )
-        progress_json = (
-            json.dumps(dict(progress), ensure_ascii=False)
-            if isinstance(progress, dict)
-            else None
-        )
+        checkpoint_dict = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
+        progress_dict = dict(progress or {}) if isinstance(progress, dict) else {}
+        checkpoint_json = json.dumps(checkpoint_dict, ensure_ascii=False) if checkpoint_dict else None
+        progress_json = json.dumps(progress_dict, ensure_ascii=False) if progress_dict else None
         artifact_type_text = str(progress_artifact_type or "").strip().lower()
+        progress_percent = float(progress_dict.get("percent", progress_dict.get("progress_percent", 0.0)) or 0.0)
+        current_unit = str(progress_dict.get("current_unit", progress_dict.get("unit", "")) or "")
+        last_milestone = str(progress_dict.get("last_milestone", progress_dict.get("milestone", "")) or "")
         sql = """
 UPDATE coordinator_stage_tasks
 SET checkpoint_json = COALESCE(%s::jsonb, checkpoint_json),
     progress_json = COALESCE(%s::jsonb, progress_json),
+    progress_percent = CASE WHEN %s >= 0 THEN %s ELSE progress_percent END,
+    current_unit = CASE WHEN %s <> '' THEN %s ELSE current_unit END,
+    last_milestone = CASE WHEN %s <> '' THEN %s ELSE last_milestone END,
     progress_artifact_type = CASE
       WHEN %s <> '' THEN %s
       ELSE progress_artifact_type
     END,
     heartbeat_at_utc = NOW(),
-    updated_at_utc = NOW()
+    updated_at_utc = NOW(),
+    durable_checkpoint_json = CASE WHEN %s <> '' THEN COALESCE(%s::jsonb, durable_checkpoint_json) ELSE durable_checkpoint_json END,
+    durable_progress_json = CASE WHEN %s <> '' THEN COALESCE(%s::jsonb, durable_progress_json) ELSE durable_progress_json END,
+    durable_progress_updated_at_utc = CASE WHEN %s <> '' THEN NOW() ELSE durable_progress_updated_at_utc END
 WHERE workflow_id = %s
   AND root_domain = %s
   AND stage = %s
@@ -3827,8 +4177,19 @@ WHERE workflow_id = %s
                     (
                         checkpoint_json,
                         progress_json,
+                        progress_percent,
+                        progress_percent,
+                        current_unit,
+                        current_unit,
+                        last_milestone,
+                        last_milestone,
                         artifact_type_text,
                         artifact_type_text,
+                        last_milestone,
+                        checkpoint_json,
+                        last_milestone,
+                        progress_json,
+                        last_milestone,
                         widf,
                         rd,
                         stg,
@@ -3836,20 +4197,8 @@ WHERE workflow_id = %s
                     ),
                 )
                 updated = int(cur.rowcount or 0)
-                if updated > 0:
-                    self._upsert_stage_hot_status(
-                        conn=conn,
-                        workflow_id=widf,
-                        root_domain=rd,
-                        stage=stg,
-                        state="running",
-                        progress=progress,
-                    )
-                    self._refresh_domain_projection(rd, conn=conn)
             conn.commit()
-        if updated > 0:
-            checkpoint_payload = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
-            progress_payload = dict(progress or {}) if isinstance(progress, dict) else {}
+        if updated > 0 and last_milestone:
             self.record_system_event(
                 "workflow.task.progress",
                 f"workflow_task:{widf}:{rd}:{stg}",
@@ -3860,14 +4209,14 @@ WHERE workflow_id = %s
                     "stage": stg,
                     "plugin_name": stg,
                     "worker_id": wid,
-                    "checkpoint": checkpoint_payload,
-                    "progress": progress_payload,
+                    "progress_percent": progress_percent,
+                    "current_unit": current_unit,
+                    "last_milestone": last_milestone,
                     "progress_artifact_type": artifact_type_text,
                     "status": "running",
                 },
             )
         return updated > 0
-
     def complete_stage(
         self,
         root_domain: str,
@@ -3890,18 +4239,15 @@ WHERE workflow_id = %s
             return False
         ok = int(exit_code) == 0
         next_status = "completed" if ok else "failed"
-        checkpoint_json = (
-            json.dumps(dict(checkpoint), ensure_ascii=False)
-            if isinstance(checkpoint, dict)
-            else None
-        )
-        progress_json = (
-            json.dumps(dict(progress), ensure_ascii=False)
-            if isinstance(progress, dict)
-            else None
-        )
+        checkpoint_dict = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
+        progress_dict = dict(progress or {}) if isinstance(progress, dict) else {}
+        checkpoint_json = json.dumps(checkpoint_dict, ensure_ascii=False) if checkpoint_dict else None
+        progress_json = json.dumps(progress_dict, ensure_ascii=False) if progress_dict else None
         progress_artifact_type_text = str(progress_artifact_type or "").strip().lower()
         resume_mode_text = str(resume_mode or "").strip().lower()
+        progress_percent = float(progress_dict.get("percent", progress_dict.get("progress_percent", 100.0 if ok else 0.0)) or 0.0)
+        current_unit = str(progress_dict.get("current_unit", progress_dict.get("unit", "")) or "")
+        last_milestone = str(progress_dict.get("last_milestone", progress_dict.get("milestone", next_status)) or next_status)
         sql = """
 UPDATE coordinator_stage_tasks
 SET status = %s,
@@ -3909,14 +4255,14 @@ SET status = %s,
     error = %s,
     checkpoint_json = COALESCE(%s::jsonb, checkpoint_json),
     progress_json = COALESCE(%s::jsonb, progress_json),
-    progress_artifact_type = CASE
-      WHEN %s <> '' THEN %s
-      ELSE progress_artifact_type
-    END,
-    resume_mode = CASE
-      WHEN %s <> '' THEN %s
-      ELSE resume_mode
-    END,
+    durable_checkpoint_json = COALESCE(%s::jsonb, durable_checkpoint_json),
+    durable_progress_json = COALESCE(%s::jsonb, durable_progress_json),
+    durable_progress_updated_at_utc = NOW(),
+    progress_percent = %s,
+    current_unit = CASE WHEN %s <> '' THEN %s ELSE current_unit END,
+    last_milestone = CASE WHEN %s <> '' THEN %s ELSE last_milestone END,
+    progress_artifact_type = CASE WHEN %s <> '' THEN %s ELSE progress_artifact_type END,
+    resume_mode = CASE WHEN %s <> '' THEN %s ELSE resume_mode END,
     completed_at_utc = NOW(),
     heartbeat_at_utc = NOW(),
     lease_expires_at = NULL,
@@ -3928,7 +4274,7 @@ WHERE workflow_id = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                self._touch_worker_presence(cur, wid, f"complete_stage_{stg}", force=True)
+                self._touch_worker_presence(cur, wid, f"complete_stage_{stg}")
                 cur.execute(
                     sql,
                     (
@@ -3937,6 +4283,13 @@ WHERE workflow_id = %s
                         str(error or "")[:2000],
                         checkpoint_json,
                         progress_json,
+                        checkpoint_json,
+                        progress_json,
+                        progress_percent,
+                        current_unit,
+                        current_unit,
+                        last_milestone,
+                        last_milestone,
                         progress_artifact_type_text,
                         progress_artifact_type_text,
                         resume_mode_text,
@@ -3948,16 +4301,6 @@ WHERE workflow_id = %s
                     ),
                 )
                 updated = int(cur.rowcount or 0)
-                if updated > 0:
-                    self._upsert_stage_hot_status(
-                        conn=conn,
-                        workflow_id=widf,
-                        root_domain=rd,
-                        stage=stg,
-                        state=next_status,
-                        progress=progress,
-                    )
-                    self._refresh_domain_projection(rd, conn=conn)
             conn.commit()
         if updated > 0:
             self.record_system_event(
@@ -3974,10 +4317,12 @@ WHERE workflow_id = %s
                     "exit_code": int(exit_code),
                     "error": str(error or "")[:2000],
                     "progress_artifact_type": progress_artifact_type_text,
+                    "progress_percent": progress_percent,
+                    "current_unit": current_unit,
+                    "last_milestone": last_milestone,
                 },
             )
         return updated > 0
-
     def reset_stage_tasks(
         self,
         *,
@@ -4065,32 +4410,53 @@ WHERE {where_clause};
         *,
         root_domain: str,
         artifact_type: str,
-        content: bytes,
+        content: bytes | None = None,
         source_worker: str = "",
         content_encoding: str = "identity",
-        retention_class: str = "important_raw",
         manifest: Optional[dict[str, Any]] = None,
-        local_path: str = "",
+        retention_class: str = "derived_rebuildable",
+        media_type: str = "application/octet-stream",
     ) -> bool:
         rd = str(root_domain or "").strip().lower()
         at = str(artifact_type or "").strip().lower()
         if not rd or not at:
             return False
         data = bytes(content or b"")
-        metadata = self._artifact_store.put_bytes(
-            artifact_type=at,
-            root_domain=rd,
-            payload=data,
-            encoding=content_encoding or "binary",
-            worker_id=source_worker or "",
-        )
-        inline_content = data if len(data) <= self._db_inline_artifact_max_bytes else b""
+        manifest_dict = dict(manifest or {}) if isinstance(manifest, dict) else {}
+        if data:
+            metadata = self._artifact_store.put_bytes(
+                artifact_type=at,
+                root_domain=rd,
+                payload=data,
+                media_type=media_type or "application/octet-stream",
+                encoding=content_encoding or "binary",
+                worker_id=source_worker or "",
+            )
+            inline_content = data if len(data) <= self._db_inline_artifact_max_bytes and at.endswith(("_json", "_txt", "_summary")) else None
+            sha256 = metadata.sha256
+            storage_backend = metadata.storage_backend
+            storage_uri = metadata.storage_uri
+            compression = metadata.compression
+            media_type_text = metadata.media_type
+            size_bytes = len(data)
+        else:
+            sha256 = str(manifest_dict.get("content_sha256") or hashlib.sha256(json.dumps(manifest_dict, sort_keys=True, default=str).encode("utf-8")).hexdigest())
+            storage_backend = str(manifest_dict.get("storage_backend") or "manifest").strip() or "manifest"
+            storage_uri = str(manifest_dict.get("storage_uri") or "").strip()
+            compression = str(manifest_dict.get("compression") or "identity").strip() or "identity"
+            media_type_text = str(manifest_dict.get("media_type") or media_type or "application/octet-stream")
+            size_bytes = int(manifest_dict.get("content_size_bytes") or 0)
+            inline_content = None
+        summary_match_count = int(manifest_dict.get("match_count") or manifest_dict.get("summary_match_count") or 0)
+        summary_anomaly_count = int(manifest_dict.get("anomaly_count") or manifest_dict.get("summary_anomaly_count") or 0)
+        summary_request_count = int(manifest_dict.get("request_count") or manifest_dict.get("summary_request_count") or 0)
         sql = """
 INSERT INTO coordinator_artifacts(
     root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
-    storage_backend, storage_uri, media_type, compression, schema_version, retention_class, manifest_json, local_path, local_available_on_worker, updated_at_utc
+    storage_backend, storage_uri, media_type, compression, schema_version, manifest_json, retention_class,
+    summary_match_count, summary_anomaly_count, summary_request_count, updated_at_utc
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, NOW())
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, NOW())
 ON CONFLICT (root_domain, artifact_type) DO UPDATE
 SET source_worker = EXCLUDED.source_worker,
     content = EXCLUDED.content,
@@ -4102,10 +4468,11 @@ SET source_worker = EXCLUDED.source_worker,
     media_type = EXCLUDED.media_type,
     compression = EXCLUDED.compression,
     schema_version = EXCLUDED.schema_version,
-    retention_class = EXCLUDED.retention_class,
     manifest_json = EXCLUDED.manifest_json,
-    local_path = EXCLUDED.local_path,
-    local_available_on_worker = EXCLUDED.local_available_on_worker,
+    retention_class = EXCLUDED.retention_class,
+    summary_match_count = EXCLUDED.summary_match_count,
+    summary_anomaly_count = EXCLUDED.summary_anomaly_count,
+    summary_request_count = EXCLUDED.summary_request_count,
     updated_at_utc = NOW();
 """
         with self._connect() as conn:
@@ -4118,17 +4485,18 @@ SET source_worker = EXCLUDED.source_worker,
                         str(source_worker or "")[:200],
                         inline_content,
                         str(content_encoding or "identity")[:120],
-                        metadata.sha256,
-                        len(data),
-                        metadata.storage_backend,
-                        metadata.storage_uri,
-                        metadata.media_type,
-                        metadata.compression,
-                        metadata.schema_version,
-                        str(retention_class or "important_raw")[:64],
-                        json.dumps(dict(manifest or {}), ensure_ascii=False),
-                        str(local_path or "")[:2000],
-                        str(source_worker or "")[:200],
+                        sha256,
+                        size_bytes,
+                        storage_backend,
+                        storage_uri,
+                        media_type_text,
+                        compression,
+                        registry.current_version("artifact_metadata"),
+                        json.dumps(manifest_dict, ensure_ascii=False, default=str),
+                        str(retention_class or "derived_rebuildable")[:64],
+                        summary_match_count,
+                        summary_anomaly_count,
+                        summary_request_count,
                     ),
                 )
                 summary_payload = json.dumps(
@@ -4138,8 +4506,8 @@ SET source_worker = EXCLUDED.source_worker,
                         "status": "completed",
                         "root_domain": rd,
                         "counts": {"artifacts": 1},
-                        "metrics": {"artifact_bytes": float(len(data)), "risk_score": self._risk_score_for_artifact(at, len(data))},
-                        "output_artifacts": {at: metadata.sha256},
+                        "metrics": {"artifact_bytes": float(size_bytes), "risk_score": self._risk_score_for_artifact(at, size_bytes)},
+                        "output_artifacts": {at: sha256},
                     }
                 )
                 cur.execute(
@@ -4161,26 +4529,27 @@ SET source_worker = EXCLUDED.source_worker,
                 "root_domain": rd,
                 "artifact_type": at,
                 "worker_id": str(source_worker or "")[:200],
-                "sha256": metadata.sha256,
-                "size_bytes": len(data),
-                "storage_backend": metadata.storage_backend,
-                "storage_uri": metadata.storage_uri,
-                "compression": metadata.compression,
-                "risk_score": self._risk_score_for_artifact(at, len(data)),
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+                "storage_backend": storage_backend,
+                "storage_uri": storage_uri,
+                "compression": compression,
+                "retention_class": str(retention_class or "derived_rebuildable"),
+                "risk_score": self._risk_score_for_artifact(at, size_bytes),
                 "table": "coordinator_artifacts",
             },
         )
         return True
 
-
-    def get_artifact(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
+    def get_artifact_metadata(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()
         at = str(artifact_type or "").strip().lower()
         if not rd or not at:
             return None
         sql = """
-SELECT root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
-       storage_backend, storage_uri, media_type, compression, schema_version, retention_class, manifest_json, local_path, local_available_on_worker, updated_at_utc
+SELECT root_domain, artifact_type, source_worker, content_encoding, content_sha256, content_size_bytes,
+       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc,
+       manifest_json, retention_class, summary_match_count, summary_anomaly_count, summary_request_count
 FROM coordinator_artifacts
 WHERE root_domain = %s AND artifact_type = %s;
 """
@@ -4191,34 +4560,89 @@ WHERE root_domain = %s AND artifact_type = %s;
             conn.commit()
         if row is None:
             return None
-        content = bytes(row[3] or b"")
-        storage_backend = row[7] or "database_inline"
-        storage_uri = row[8] or ""
-        compression = row[10] or "identity"
-        if storage_uri and (not content):
-            try:
-                content = self._artifact_store.get_bytes(storage_uri, compression=compression)
-            except Exception:
-                content = b""
         return {
             "root_domain": row[0],
             "artifact_type": row[1],
             "source_worker": row[2],
-            "content": content,
+            "content_encoding": row[3],
+            "content_sha256": row[4],
+            "content_size_bytes": int(row[5] or 0),
+            "storage_backend": row[6] or "filesystem",
+            "storage_uri": row[7] or "",
+            "media_type": row[8] or "application/octet-stream",
+            "compression": row[9] or "identity",
+            "schema_version": int(row[10] or 1),
+            "updated_at_utc": row[11].isoformat() if row[11] else None,
+            "manifest": row[12] if isinstance(row[12], dict) else {},
+            "retention_class": str(row[13] or "derived_rebuildable"),
+            "summary_match_count": int(row[14] or 0),
+            "summary_anomaly_count": int(row[15] or 0),
+            "summary_request_count": int(row[16] or 0),
+        }
+
+    def get_artifact(self, root_domain: str, artifact_type: str, *, include_content: bool = True) -> Optional[dict[str, Any]]:
+        rd = str(root_domain or "").strip().lower()
+        at = str(artifact_type or "").strip().lower()
+        if not rd or not at:
+            return None
+        sql = """
+SELECT root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
+       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc,
+       manifest_json, retention_class, summary_match_count, summary_anomaly_count, summary_request_count
+FROM coordinator_artifacts
+WHERE root_domain = %s AND artifact_type = %s;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (rd, at))
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        payload = {
+            "root_domain": row[0],
+            "artifact_type": row[1],
+            "source_worker": row[2],
             "content_encoding": row[4],
             "content_sha256": row[5],
             "content_size_bytes": int(row[6] or 0),
-            "storage_backend": storage_backend,
-            "storage_uri": storage_uri,
+            "storage_backend": row[7] or "filesystem",
+            "storage_uri": row[8] or "",
             "media_type": row[9] or "application/octet-stream",
-            "compression": compression,
+            "compression": row[10] or "identity",
             "schema_version": int(row[11] or 1),
-            "retention_class": str(row[12] or "important_raw"),
+            "updated_at_utc": row[12].isoformat() if row[12] else None,
             "manifest": row[13] if isinstance(row[13], dict) else {},
-            "local_path": str(row[14] or ""),
-            "local_available_on_worker": str(row[15] or ""),
-            "updated_at_utc": row[16].isoformat() if row[16] else None,
+            "retention_class": str(row[14] or "derived_rebuildable"),
+            "summary_match_count": int(row[15] or 0),
+            "summary_anomaly_count": int(row[16] or 0),
+            "summary_request_count": int(row[17] or 0),
         }
+        if not include_content:
+            return payload
+        content = bytes(row[3] or b"")
+        if payload["storage_uri"] and (not content):
+            try:
+                content = self._artifact_store.get_bytes(payload["storage_uri"], compression=payload["compression"])
+            except Exception:
+                content = b""
+        payload["content"] = content
+        return payload
+
+    def get_artifact_stream_path(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
+        meta = self.get_artifact_metadata(root_domain, artifact_type)
+        if not meta:
+            return None
+        storage_uri = str(meta.get("storage_uri") or "").strip()
+        if not storage_uri:
+            return None
+        try:
+            path = self._artifact_store.resolve_uri(storage_uri)
+        except Exception:
+            return None
+        if not path.exists():
+            return None
+        return {"path": str(path), "compression": str(meta.get("compression") or "identity"), "metadata": meta}
 
     def list_artifacts(self, root_domain: str) -> list[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()
@@ -4226,7 +4650,8 @@ WHERE root_domain = %s AND artifact_type = %s;
             return []
         sql = """
 SELECT artifact_type, source_worker, content_encoding, content_sha256, content_size_bytes,
-       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc
+       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc,
+       manifest_json, retention_class, summary_match_count, summary_anomaly_count, summary_request_count
 FROM coordinator_artifacts
 WHERE root_domain = %s
 ORDER BY artifact_type ASC;
@@ -4245,12 +4670,17 @@ ORDER BY artifact_type ASC;
                     "content_encoding": row[2],
                     "content_sha256": row[3],
                     "content_size_bytes": int(row[4] or 0),
-                    "storage_backend": row[5] or "database_inline",
+                    "storage_backend": row[5] or "filesystem",
                     "storage_uri": row[6] or "",
                     "media_type": row[7] or "application/octet-stream",
                     "compression": row[8] or "identity",
                     "schema_version": int(row[9] or 1),
                     "updated_at_utc": row[10].isoformat() if row[10] else None,
+                    "manifest": row[11] if isinstance(row[11], dict) else {},
+                    "retention_class": str(row[12] or "derived_rebuildable"),
+                    "summary_match_count": int(row[13] or 0),
+                    "summary_anomaly_count": int(row[14] or 0),
+                    "summary_request_count": int(row[15] or 0),
                 }
             )
         return out

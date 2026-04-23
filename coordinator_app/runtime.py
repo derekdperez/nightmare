@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
 
+import httpx
 from http_client import request_json
 from nightmare_shared.config import CoordinatorSettings, atomic_write_json, load_env_file_into_os, merged_value, read_json_dict, safe_float, safe_int
 from nightmare_shared.error_reporting import report_error
@@ -161,6 +162,101 @@ class CoordinatorClient:
             max_logged_body_chars=(self.http_log_max_chars if self.http_log_max_chars > 0 else None),
             redact_authorization_header=self.http_redact_auth_header,
         )
+
+
+    def _stream_headers(self) -> dict[str, str]:
+        out = {}
+        if self.token:
+            out["Authorization"] = f"Bearer {self.token}"
+        return out
+
+    def upload_artifact_manifest(
+        self,
+        root_domain: str,
+        artifact_type: str,
+        manifest: dict[str, Any],
+        *,
+        source_worker: str,
+        content_encoding: str = "identity",
+        retention_class: str = "derived_rebuildable",
+        media_type: str = "application/octet-stream",
+    ) -> bool:
+        rsp = self._request_json(
+            "POST",
+            "/api/coord/artifact",
+            {
+                "root_domain": root_domain,
+                "artifact_type": artifact_type,
+                "source_worker": source_worker,
+                "content_encoding": content_encoding,
+                "retention_class": retention_class,
+                "media_type": media_type,
+                "manifest": dict(manifest or {}),
+            },
+        )
+        return bool(rsp.get("ok"))
+
+    def upload_artifact_from_file(
+        self,
+        root_domain: str,
+        artifact_type: str,
+        path: Path,
+        *,
+        source_worker: str,
+        content_encoding: str = "identity",
+        retention_class: str = "derived_rebuildable",
+        media_type: str = "application/octet-stream",
+    ) -> bool:
+        upload_url = f"{self.base_url}/api/coord/artifact/stream"
+        with path.open("rb") as handle:
+            with httpx.Client(timeout=self.timeout_seconds, verify=self.verify_ssl, follow_redirects=True) as client:
+                response = client.post(
+                    upload_url,
+                    headers=self._stream_headers(),
+                    params={
+                        "root_domain": root_domain,
+                        "artifact_type": artifact_type,
+                        "source_worker": source_worker,
+                        "content_encoding": content_encoding,
+                        "retention_class": retention_class,
+                        "media_type": media_type,
+                    },
+                    content=handle,
+                )
+                response.raise_for_status()
+                payload = response.json()
+        return bool(payload.get("ok"))
+
+    def download_artifact_metadata(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any]]:
+        query = urlencode({"root_domain": root_domain, "artifact_type": artifact_type, "include_content": "false"})
+        rsp = self._request_json("GET", f"/api/coord/artifact?{query}")
+        if not bool(rsp.get("found")):
+            return None
+        artifact = rsp.get("artifact")
+        return artifact if isinstance(artifact, dict) else None
+
+    def download_artifact_to_file(self, root_domain: str, artifact_type: str, target_path: Path) -> bool:
+        url = f"{self.base_url}/api/coord/artifact/stream"
+        with httpx.Client(timeout=None, verify=self.verify_ssl, follow_redirects=True) as client:
+            with client.stream(
+                "GET",
+                url,
+                headers=self._stream_headers(),
+                params={"root_domain": root_domain, "artifact_type": artifact_type},
+            ) as response:
+                if response.status_code == 404:
+                    return False
+                response.raise_for_status()
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with target_path.open("wb") as handle:
+                    for chunk in response.iter_bytes():
+                        if chunk:
+                            handle.write(chunk)
+        return True
+
+    def get_workflow_domain(self, root_domain: str) -> dict[str, Any]:
+        query = urlencode({"root_domain": root_domain})
+        return self._request_json("GET", f"/api/coord/workflow-domain?{query}")
 
     def claim_target(self, worker_id: str, lease_seconds: int) -> Optional[dict[str, Any] ]:
         rsp = self._request_json(
@@ -452,24 +548,6 @@ class CoordinatorClient:
         )
         return bool(rsp.get("ok"))
 
-    def upload_artifact_from_path(
-        self,
-        root_domain: str,
-        artifact_type: str,
-        path: Path,
-        *,
-        source_worker: str,
-        content_encoding: str = "identity",
-    ) -> bool:
-        with Path(path).open("rb") as handle:
-            return self.upload_artifact(
-                root_domain,
-                artifact_type,
-                handle.read(),
-                source_worker=source_worker,
-                content_encoding=content_encoding,
-            )
-
     def download_artifact(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any] ]:
         query = urlencode({"root_domain": root_domain, "artifact_type": artifact_type})
         rsp = self._request_json("GET", f"/api/coord/artifact?{query}")
@@ -494,11 +572,6 @@ class CoordinatorClient:
     def get_workflow_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         query = urlencode({"limit": max(1, int(limit or 1))})
         return self._request_json("GET", f"/api/coord/workflow-snapshot?{query}")
-
-    def get_workflow_domain(self, root_domain: str) -> dict[str, Any]:
-        safe_domain = str(root_domain or "").strip().lower()
-        query = urlencode({"root_domain": safe_domain})
-        return self._request_json("GET", f"/api/coord/workflow-domain?{query}")
 
     def claim_worker_command(self, worker_id: str, *, worker_state: str = "idle") -> Optional[dict[str, Any]]:
         rsp = self._request_json(

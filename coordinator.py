@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 import zipfile
 from pathlib import Path
@@ -501,8 +502,6 @@ class DistributedCoordinator:
             return 0
         try:
             snapshot = self.client.get_workflow_domain(safe_domain)
-            domain_payload = snapshot.get("domain") if isinstance(snapshot, dict) else None
-            rows = [domain_payload] if isinstance(domain_payload, dict) and domain_payload else []
         except Exception as exc:
             self.logger.error(
                 "workflow_domain_snapshot_refresh_failed",
@@ -518,29 +517,25 @@ class DistributedCoordinator:
                 mark_errored=False,
             )
             return 0
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("root_domain", "") or "").strip().lower() != safe_domain:
-                continue
-            try:
-                return self._schedule_domain_workflows(row, worker_id=worker_id)
-            except Exception as exc:
-                self.logger.error(
-                    "workflow_domain_reschedule_failed",
-                    worker_id=worker_id,
-                    root_domain=safe_domain,
-                    error=str(exc),
-                )
-                self._record_worker_error(
-                    worker_id=worker_id,
-                    description=f"Failed to schedule downstream workflow tasks for {safe_domain}",
-                    exception=exc,
-                    metadata={"root_domain": safe_domain, "source": "_refresh_domain_workflow_schedule"},
-                    mark_errored=False,
-                )
-                return 0
-        return 0
+        if not bool(snapshot.get("found")):
+            return 0
+        try:
+            return self._schedule_domain_workflows(snapshot, worker_id=worker_id)
+        except Exception as exc:
+            self.logger.error(
+                "workflow_domain_reschedule_failed",
+                worker_id=worker_id,
+                root_domain=safe_domain,
+                error=str(exc),
+            )
+            self._record_worker_error(
+                worker_id=worker_id,
+                description=f"Failed to schedule downstream workflow tasks for {safe_domain}",
+                exception=exc,
+                metadata={"root_domain": safe_domain, "source": "_refresh_domain_workflow_schedule"},
+                mark_errored=False,
+            )
+            return 0
 
     def _poll_worker_commands(self, worker_id: str) -> str:
         state = self._get_worker_state(worker_id)
@@ -979,23 +974,43 @@ class DistributedCoordinator:
                 artifact_path=str(path),
             )
             return
-        size_bytes = int(path.stat().st_size if path.exists() else 0)
         self.logger.info(
             "artifact_file_upload_start",
             root_domain=root_domain,
             worker_id=worker_id,
             artifact_type=artifact_type,
             artifact_path=str(path),
-            bytes=size_bytes,
+            bytes=path.stat().st_size,
         )
-        self.client.upload_artifact_from_path(root_domain, artifact_type, path, source_worker=worker_id)
+        manifest = {
+            "local_path": str(path),
+            "size_bytes": int(path.stat().st_size),
+            "mtime_ns": int(path.stat().st_mtime_ns),
+        }
+        self.client.upload_artifact_from_file(
+            root_domain,
+            artifact_type,
+            path,
+            source_worker=worker_id,
+            content_encoding="identity",
+            retention_class="derived_rebuildable",
+            media_type="application/octet-stream",
+        )
+        self.client.upload_artifact_manifest(
+            root_domain,
+            f"{artifact_type}_manifest",
+            manifest,
+            source_worker=worker_id,
+            media_type="application/json",
+            retention_class="summary_index",
+        )
         self.logger.info(
             "artifact_file_upload_complete",
             root_domain=root_domain,
             worker_id=worker_id,
             artifact_type=artifact_type,
             artifact_path=str(path),
-            bytes=size_bytes,
+            bytes=path.stat().st_size,
         )
 
     def _upload_zip_artifact(self, root_domain: str, artifact_type: str, path: Path, worker_id: str) -> None:
@@ -1008,29 +1023,56 @@ class DistributedCoordinator:
                 source_path=str(path),
             )
             return
-        self.logger.info(
-            "artifact_zip_upload_start",
-            root_domain=root_domain,
-            worker_id=worker_id,
-            artifact_type=artifact_type,
-            source_path=str(path),
-        )
-        payload = _zip_directory_bytes(path)
-        self.client.upload_artifact(
+        shard_manifest = {"files": []}
+        for file_path in sorted(path.rglob("*")):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(path).as_posix()
+            size = int(file_path.stat().st_size)
+            shard_manifest["files"].append({"path": rel, "size_bytes": size, "mtime_ns": int(file_path.stat().st_mtime_ns)})
+        self.client.upload_artifact_manifest(
             root_domain,
-            artifact_type,
-            payload,
+            f"{artifact_type}_manifest",
+            {
+                "format": "directory_manifest",
+                "root": str(path),
+                "file_count": len(shard_manifest["files"]),
+                "files": shard_manifest["files"],
+            },
             source_worker=worker_id,
-            content_encoding="zip",
+            media_type="application/json",
+            retention_class="summary_index",
         )
-        self.logger.info(
-            "artifact_zip_upload_complete",
-            root_domain=root_domain,
-            worker_id=worker_id,
-            artifact_type=artifact_type,
-            source_path=str(path),
-            bytes=len(payload),
-        )
+        with tempfile.NamedTemporaryFile(prefix="artifact-", suffix=".zip", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                for file_path in sorted(path.rglob("*")):
+                    if file_path.is_file():
+                        zf.write(file_path, arcname=file_path.relative_to(path).as_posix())
+            self.client.upload_artifact_from_file(
+                root_domain,
+                artifact_type,
+                tmp_path,
+                source_worker=worker_id,
+                content_encoding="zip",
+                retention_class="derived_rebuildable",
+                media_type="application/zip",
+            )
+            self.logger.info(
+                "artifact_zip_upload_complete",
+                root_domain=root_domain,
+                worker_id=worker_id,
+                artifact_type=artifact_type,
+                source_path=str(path),
+                bytes=tmp_path.stat().st_size,
+                file_count=len(shard_manifest["files"]),
+            )
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _download_file_artifact(self, root_domain: str, artifact_type: str, path: Path) -> bool:
         self.logger.info(
@@ -1039,8 +1081,8 @@ class DistributedCoordinator:
             artifact_type=artifact_type,
             target_path=str(path),
         )
-        artifact = self.client.download_artifact(root_domain, artifact_type)
-        if artifact is None:
+        ok = self.client.download_artifact_to_file(root_domain, artifact_type, path)
+        if not ok:
             self.logger.warning(
                 "artifact_file_download_missing",
                 root_domain=root_domain,
@@ -1048,15 +1090,12 @@ class DistributedCoordinator:
                 target_path=str(path),
             )
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = bytes(artifact["content"])
-        path.write_bytes(content)
         self.logger.info(
             "artifact_file_download_complete",
             root_domain=root_domain,
             artifact_type=artifact_type,
             target_path=str(path),
-            bytes=len(content),
+            bytes=path.stat().st_size if path.exists() else 0,
         )
         return True
 
@@ -1067,25 +1106,34 @@ class DistributedCoordinator:
             artifact_type=artifact_type,
             target_dir=str(target_dir),
         )
-        artifact = self.client.download_artifact(root_domain, artifact_type)
-        if artifact is None:
-            self.logger.warning(
-                "artifact_zip_download_missing",
+        with tempfile.NamedTemporaryFile(prefix="artifact-", suffix=".zip", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            ok = self.client.download_artifact_to_file(root_domain, artifact_type, tmp_path)
+            if not ok:
+                self.logger.warning(
+                    "artifact_zip_download_missing",
+                    root_domain=root_domain,
+                    artifact_type=artifact_type,
+                    target_dir=str(target_dir),
+                )
+                return False
+            target_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(tmp_path, mode="r") as zf:
+                zf.extractall(target_dir)
+            self.logger.info(
+                "artifact_zip_download_complete",
                 root_domain=root_domain,
                 artifact_type=artifact_type,
                 target_dir=str(target_dir),
+                bytes=tmp_path.stat().st_size,
             )
-            return False
-        content = bytes(artifact["content"])
-        _unzip_bytes_to_directory(content, target_dir)
-        self.logger.info(
-            "artifact_zip_download_complete",
-            root_domain=root_domain,
-            artifact_type=artifact_type,
-            target_dir=str(target_dir),
-            bytes=len(content),
-        )
-        return True
+            return True
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     @staticmethod
     def _recon_progress_artifact_type(plugin_name: str) -> str:
