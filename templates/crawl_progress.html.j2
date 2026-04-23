@@ -36,7 +36,7 @@
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="filter" type="text" placeholder="Filter domain...">
     <input id="limit" type="number" min="1" max="2000" value="2000" style="max-width: 120px;" title="Max domains">
-    <button class="primary" onclick="refresh()">Refresh</button>
+    <button class="primary" onclick="refresh({ forceRefresh: true })">Refresh</button>
     <span id="msg" class="muted"></span>
   </div>
 
@@ -157,8 +157,11 @@
       const ss = String(est.getUTCSeconds()).padStart(2, "0");
       return `${hh}:${mm}:${ss}`;
     }
-    async function apiGet(path) {
-      const rsp = await fetch(path, { cache: "no-store", headers: authHeaders() });
+    async function apiGet(path, options) {
+      const cacheMode = String(options?.cacheMode || "prefer").toLowerCase() === "refresh" ? "refresh" : "prefer";
+      const separator = path.includes("?") ? "&" : "?";
+      const url = `${path}${separator}cache_mode=${encodeURIComponent(cacheMode)}`;
+      const rsp = await fetch(url, { cache: "no-store", headers: authHeaders() });
       if (!rsp.ok) throw new Error(await rsp.text());
       return rsp.json();
     }
@@ -235,6 +238,7 @@
       const limitInput = document.getElementById("limit");
       const limitValue = Math.max(1, Number(limitInput.value || 2000));
       const useCacheFirst = Boolean(options && options.useCacheFirst);
+      const forceRefresh = Boolean(options && options.forceRefresh);
       let showedCached = false;
       if (useCacheFirst) {
         const cached = loadCachedCrawlProgress(limitValue);
@@ -247,7 +251,10 @@
       }
       if (!showedCached) msg.textContent = "Loading...";
       try {
-        const payload = await apiGet(`/api/coord/crawl-progress?limit=${encodeURIComponent(limitValue)}`);
+        const payload = await apiGet(
+          `/api/coord/crawl-progress?limit=${encodeURIComponent(limitValue)}`,
+          { cacheMode: forceRefresh ? "refresh" : "prefer" }
+        );
         renderCards(payload);
         renderRows(payload);
         saveCachedCrawlProgress(limitValue, payload);
@@ -268,7 +275,7 @@
     document.getElementById("filter").addEventListener("input", refresh);
     document.getElementById("limit").addEventListener("change", refresh);
     refresh({ useCacheFirst: true });
-    setInterval(() => refresh(), 3000);
+    setInterval(() => refresh({ forceRefresh: true }), 3000);
   </script>
 </body>
 </html>

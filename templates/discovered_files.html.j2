@@ -39,7 +39,7 @@
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="searchText" type="text" placeholder="Search artifacts and high value files">
     <input id="limit" type="number" min="1" max="50000" value="5000" style="max-width: 120px;" title="Max rows">
-    <button class="primary" onclick="refreshPage()">Refresh</button>
+    <button class="primary" onclick="refreshPage({ forceRefresh: true })">Refresh</button>
     <span id="msg" class="muted"></span>
   </div>
 
@@ -87,6 +87,7 @@
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
     const ARTIFACT_PAGE_KEY = "discovered_files_artifacts_table_v1";
     const HIGH_VALUE_PAGE_KEY = "discovered_files_high_value_table_v1";
+    let refreshRequestSeq = 0;
     let artifactGridCtrl = null;
     let highValueGridCtrl = null;
     let artifactRowsCache = [];
@@ -222,33 +223,49 @@
       renderCards();
       bindGridControls();
     }
-    async function refreshPage() {
+    async function refreshPage(options) {
+      const requestSeq = ++refreshRequestSeq;
+      const useCacheFirst = Boolean(options && options.useCacheFirst);
+      const forceRefresh = Boolean(options && options.forceRefresh);
+      const quiet = Boolean(options && options.quiet);
       const msg = document.getElementById("msg");
-      msg.textContent = "Loading…";
+      if (!quiet) msg.textContent = useCacheFirst ? "Loading cached data..." : "Loading...";
       const limit = Math.max(1, Math.min(50000, Number(document.getElementById("limit").value || 5000)));
       const q = document.getElementById("searchText").value.trim();
+      const cacheMode = forceRefresh ? "refresh" : "prefer";
+      const cacheModeParam = `cache_mode=${encodeURIComponent(cacheMode)}`;
       const headers = authHeaders();
       const [artifactRsp, highValueRsp] = await Promise.all([
-        fetch(`/api/coord/discovered-files?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`, { cache: "no-store", headers }),
-        fetch(`/api/coord/high-value-files?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`, { cache: "no-store", headers })
+        fetch(`/api/coord/discovered-files?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}&${cacheModeParam}`, { cache: "no-store", headers }),
+        fetch(`/api/coord/high-value-files?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}&${cacheModeParam}`, { cache: "no-store", headers })
       ]);
       if (!artifactRsp.ok) throw new Error(await artifactRsp.text());
       if (!highValueRsp.ok) throw new Error(await highValueRsp.text());
       const artifactPayload = await artifactRsp.json();
       const highValuePayload = await highValueRsp.json();
+      if (requestSeq !== refreshRequestSeq) return;
       renderArtifacts(getRows(artifactPayload));
       renderHighValue(getRows(highValuePayload));
+      const artifactSource = String((artifactPayload.page_cache || {}).source || "");
+      const highValueSource = String((highValuePayload.page_cache || {}).source || "");
+      if (useCacheFirst && !forceRefresh && (artifactSource === "cache" || highValueSource === "cache")) {
+        msg.textContent = `Loaded cached data. Refreshing from source...`;
+        setTimeout(() => {
+          refreshPage({ forceRefresh: true, quiet: true }).catch(() => {});
+        }, 0);
+        return;
+      }
       msg.textContent = `Loaded ${artifactRowsCache.length} artifacts and ${highValueRowsCache.length} high value items.`;
     }
     function hydrateTokenFromCookie() {
       const token = readCookie(TOKEN_COOKIE_NAME);
       if (token) document.getElementById("token").value = token;
     }
-    document.getElementById("token").addEventListener("change", refreshPage);
-    document.getElementById("searchText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") refreshPage(); });
-    document.getElementById("limit").addEventListener("change", refreshPage);
+    document.getElementById("token").addEventListener("change", () => refreshPage({ forceRefresh: true }));
+    document.getElementById("searchText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") refreshPage({ forceRefresh: true }); });
+    document.getElementById("limit").addEventListener("change", () => refreshPage({ forceRefresh: true }));
     hydrateTokenFromCookie();
-    refreshPage().catch((err) => {
+    refreshPage({ useCacheFirst: true }).catch((err) => {
       document.getElementById("msg").textContent = `Error: ${err.message || err}`;
       document.getElementById("artifactRows").innerHTML = `<tr><td colspan="6">${esc(err.message || err)}</td></tr>`;
       document.getElementById("highValueRows").innerHTML = `<tr><td colspan="5">${esc(err.message || err)}</td></tr>`;
@@ -256,3 +273,4 @@
   </script>
 </body>
 </html>
+

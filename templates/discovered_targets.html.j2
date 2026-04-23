@@ -173,6 +173,8 @@
       sitemapSearch: "",
       sitemapSubdomain: "",
       sitemapSubdomains: [],
+      domainBackgroundRefreshPending: false,
+      sitemapBackgroundRefreshPending: false,
     };
 
     const activeControllers = new Map();
@@ -242,13 +244,16 @@
       if (isBusy) root.classList.add("active"); else root.classList.remove("active");
       label.textContent = String(text || "");
     }
-    async function fetchJson(path, requestKey) {
+    async function fetchJson(path, requestKey, options) {
+      const cacheMode = String(options?.cacheMode || "prefer").toLowerCase() === "refresh" ? "refresh" : "prefer";
       const previous = activeControllers.get(requestKey);
       if (previous) previous.abort();
       const controller = new AbortController();
       activeControllers.set(requestKey, controller);
       try {
-        const rsp = await fetch(path, { cache: "no-store", headers: authHeaders(), signal: controller.signal });
+        const separator = path.includes("?") ? "&" : "?";
+        const url = `${path}${separator}cache_mode=${encodeURIComponent(cacheMode)}`;
+        const rsp = await fetch(url, { cache: "no-store", headers: authHeaders(), signal: controller.signal });
         const payload = await rsp.json().catch(() => ({}));
         if (!rsp.ok) {
           const message = String(payload.error || `HTTP ${rsp.status}`);
@@ -450,6 +455,7 @@
 
     async function loadDomains(options) {
       const useCacheFirst = Boolean(options && options.useCacheFirst);
+      const forceRefresh = Boolean(options && options.forceRefresh);
       const q = document.getElementById("domainSearch").value.trim();
       state.domainSortKey = document.getElementById("domainSortKey").value;
       state.domainSortDir = document.getElementById("domainSortDir").value;
@@ -473,7 +479,11 @@
       }
       if (!renderedCached) setBusy("domains", true, "Loading domains...");
       try {
-        const payload = await fetchJson(`/api/coord/discovered-targets?${params.toString()}`, "domains");
+        const payload = await fetchJson(
+          `/api/coord/discovered-targets?${params.toString()}`,
+          "domains",
+          { cacheMode: forceRefresh ? "refresh" : "prefer" }
+        );
         cacheSet(cacheKey, payload);
         renderDomains(payload);
         if (!state.selectedDomain && state.domains.length) {
@@ -485,6 +495,17 @@
           loadSitemap({ useCacheFirst: true }).catch((err) => {
             setBusy("sitemap", false, `Failed to load URLs: ${err.message || err}`);
           });
+        }
+        const source = String((payload?.page_cache || {}).source || "");
+        if (useCacheFirst && !forceRefresh && source === "cache" && !state.domainBackgroundRefreshPending) {
+          state.domainBackgroundRefreshPending = true;
+          setTimeout(() => {
+            loadDomains({ useCacheFirst: false, forceRefresh: true })
+              .catch(() => {})
+              .finally(() => {
+                state.domainBackgroundRefreshPending = false;
+              });
+          }, 0);
         }
       } catch (err) {
         if (!renderedCached) {
@@ -503,6 +524,7 @@
         return;
       }
       const useCacheFirst = Boolean(options && options.useCacheFirst);
+      const forceRefresh = Boolean(options && options.forceRefresh);
       state.sitemapSearch = document.getElementById("sitemapSearch").value.trim();
       state.sitemapSubdomain = document.getElementById("sitemapSubdomain").value;
       state.sitemapLimit = Math.max(20, Math.min(1000, Number(document.getElementById("sitemapPageSize").value || 200)));
@@ -532,10 +554,25 @@
       if (!renderedCached) setBusy("sitemap", true, `Loading URLs for ${state.selectedDomain}...`);
 
       try {
-        const payload = await fetchJson(`/api/coord/discovered-target-sitemap?${params.toString()}`, "sitemap");
+        const payload = await fetchJson(
+          `/api/coord/discovered-target-sitemap?${params.toString()}`,
+          "sitemap",
+          { cacheMode: forceRefresh ? "refresh" : "prefer" }
+        );
         cacheSet(cacheKey, payload);
         renderSitemap(payload);
         setBusy("sitemap", false, `Loaded ${state.sitemapRows.length} URL rows.`);
+        const source = String((payload?.page_cache || {}).source || "");
+        if (useCacheFirst && !forceRefresh && source === "cache" && !state.sitemapBackgroundRefreshPending) {
+          state.sitemapBackgroundRefreshPending = true;
+          setTimeout(() => {
+            loadSitemap({ useCacheFirst: false, forceRefresh: true })
+              .catch(() => {})
+              .finally(() => {
+                state.sitemapBackgroundRefreshPending = false;
+              });
+          }, 0);
+        }
       } catch (err) {
         if (!renderedCached) {
           document.getElementById("sitemapRows").innerHTML = `<tr><td colspan="12">${esc(err.message || err)}</td></tr>`;
@@ -555,11 +592,11 @@
     function bindEvents() {
       document.getElementById("refreshDomainsBtn").addEventListener("click", () => {
         state.domainOffset = 0;
-        loadDomains({ useCacheFirst: false });
+        loadDomains({ useCacheFirst: false, forceRefresh: true });
       });
       document.getElementById("refreshSitemapBtn").addEventListener("click", () => {
         state.sitemapOffset = 0;
-        loadSitemap({ useCacheFirst: false });
+        loadSitemap({ useCacheFirst: false, forceRefresh: true });
       });
       document.getElementById("domainsPrevBtn").addEventListener("click", () => {
         state.domainOffset = Math.max(0, state.domainOffset - state.domainLimit);
@@ -621,7 +658,7 @@
       document.getElementById("token").addEventListener("change", () => {
         state.domainOffset = 0;
         state.sitemapOffset = 0;
-        loadDomains({ useCacheFirst: false });
+        loadDomains({ useCacheFirst: false, forceRefresh: true });
       });
     }
 
@@ -631,9 +668,9 @@
       bindEvents();
       loadDomains({ useCacheFirst: true });
       setInterval(() => {
-        loadDomains({ useCacheFirst: true });
+        loadDomains({ useCacheFirst: true, forceRefresh: true });
         if (state.selectedDomain) {
-          loadSitemap({ useCacheFirst: true });
+          loadSitemap({ useCacheFirst: true, forceRefresh: true });
         }
       }, 20000);
     }

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import glob
 import html
 import io
@@ -47,7 +48,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from output_cleanup import clear_output_root_children
@@ -92,6 +93,13 @@ MAX_VIEW_LOG_LINES = 2000
 MAX_VIEW_LOG_FILE_SOURCES = 1000
 MAX_LOG_DOWNLOAD_BYTES = 25 * 1024 * 1024
 VIEW_LOG_SOURCES_CACHE_TTL_SECONDS = 30
+PAGE_DATA_CACHE_TTL_SECONDS = 30
+PAGE_DATA_CACHE_MAX_ENTRIES = 512
+PAGE_CACHE_WARM_INTERVAL_SECONDS = 20
+CRAWL_PROGRESS_PAGE_CACHE_TTL_SECONDS = 8
+DISCOVERED_TARGETS_PAGE_CACHE_TTL_SECONDS = 30
+DISCOVERED_TARGET_SITEMAP_PAGE_CACHE_TTL_SECONDS = 45
+DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS = 45
 EST_TZ = timezone(timedelta(hours=-5), name="EST")
 WORKFLOW_FILE_SUFFIX = ".workflow.json"
 WORKFLOW_FILE_GLOB = f"*{WORKFLOW_FILE_SUFFIX}"
@@ -2974,6 +2982,356 @@ def _apply_discovered_target_sitemap_query(
     }
 
 
+def _normalize_page_cache_mode(raw: Any) -> str:
+    mode = str(raw or "").strip().lower()
+    if mode in {"refresh", "live", "bypass", "force"}:
+        return "refresh"
+    return "prefer"
+
+
+def _build_page_cache_key(page_name: str, key_parts: dict[str, Any]) -> str:
+    safe_name = str(page_name or "").strip().lower() or "page"
+    try:
+        normalized = json.dumps(key_parts, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        normalized = str(key_parts)
+    return f"{safe_name}:{normalized}"
+
+
+def _iso_from_epoch(epoch_seconds: Any) -> str | None:
+    try:
+        value = float(epoch_seconds or 0.0)
+    except Exception:
+        value = 0.0
+    if value <= 0.0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _attach_page_cache_metadata(
+    payload: dict[str, Any],
+    *,
+    page_name: str,
+    cache_key: str,
+    cache_mode: str,
+    source: str,
+    stale: bool,
+    cached_at_epoch: float,
+    expires_at_epoch: float,
+    error_message: str = "",
+) -> dict[str, Any]:
+    out = dict(payload) if isinstance(payload, dict) else {}
+    out["page_cache"] = {
+        "page": str(page_name or "").strip().lower(),
+        "key": str(cache_key or ""),
+        "mode": str(cache_mode or "prefer"),
+        "source": str(source or "live"),
+        "stale": bool(stale),
+        "cached_at_utc": _iso_from_epoch(cached_at_epoch),
+        "expires_at_utc": _iso_from_epoch(expires_at_epoch),
+        "error": str(error_message or ""),
+    }
+    return out
+
+
+class _PageDataCache:
+    def __init__(self, *, max_entries: int = PAGE_DATA_CACHE_MAX_ENTRIES, ttl_seconds: int = PAGE_DATA_CACHE_TTL_SECONDS):
+        self._max_entries = max(64, int(max_entries or PAGE_DATA_CACHE_MAX_ENTRIES))
+        self._ttl_seconds = max(1, int(ttl_seconds or PAGE_DATA_CACHE_TTL_SECONDS))
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def _prune_locked(self, now: float) -> None:
+        stale_keys = [
+            key
+            for key, entry in self._entries.items()
+            if now >= float(entry.get("expires_at_epoch", 0.0) or 0.0)
+        ]
+        for key in stale_keys:
+            self._entries.pop(key, None)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+    def get(self, key: str, *, allow_stale: bool = False) -> Optional[dict[str, Any]]:
+        safe_key = str(key or "").strip()
+        if not safe_key:
+            return None
+        now = time.time()
+        with self._lock:
+            entry = self._entries.get(safe_key)
+            if entry is None:
+                return None
+            expires_at = float(entry.get("expires_at_epoch", 0.0) or 0.0)
+            stale = now >= expires_at
+            if stale and not allow_stale:
+                self._entries.pop(safe_key, None)
+                return None
+            self._entries.move_to_end(safe_key)
+            return {
+                "key": safe_key,
+                "payload": copy.deepcopy(entry.get("payload", {})),
+                "cached_at_epoch": float(entry.get("cached_at_epoch", 0.0) or 0.0),
+                "expires_at_epoch": expires_at,
+                "stale": stale,
+            }
+
+    def set(self, key: str, payload: dict[str, Any], *, ttl_seconds: Optional[int] = None) -> dict[str, Any]:
+        safe_key = str(key or "").strip()
+        if not safe_key:
+            return {"key": "", "payload": {}, "cached_at_epoch": 0.0, "expires_at_epoch": 0.0, "stale": False}
+        now = time.time()
+        ttl = max(1, int(ttl_seconds or self._ttl_seconds))
+        entry = {
+            "payload": copy.deepcopy(payload if isinstance(payload, dict) else {}),
+            "cached_at_epoch": now,
+            "expires_at_epoch": now + ttl,
+        }
+        with self._lock:
+            self._entries[safe_key] = entry
+            self._entries.move_to_end(safe_key)
+            self._prune_locked(now)
+        return {
+            "key": safe_key,
+            "payload": copy.deepcopy(entry.get("payload", {})),
+            "cached_at_epoch": float(entry.get("cached_at_epoch", 0.0) or 0.0),
+            "expires_at_epoch": float(entry.get("expires_at_epoch", 0.0) or 0.0),
+            "stale": False,
+        }
+
+
+def _build_crawl_progress_payload(store: CoordinatorStore, *, limit: int) -> dict[str, Any]:
+    payload = store.crawl_progress_snapshot(limit=limit)
+    if isinstance(payload, dict):
+        return payload
+    return {"generated_at_utc": _iso_now(), "counts": {}, "domains": []}
+
+
+def _build_discovered_target_domains_payload(
+    store: CoordinatorStore,
+    *,
+    limit: int,
+    offset: int,
+    search_text: str,
+    sort_key: str,
+    sort_dir: str,
+) -> dict[str, Any]:
+    fetch_limit = max(limit + offset, limit)
+    rows = store.list_discovered_target_domains(limit=min(20000, fetch_limit), q=search_text)
+    query_result = _apply_discovered_target_domain_query(
+        rows,
+        search_text=search_text,
+        sort_key=sort_key,
+        sort_dir=sort_dir,
+        offset=offset,
+        limit=limit,
+    )
+    page_rows = query_result.get("rows", [])
+    return {
+        "generated_at_utc": _iso_now(),
+        "rows": page_rows,
+        "domains": page_rows,
+        "total_domains": int(query_result.get("total_rows", 0) or 0),
+        "offset": int(query_result.get("offset", 0) or 0),
+        "limit": int(query_result.get("limit", limit) or limit),
+        "next_offset": query_result.get("next_offset"),
+        "prev_offset": query_result.get("prev_offset"),
+        "has_more": bool(query_result.get("has_more", False)),
+        "sort_key": str(query_result.get("sort_key", "saved_at_utc") or "saved_at_utc"),
+        "sort_dir": str(query_result.get("sort_dir", "desc") or "desc"),
+        "search": search_text,
+    }
+
+
+def _build_discovered_target_sitemap_payload(
+    store: CoordinatorStore,
+    *,
+    root_domain: str,
+    limit: int,
+    offset: int,
+    search_text: str,
+    subdomain: str,
+    sort_key: str,
+    sort_dir: str,
+    include_details: bool,
+) -> dict[str, Any]:
+    sitemap = store.get_discovered_target_sitemap(root_domain)
+    pages: list[dict[str, Any]]
+    if isinstance(sitemap, dict):
+        pages = sitemap.get("pages", []) if isinstance(sitemap.get("pages"), list) else []
+        sitemap_payload = sitemap
+    else:
+        pages = sitemap if isinstance(sitemap, list) else []
+        sitemap_payload = {
+            "root_domain": root_domain,
+            "start_url": "",
+            "page_count": len(pages),
+            "pages": pages,
+        }
+    query_result = _apply_discovered_target_sitemap_query(
+        pages,
+        root_domain=root_domain,
+        search_text=search_text,
+        subdomain=subdomain,
+        sort_key=sort_key,
+        sort_dir=sort_dir,
+        offset=offset,
+        limit=limit,
+    )
+    page_rows = query_result.get("rows", [])
+    if include_details and page_rows:
+        try:
+            page_rows = store.enrich_discovered_target_sitemap_rows(
+                root_domain=root_domain,
+                rows=list(page_rows),
+            )
+        except Exception:
+            pass
+    return {
+        "generated_at_utc": _iso_now(),
+        "root_domain": root_domain,
+        "rows": page_rows,
+        "pages": page_rows,
+        "all_rows_count": len(pages),
+        "total_rows": int(query_result.get("total_rows", 0) or 0),
+        "offset": int(query_result.get("offset", 0) or 0),
+        "limit": int(query_result.get("limit", limit) or limit),
+        "next_offset": query_result.get("next_offset"),
+        "prev_offset": query_result.get("prev_offset"),
+        "has_more": bool(query_result.get("has_more", False)),
+        "sort_key": str(query_result.get("sort_key", DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY) or DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY),
+        "sort_dir": str(query_result.get("sort_dir", "asc") or "asc"),
+        "subdomains": query_result.get("subdomains", []),
+        "search": search_text,
+        "subdomain": subdomain,
+        "include_details": include_details,
+        "sitemap": sitemap_payload,
+    }
+
+
+def _filter_discovered_rows_by_text(
+    rows: list[dict[str, Any]],
+    *,
+    search_text: str,
+    keys: list[str],
+) -> list[dict[str, Any]]:
+    q = str(search_text or "").strip().lower()
+    if not q:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        blob = " ".join(str(row.get(key) or "") for key in keys).lower()
+        if q in blob:
+            out.append(row)
+    return out
+
+
+def _build_discovered_files_payload(store: CoordinatorStore, *, limit: int, search_text: str) -> dict[str, Any]:
+    rows = store.list_discovered_files(limit=limit)
+    rows = _filter_discovered_rows_by_text(
+        rows,
+        search_text=search_text,
+        keys=["root_domain", "source_url", "artifact_type"],
+    )
+    return {"generated_at_utc": _iso_now(), "rows": rows, "files": rows}
+
+
+def _build_high_value_files_payload(store: CoordinatorStore, *, limit: int, search_text: str) -> dict[str, Any]:
+    rows = store.list_high_value_files(limit=limit)
+    rows = _filter_discovered_rows_by_text(
+        rows,
+        search_text=search_text,
+        keys=["root_domain", "source_url", "saved_relative"],
+    )
+    return {"generated_at_utc": _iso_now(), "rows": rows, "files": rows}
+
+
+def _start_default_page_cache_warmer(server: ThreadingHTTPServer, *, coordinator_store: CoordinatorStore | None) -> None:
+    if coordinator_store is None:
+        return
+    cache = getattr(server, "page_data_cache", None)
+    if cache is None:
+        return
+    stop_event = threading.Event()
+    server.page_cache_warm_stop = stop_event  # type: ignore[attr-defined]
+
+    def _warm_defaults_once() -> None:
+        crawl_key = _build_page_cache_key("crawl_progress", {"limit": 2000})
+        crawl_payload = _build_crawl_progress_payload(coordinator_store, limit=2000)
+        cache.set(crawl_key, crawl_payload, ttl_seconds=CRAWL_PROGRESS_PAGE_CACHE_TTL_SECONDS)
+
+        domain_defaults = {
+            "q": "",
+            "offset": 0,
+            "limit": 100,
+            "sort_key": "saved_at_utc",
+            "sort_dir": "desc",
+        }
+        discovered_targets_key = _build_page_cache_key("discovered_targets", domain_defaults)
+        discovered_targets_payload = _build_discovered_target_domains_payload(
+            coordinator_store,
+            limit=100,
+            offset=0,
+            search_text="",
+            sort_key="saved_at_utc",
+            sort_dir="desc",
+        )
+        cache.set(discovered_targets_key, discovered_targets_payload, ttl_seconds=DISCOVERED_TARGETS_PAGE_CACHE_TTL_SECONDS)
+
+        files_defaults = {"limit": 5000, "q": ""}
+        discovered_files_key = _build_page_cache_key("discovered_files", files_defaults)
+        discovered_files_payload = _build_discovered_files_payload(coordinator_store, limit=5000, search_text="")
+        cache.set(discovered_files_key, discovered_files_payload, ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS)
+
+        high_value_files_key = _build_page_cache_key("high_value_files", files_defaults)
+        high_value_files_payload = _build_high_value_files_payload(coordinator_store, limit=5000, search_text="")
+        cache.set(high_value_files_key, high_value_files_payload, ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS)
+
+        warmed_domains = discovered_targets_payload.get("rows", []) if isinstance(discovered_targets_payload, dict) else []
+        if isinstance(warmed_domains, list):
+            for row in warmed_domains[:3]:
+                root_domain = str((row or {}).get("root_domain", "") or "").strip().lower()
+                if not root_domain:
+                    continue
+                sitemap_defaults = {
+                    "root_domain": root_domain,
+                    "q": "",
+                    "subdomain": "",
+                    "offset": 0,
+                    "limit": 200,
+                    "sort_key": DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY,
+                    "sort_dir": "asc",
+                    "include_details": True,
+                }
+                sitemap_key = _build_page_cache_key("discovered_target_sitemap", sitemap_defaults)
+                sitemap_payload = _build_discovered_target_sitemap_payload(
+                    coordinator_store,
+                    root_domain=root_domain,
+                    limit=200,
+                    offset=0,
+                    search_text="",
+                    subdomain="",
+                    sort_key=DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY,
+                    sort_dir="asc",
+                    include_details=True,
+                )
+                cache.set(sitemap_key, sitemap_payload, ttl_seconds=DISCOVERED_TARGET_SITEMAP_PAGE_CACHE_TTL_SECONDS)
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            try:
+                _warm_defaults_once()
+            except Exception:
+                # Keep periodic warming best-effort and non-fatal.
+                pass
+            if stop_event.wait(max(5, int(PAGE_CACHE_WARM_INTERVAL_SECONDS or 20))):
+                break
+
+    threading.Thread(target=_loop, daemon=True, name="nightmare-page-cache-warmer").start()
+
+
 def _count_matches_in_zip_bytes(data: bytes) -> int:
     stats = _extractor_match_stats_from_zip_bytes(data)
     return int(stats.get("match_count", 0) or 0)
@@ -3111,6 +3469,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return getattr(self.server, "fuzzing_zip_index_cache")  # type: ignore[attr-defined]
 
     @property
+    def page_data_cache(self) -> _PageDataCache:
+        return getattr(self.server, "page_data_cache")  # type: ignore[attr-defined]
+
+    @property
     def coordinator_token(self) -> str:
         return str(getattr(self.server, "coordinator_token", "") or "")  # type: ignore[attr-defined]
 
@@ -3163,6 +3525,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _resolve_cached_page_payload(
+        self,
+        *,
+        page_name: str,
+        key_parts: dict[str, Any],
+        ttl_seconds: int,
+        cache_mode: str,
+        loader: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        mode = _normalize_page_cache_mode(cache_mode)
+        cache_key = _build_page_cache_key(page_name, key_parts)
+        if mode == "prefer":
+            cached = self.page_data_cache.get(cache_key)
+            if cached is not None:
+                return _attach_page_cache_metadata(
+                    cached.get("payload", {}),
+                    page_name=page_name,
+                    cache_key=cache_key,
+                    cache_mode=mode,
+                    source="cache",
+                    stale=bool(cached.get("stale", False)),
+                    cached_at_epoch=float(cached.get("cached_at_epoch", 0.0) or 0.0),
+                    expires_at_epoch=float(cached.get("expires_at_epoch", 0.0) or 0.0),
+                )
+        try:
+            live_payload = loader()
+        except Exception as exc:
+            stale = self.page_data_cache.get(cache_key, allow_stale=True)
+            if stale is None:
+                raise
+            self.log_message(
+                "page cache fallback for %s (mode=%s): %r",
+                str(page_name or "").strip().lower(),
+                mode,
+                exc,
+            )
+            return _attach_page_cache_metadata(
+                stale.get("payload", {}),
+                page_name=page_name,
+                cache_key=cache_key,
+                cache_mode=mode,
+                source="stale_cache",
+                stale=True,
+                cached_at_epoch=float(stale.get("cached_at_epoch", 0.0) or 0.0),
+                expires_at_epoch=float(stale.get("expires_at_epoch", 0.0) or 0.0),
+                error_message=str(exc),
+            )
+        stored = self.page_data_cache.set(cache_key, live_payload, ttl_seconds=ttl_seconds)
+        return _attach_page_cache_metadata(
+            live_payload,
+            page_name=page_name,
+            cache_key=cache_key,
+            cache_mode=mode,
+            source="live",
+            stale=False,
+            cached_at_epoch=float(stored.get("cached_at_epoch", 0.0) or 0.0),
+            expires_at_epoch=float(stored.get("expires_at_epoch", 0.0) or 0.0),
+        )
 
     def _write_text(self, text: str, status: int = 200, content_type: str = "text/plain; charset=utf-8") -> None:
         body = text.encode("utf-8", errors="replace")
@@ -3424,38 +3845,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             search_text = str((query.get("q") or [""])[0] or "").strip()
             sort_key = str((query.get("sort_key") or ["saved_at_utc"])[0] or "saved_at_utc").strip().lower()
             sort_dir = str((query.get("sort_dir") or ["desc"])[0] or "desc").strip().lower()
+            cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
+            cache_key_parts = {
+                "q": search_text,
+                "offset": offset,
+                "limit": limit,
+                "sort_key": sort_key,
+                "sort_dir": sort_dir,
+            }
             try:
-                fetch_limit = max(limit + offset, limit)
-                rows = self.coordinator_store.list_discovered_target_domains(limit=min(20000, fetch_limit), q=search_text)
+                payload = self._resolve_cached_page_payload(
+                    page_name="discovered_targets",
+                    key_parts=cache_key_parts,
+                    ttl_seconds=DISCOVERED_TARGETS_PAGE_CACHE_TTL_SECONDS,
+                    cache_mode=cache_mode,
+                    loader=lambda: _build_discovered_target_domains_payload(
+                        self.coordinator_store,  # type: ignore[arg-type]
+                        limit=limit,
+                        offset=offset,
+                        search_text=search_text,
+                        sort_key=sort_key,
+                        sort_dir=sort_dir,
+                    ),
+                )
             except Exception as exc:
                 self.log_message("list_discovered_target_domains failed: %r", exc)
                 self._write_json({"error": "discovered targets query failed", "detail": str(exc)}, status=500)
                 return
-            query_result = _apply_discovered_target_domain_query(
-                rows,
-                search_text=search_text,
-                sort_key=sort_key,
-                sort_dir=sort_dir,
-                offset=offset,
-                limit=limit,
-            )
-            page_rows = query_result.get("rows", [])
-            self._write_json(
-                {
-                    "generated_at_utc": _iso_now(),
-                    "rows": page_rows,
-                    "domains": page_rows,
-                    "total_domains": int(query_result.get("total_rows", 0) or 0),
-                    "offset": int(query_result.get("offset", 0) or 0),
-                    "limit": int(query_result.get("limit", limit) or limit),
-                    "next_offset": query_result.get("next_offset"),
-                    "prev_offset": query_result.get("prev_offset"),
-                    "has_more": bool(query_result.get("has_more", False)),
-                    "sort_key": str(query_result.get("sort_key", "saved_at_utc") or "saved_at_utc"),
-                    "sort_dir": str(query_result.get("sort_dir", "desc") or "desc"),
-                    "search": search_text,
-                }
-            )
+            self._write_json(payload)
             return
         if path == "/api/coord/discovered-target-sitemap":
             if self.coordinator_store is None:
@@ -3475,65 +3892,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
             sort_key = str((query.get("sort_key") or [DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY])[0] or DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY).strip()
             sort_dir = str((query.get("sort_dir") or ["asc"])[0] or "asc").strip()
             include_details = str((query.get("include_details") or ["1"])[0] or "1").strip().lower() in {"1", "true", "yes", "on"}
+            cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
+            cache_key_parts = {
+                "root_domain": root_domain,
+                "q": search_text,
+                "subdomain": subdomain,
+                "offset": offset,
+                "limit": limit,
+                "sort_key": sort_key,
+                "sort_dir": sort_dir,
+                "include_details": include_details,
+            }
             try:
-                sitemap = self.coordinator_store.get_discovered_target_sitemap(root_domain)
+                payload = self._resolve_cached_page_payload(
+                    page_name="discovered_target_sitemap",
+                    key_parts=cache_key_parts,
+                    ttl_seconds=DISCOVERED_TARGET_SITEMAP_PAGE_CACHE_TTL_SECONDS,
+                    cache_mode=cache_mode,
+                    loader=lambda: _build_discovered_target_sitemap_payload(
+                        self.coordinator_store,  # type: ignore[arg-type]
+                        root_domain=root_domain,
+                        limit=limit,
+                        offset=offset,
+                        search_text=search_text,
+                        subdomain=subdomain,
+                        sort_key=sort_key,
+                        sort_dir=sort_dir,
+                        include_details=include_details,
+                    ),
+                )
             except Exception as exc:
                 self.log_message("get_discovered_target_sitemap failed: %r", exc)
                 self._write_json({"error": "discovered target sitemap query failed", "detail": str(exc)}, status=500)
                 return
-            pages: list[dict[str, Any]]
-            if isinstance(sitemap, dict):
-                pages = sitemap.get("pages", []) if isinstance(sitemap.get("pages"), list) else []
-                sitemap_payload = sitemap
-            else:
-                pages = sitemap if isinstance(sitemap, list) else []
-                sitemap_payload = {
-                    "root_domain": root_domain,
-                    "start_url": "",
-                    "page_count": len(pages),
-                    "pages": pages,
-                }
-            query_result = _apply_discovered_target_sitemap_query(
-                pages,
-                root_domain=root_domain,
-                search_text=search_text,
-                subdomain=subdomain,
-                sort_key=sort_key,
-                sort_dir=sort_dir,
-                offset=offset,
-                limit=limit,
-            )
-            page_rows = query_result.get("rows", [])
-            if include_details and page_rows:
-                try:
-                    page_rows = self.coordinator_store.enrich_discovered_target_sitemap_rows(
-                        root_domain=root_domain,
-                        rows=list(page_rows),
-                    )
-                except Exception as exc:
-                    self.log_message("enrich_discovered_target_sitemap_rows failed: %r", exc)
-            self._write_json(
-                {
-                    "generated_at_utc": _iso_now(),
-                    "root_domain": root_domain,
-                    "rows": page_rows,
-                    "pages": page_rows,
-                    "all_rows_count": len(pages),
-                    "total_rows": int(query_result.get("total_rows", 0) or 0),
-                    "offset": int(query_result.get("offset", 0) or 0),
-                    "limit": int(query_result.get("limit", limit) or limit),
-                    "next_offset": query_result.get("next_offset"),
-                    "prev_offset": query_result.get("prev_offset"),
-                    "has_more": bool(query_result.get("has_more", False)),
-                    "sort_key": str(query_result.get("sort_key", DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY) or DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY),
-                    "sort_dir": str(query_result.get("sort_dir", "asc") or "asc"),
-                    "subdomains": query_result.get("subdomains", []),
-                    "search": search_text,
-                    "subdomain": subdomain,
-                    "include_details": include_details,
-                    "sitemap": sitemap_payload,
-                }
-            )
+            self._write_json(payload)
             return
         if path == "/api/coord/discovered-target-response":
             if self.coordinator_store is None:
@@ -3648,20 +4040,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             limit = _safe_int((query.get("limit") or [5000])[0], 5000)
             search_text = str((query.get("q") or [""])[0] or "").strip().lower()
-            rows = self.coordinator_store.list_discovered_files(limit=limit)
-            if search_text:
-                rows = [
-                    row
-                    for row in rows
-                    if search_text in " ".join(
-                        [
-                            str(row.get("root_domain") or ""),
-                            str(row.get("source_url") or ""),
-                            str(row.get("artifact_type") or ""),
-                        ]
-                    ).lower()
-                ]
-            self._write_json({"generated_at_utc": _iso_now(), "rows": rows, "files": rows})
+            cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
+            cache_key_parts = {"limit": limit, "q": search_text}
+            try:
+                payload = self._resolve_cached_page_payload(
+                    page_name="discovered_files",
+                    key_parts=cache_key_parts,
+                    ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS,
+                    cache_mode=cache_mode,
+                    loader=lambda: _build_discovered_files_payload(
+                        self.coordinator_store,  # type: ignore[arg-type]
+                        limit=limit,
+                        search_text=search_text,
+                    ),
+                )
+            except Exception as exc:
+                self.log_message("list_discovered_files failed: %r", exc)
+                self._write_json({"error": "discovered files query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
             return
         if path == "/api/coord/high-value-files":
             if self.coordinator_store is None:
@@ -3672,20 +4069,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             limit = _safe_int((query.get("limit") or [5000])[0], 5000)
             search_text = str((query.get("q") or [""])[0] or "").strip().lower()
-            rows = self.coordinator_store.list_high_value_files(limit=limit)
-            if search_text:
-                rows = [
-                    row
-                    for row in rows
-                    if search_text in " ".join(
-                        [
-                            str(row.get("root_domain") or ""),
-                            str(row.get("source_url") or ""),
-                            str(row.get("saved_relative") or ""),
-                        ]
-                    ).lower()
-                ]
-            self._write_json({"generated_at_utc": _iso_now(), "rows": rows, "files": rows})
+            cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
+            cache_key_parts = {"limit": limit, "q": search_text}
+            try:
+                payload = self._resolve_cached_page_payload(
+                    page_name="high_value_files",
+                    key_parts=cache_key_parts,
+                    ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS,
+                    cache_mode=cache_mode,
+                    loader=lambda: _build_high_value_files_payload(
+                        self.coordinator_store,  # type: ignore[arg-type]
+                        limit=limit,
+                        search_text=search_text,
+                    ),
+                )
+            except Exception as exc:
+                self.log_message("list_high_value_files failed: %r", exc)
+                self._write_json({"error": "high value files query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
             return
         if path == "/api/coord/discovered-files/download":
             if self.coordinator_store is None:
@@ -4141,8 +4543,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
             limit = _safe_int((query.get("limit") or [2000])[0], 2000)
+            cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
             try:
-                payload = self.coordinator_store.crawl_progress_snapshot(limit=limit)
+                payload = self._resolve_cached_page_payload(
+                    page_name="crawl_progress",
+                    key_parts={"limit": limit},
+                    ttl_seconds=CRAWL_PROGRESS_PAGE_CACHE_TTL_SECONDS,
+                    cache_mode=cache_mode,
+                    loader=lambda: _build_crawl_progress_payload(
+                        self.coordinator_store,  # type: ignore[arg-type]
+                        limit=limit,
+                    ),
+                )
             except Exception as exc:
                 self.log_message("crawl_progress_snapshot failed: %r", exc)
                 self._write_json({"error": "crawl progress query failed", "detail": str(exc)}, status=500)
@@ -5993,11 +6405,13 @@ def main(argv: list[str] | None = None) -> int:
         srv.coordinator_token = coordinator_token  # type: ignore[attr-defined]
         srv.master_report_regen_token = master_report_regen_token  # type: ignore[attr-defined]
         srv._master_regen_lock = threading.Lock()  # type: ignore[attr-defined]
+        srv.page_data_cache = _PageDataCache()  # type: ignore[attr-defined]
         srv.extractor_matches_cache = _ExtractorMatchesCache()  # type: ignore[attr-defined]
         srv.fuzzing_summary_cache = _FozzySummaryCache()  # type: ignore[attr-defined]
         srv.fuzzing_zip_index_cache = _ZipFileIndexCache()  # type: ignore[attr-defined]
         srv.log_store = log_store  # type: ignore[attr-defined]
         srv.auth0r_store = auth0r_store  # type: ignore[attr-defined]
+        _start_default_page_cache_warmer(srv, coordinator_store=coordinator_store)
         return srv
 
     servers: list[tuple[str, ThreadingHTTPServer]] = []
@@ -6051,6 +6465,9 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[server] interrupt received, shutting down.", flush=True)
     finally:
         for _scheme, srv in servers:
+            stop_event = getattr(srv, "page_cache_warm_stop", None)
+            if isinstance(stop_event, threading.Event):
+                stop_event.set()
             try:
                 srv.shutdown()
             except Exception:
