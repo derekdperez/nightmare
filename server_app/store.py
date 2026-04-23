@@ -2325,7 +2325,7 @@ LIMIT %s
         safe_limit = max(1, min(50000, int(limit or 5000)))
         domain_filter = str(root_domain or "").strip().lower()
         needle = str(q or "").strip().lower()
-        domain_scan_limit = max(100, min(5000, safe_limit))
+        domain_scan_limit = 50000
 
         domains: list[str] = []
         if domain_filter:

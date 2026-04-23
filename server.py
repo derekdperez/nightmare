@@ -3258,9 +3258,9 @@ def _build_http_requests_payload(
     search_text: str,
     root_domain: str,
 ) -> dict[str, Any]:
-    fetch_limit = max(limit + offset, limit)
+    fetch_limit = 50000
     rows = store.list_http_requests(
-        limit=min(50000, fetch_limit),
+        limit=fetch_limit,
         q=search_text,
         root_domain=root_domain,
     )
