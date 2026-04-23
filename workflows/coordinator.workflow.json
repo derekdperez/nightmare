@@ -1,292 +1,259 @@
 {
   "schema_version": "2.0.0",
   "workflow_type": "coordinator_plugin_scheduler",
-  "workflow_id": "nightmare_default",
-  "description": "Data-readiness workflow scheduler for distributed plugin tasks.",
+  "workflow_id": "run-recon",
+  "description": "Run recon tasks with resumable plugin stages: subdomain enumeration, spider methods, and high-value extraction.",
   "plugins": [
     {
-      "name": "nightmare_crawl_core",
-      "display_name": "Nightmare Crawl Core",
-      "description": "Marks crawl completion after target queue work completes.",
-      "handler": "nightmare_artifact_gate",
-      "plugin_name": "nightmare_crawl_core",
+      "name": "recon_subdomain_enumeration",
+      "display_name": "Recon Subdomain Enumeration",
+      "description": "Enumerate subdomains with Sublist3r and verify reachable hosts for crawl seeding.",
+      "handler": "recon_subdomain_enumeration",
+      "plugin_name": "recon_subdomain_enumeration",
       "enabled": true,
       "resume_mode": "exact",
       "preconditions": {
         "target_statuses": [
+          "pending",
+          "running",
           "completed"
         ]
       },
-      "retry_failed": false,
-      "max_attempts": 1,
+      "retry_failed": true,
+      "max_attempts": 0,
       "inputs": {},
       "outputs": {
-        "artifacts": []
-      },
-      "parameters": {}
-    },
-    {
-      "name": "nightmare_ai_discovery",
-      "display_name": "Nightmare AI Discovery",
-      "description": "Marks discovery-ready state once session artifact exists.",
-      "handler": "nightmare_artifact_gate",
-      "plugin_name": "nightmare_ai_discovery",
-      "enabled": true,
-      "resume_mode": "exact",
-      "preconditions": {
-        "artifacts_all": [
-          "nightmare_session_json"
-        ],
-        "requires_plugins_all": [
-          "nightmare_crawl_core"
-        ]
-      },
-      "retry_failed": false,
-      "max_attempts": 1,
-      "inputs": {
-        "artifacts_all": [
-          "nightmare_session_json"
-        ]
-      },
-      "outputs": {
-        "artifacts": []
-      },
-      "parameters": {}
-    },
-    {
-      "name": "nightmare_ai_probe_execution",
-      "display_name": "Nightmare AI Probe Execution",
-      "description": "Marks probe-ready state once inventory exists.",
-      "handler": "nightmare_artifact_gate",
-      "plugin_name": "nightmare_ai_probe_execution",
-      "enabled": true,
-      "resume_mode": "exact",
-      "preconditions": {
-        "artifacts_all": [
-          "nightmare_url_inventory_json"
-        ],
-        "requires_plugins_all": [
-          "nightmare_ai_discovery"
-        ]
-      },
-      "retry_failed": false,
-      "max_attempts": 1,
-      "inputs": {
-        "artifacts_all": [
-          "nightmare_url_inventory_json"
-        ]
-      },
-      "outputs": {
-        "artifacts": []
-      },
-      "parameters": {}
-    },
-    {
-      "name": "nightmare_url_verification",
-      "display_name": "Nightmare URL Verification",
-      "description": "Marks URL verification readiness.",
-      "handler": "nightmare_artifact_gate",
-      "plugin_name": "nightmare_url_verification",
-      "enabled": true,
-      "resume_mode": "exact",
-      "preconditions": {
-        "artifacts_all": [
-          "nightmare_requests_json"
-        ],
-        "requires_plugins_all": [
-          "nightmare_ai_probe_execution"
-        ]
-      },
-      "retry_failed": false,
-      "max_attempts": 1,
-      "inputs": {
-        "artifacts_all": [
-          "nightmare_requests_json"
-        ]
-      },
-      "outputs": {
-        "artifacts": []
-      },
-      "parameters": {}
-    },
-    {
-      "name": "nightmare_inventory_export",
-      "display_name": "Nightmare Inventory Export",
-      "description": "Marks export readiness for downstream tools.",
-      "handler": "nightmare_artifact_gate",
-      "plugin_name": "nightmare_inventory_export",
-      "enabled": true,
-      "resume_mode": "exact",
-      "preconditions": {
-        "artifacts_all": [
-          "nightmare_parameters_json"
-        ],
-        "requires_plugins_all": [
-          "nightmare_url_verification"
-        ]
-      },
-      "retry_failed": false,
-      "max_attempts": 1,
-      "inputs": {
-        "artifacts_all": [
-          "nightmare_parameters_json"
-        ]
-      },
-      "outputs": {
-        "artifacts": []
-      },
-      "parameters": {}
-    },
-    {
-      "name": "nightmare_report_generation",
-      "display_name": "Nightmare Report Generation",
-      "description": "Marks report generation readiness.",
-      "handler": "nightmare_artifact_gate",
-      "plugin_name": "nightmare_report_generation",
-      "enabled": true,
-      "resume_mode": "exact",
-      "preconditions": {
-        "artifacts_all": [
-          "nightmare_report_html"
-        ],
-        "requires_plugins_all": [
-          "nightmare_inventory_export"
-        ]
-      },
-      "retry_failed": false,
-      "max_attempts": 1,
-      "inputs": {
-        "artifacts_all": [
-          "nightmare_report_html"
-        ]
-      },
-      "outputs": {
-        "artifacts": []
-      },
-      "parameters": {}
-    },
-    {
-      "name": "auth0r",
-      "display_name": "Auth0r",
-      "description": "Run auth0r once nightmare session data is available.",
-      "category": "builtin",
-      "contract_version": "1.0.0",
-      "handler": "legacy_step_adapter",
-      "config_schema": {
-        "type": "object",
-        "additionalProperties": true
-      },
-      "plugin_name": "auth0r",
-      "enabled": true,
-      "resume_mode": "exact",
-      "preconditions": {
-        "artifacts_all": [
-          "nightmare_session_json"
-        ],
-        "requires_plugins_all": [
-          "nightmare_crawl_core"
-        ]
-      },
-      "retry_failed": false,
-      "max_attempts": 1,
-      "inputs": {
-        "artifacts_all": [
-          "nightmare_session_json"
-        ]
-      },
-      "outputs": {
         "artifacts": [
-          "auth0r_summary_json",
-          "auth0r_log"
+          "recon_subdomains_json",
+          "recon_subdomain_enumeration_progress_json",
+          "recon_subdomain_enumeration_complete_flag"
         ]
       },
       "parameters": {
-        "min_delay_seconds": 0.25,
-        "max_seed_actions": 200,
-        "timeout_seconds": 20.0
+        "sublist3r_command": "sublist3r",
+        "sublist3r_extra_args": [],
+        "allow_passive_fallback": true,
+        "probe_timeout_seconds": 8.0,
+        "probe_verify_tls": true,
+        "max_request_log_entries": 4000
       }
     },
     {
-      "name": "fozzy",
-      "display_name": "Fozzy",
-      "description": "Run fozzy once nightmare parameter data is available.",
-      "category": "builtin",
-      "contract_version": "1.0.0",
-      "handler": "legacy_step_adapter",
-      "config_schema": {
-        "type": "object",
-        "additionalProperties": true
-      },
-      "plugin_name": "fozzy",
+      "name": "recon_spider_source_tags",
+      "display_name": "Recon Spider Source Tags",
+      "description": "Run Nightmare crawl/resume for source-tag discovery paths.",
+      "handler": "recon_spider",
+      "plugin_name": "recon_spider_source_tags",
       "enabled": true,
       "resume_mode": "exact",
       "preconditions": {
         "artifacts_all": [
-          "nightmare_parameters_json"
-        ],
-        "requires_plugins_all": [
-          "nightmare_inventory_export"
+          "recon_subdomain_enumeration_complete_flag"
         ]
       },
-      "retry_failed": false,
-      "max_attempts": 1,
+      "retry_failed": true,
+      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
-          "nightmare_parameters_json"
+          "recon_subdomains_json"
         ]
       },
       "outputs": {
         "artifacts": [
-          "fozzy_summary_json",
-          "fozzy_inventory_json",
-          "fozzy_results_zip",
-          "fozzy_log"
+          "recon_spider_source_tags_progress_json",
+          "recon_spider_source_tags_complete_flag",
+          "nightmare_session_json",
+          "nightmare_requests_json",
+          "nightmare_url_inventory_json",
+          "nightmare_source_of_truth_json"
         ]
       },
       "parameters": {
-        "max_background_workers": 1,
-        "max_workers_per_domain": 1,
-        "max_workers_per_subdomain": 1
+        "no_ai": true,
+        "force_wordlist": false,
+        "spider_throttle_seconds": 0.5,
+        "verify_urls": true,
+        "max_pages": 5000,
+        "require_empty_frontier": true
       }
     },
     {
-      "name": "extractor",
-      "display_name": "Extractor",
-      "description": "Run extractor once fozzy outputs are available.",
-      "category": "builtin",
-      "contract_version": "1.0.0",
-      "handler": "legacy_step_adapter",
-      "config_schema": {
-        "type": "object",
-        "additionalProperties": true
-      },
-      "plugin_name": "extractor",
+      "name": "recon_spider_script_links",
+      "display_name": "Recon Spider Script Links",
+      "description": "Continue Nightmare crawl/resume emphasizing script-discovered links.",
+      "handler": "recon_spider",
+      "plugin_name": "recon_spider_script_links",
       "enabled": true,
       "resume_mode": "exact",
       "preconditions": {
         "artifacts_all": [
-          "fozzy_results_zip"
+          "recon_subdomain_enumeration_complete_flag"
         ],
         "requires_plugins_all": [
-          "fozzy"
+          "recon_spider_source_tags"
         ]
       },
-      "retry_failed": false,
-      "max_attempts": 1,
+      "retry_failed": true,
+      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
-          "fozzy_results_zip"
+          "nightmare_session_json"
         ]
       },
       "outputs": {
         "artifacts": [
+          "recon_spider_script_links_progress_json",
+          "recon_spider_script_links_complete_flag",
+          "nightmare_session_json",
+          "nightmare_requests_json",
+          "nightmare_url_inventory_json",
+          "nightmare_source_of_truth_json"
+        ]
+      },
+      "parameters": {
+        "no_ai": true,
+        "force_wordlist": false,
+        "spider_throttle_seconds": 0.5,
+        "verify_urls": true,
+        "max_pages": 5000,
+        "require_empty_frontier": true
+      }
+    },
+    {
+      "name": "recon_spider_wordlist",
+      "display_name": "Recon Spider Wordlist",
+      "description": "Continue Nightmare crawl/resume with path-guessing enabled from the configured wordlist.",
+      "handler": "recon_spider",
+      "plugin_name": "recon_spider_wordlist",
+      "enabled": true,
+      "resume_mode": "exact",
+      "preconditions": {
+        "artifacts_all": [
+          "recon_subdomain_enumeration_complete_flag"
+        ],
+        "requires_plugins_all": [
+          "recon_spider_script_links"
+        ]
+      },
+      "retry_failed": true,
+      "max_attempts": 0,
+      "inputs": {
+        "artifacts_all": [
+          "nightmare_session_json"
+        ]
+      },
+      "outputs": {
+        "artifacts": [
+          "recon_spider_wordlist_progress_json",
+          "recon_spider_wordlist_complete_flag",
+          "nightmare_session_json",
+          "nightmare_requests_json",
+          "nightmare_url_inventory_json",
+          "nightmare_source_of_truth_json"
+        ]
+      },
+      "parameters": {
+        "no_ai": true,
+        "force_wordlist": true,
+        "spider_throttle_seconds": 0.5,
+        "crawl_wordlist": "resources/wordlists/file_path_list.txt",
+        "verify_urls": true,
+        "max_pages": 5000,
+        "require_empty_frontier": true
+      }
+    },
+    {
+      "name": "recon_spider_ai",
+      "display_name": "Recon Spider AI",
+      "description": "Continue Nightmare crawl/resume with AI URL/probe discovery enabled.",
+      "handler": "recon_spider",
+      "plugin_name": "recon_spider_ai",
+      "enabled": true,
+      "resume_mode": "exact",
+      "preconditions": {
+        "artifacts_all": [
+          "recon_subdomain_enumeration_complete_flag"
+        ],
+        "requires_plugins_all": [
+          "recon_spider_wordlist"
+        ]
+      },
+      "retry_failed": true,
+      "max_attempts": 0,
+      "inputs": {
+        "artifacts_all": [
+          "nightmare_session_json",
+          "nightmare_url_inventory_json"
+        ]
+      },
+      "outputs": {
+        "artifacts": [
+          "recon_spider_ai_progress_json",
+          "recon_spider_ai_complete_flag",
+          "nightmare_session_json",
+          "nightmare_requests_json",
+          "nightmare_url_inventory_json",
+          "nightmare_source_of_truth_json"
+        ]
+      },
+      "parameters": {
+        "no_ai": false,
+        "force_wordlist": true,
+        "spider_throttle_seconds": 0.5,
+        "crawl_wordlist": "resources/wordlists/file_path_list.txt",
+        "verify_urls": true,
+        "max_pages": 5000,
+        "ai_probe_max_requests": 100,
+        "ai_probe_per_host_max": 10,
+        "openai_timeout": 180.0,
+        "require_empty_frontier": true
+      }
+    },
+    {
+      "name": "recon_extractor_high_value",
+      "display_name": "Recon Extractor High Value",
+      "description": "Run extractor using high-value rules against recon output artifacts.",
+      "handler": "recon_extractor_high_value",
+      "plugin_name": "recon_extractor_high_value",
+      "enabled": true,
+      "resume_mode": "exact",
+      "preconditions": {
+        "requires_plugins_all": [
+          "recon_spider_source_tags",
+          "recon_spider_script_links",
+          "recon_spider_wordlist",
+          "recon_spider_ai"
+        ],
+        "artifacts_all": [
+          "recon_spider_source_tags_complete_flag",
+          "recon_spider_script_links_complete_flag",
+          "recon_spider_wordlist_complete_flag",
+          "recon_spider_ai_complete_flag"
+        ]
+      },
+      "retry_failed": true,
+      "max_attempts": 0,
+      "inputs": {
+        "artifacts_all": [
+          "nightmare_session_json",
+          "nightmare_requests_json",
+          "nightmare_url_inventory_json"
+        ]
+      },
+      "outputs": {
+        "artifacts": [
+          "recon_extractor_high_value_progress_json",
+          "recon_extractor_high_value_complete_flag",
+          "recon_extractor_high_value_summary_json",
+          "recon_extractor_high_value_matches_zip",
           "extractor_summary_json",
           "extractor_matches_zip"
         ]
       },
       "parameters": {
-        "workers": 1,
-        "force": true
+        "workers": 2,
+        "force": true,
+        "wordlist": "resources/wordlists/high_value_extractor_list.txt"
       }
     }
   ]
