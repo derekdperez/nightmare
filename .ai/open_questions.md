@@ -22,3 +22,6 @@
 
 - Confirm whether `config/coordinator.json` should be switched to `workflows/run-recon.workflow.json` by default, or remain opt-in via `config/coordinator.run-recon.json`.
 - Confirm whether Sublist3r is guaranteed installed on worker images; current implementation falls back to passive crt.sh enumeration when Sublist3r invocation fails.
+- Workflow config propagation question:
+  - `/api/coord/workflow-config` currently updates the central repo workflow file and uses worker `reload` commands.
+  - If worker VMs run from divergent code/config trees, confirm whether workflow definitions should instead be stored canonically in DB/artifacts and pulled by workers from API.

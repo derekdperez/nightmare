@@ -364,20 +364,44 @@ class DistributedCoordinator:
         self._fleet_lock = threading.Lock()
         self._worker_state_lock = threading.Lock()
         self._worker_states: dict[str, str] = {}
-        self._workflow_id, self._workflow_entries = _load_workflow_entries(self.cfg.workflow_config, self.logger)
-        self._workflow_stage_map: dict[str, dict[str, Any]] = {
-            str(item.get("plugin_name") or item.get("stage") or "").strip().lower(): item
-            for item in self._workflow_entries
-        }
-        self.logger.info(
-            "workflow_scheduler_config_loaded",
-            workflow_config=str(self.cfg.workflow_config),
-            workflow_id=self._workflow_id,
-            workflow_scheduler_enabled=bool(self.cfg.workflow_scheduler_enabled),
-            workflow_scheduler_interval_seconds=float(self.cfg.workflow_scheduler_interval_seconds),
-            workflow_stage_count=len(self._workflow_entries),
-            workflow_stages=[str(item.get("plugin_name") or item.get("stage") or "") for item in self._workflow_entries],
-        )
+        self._workflow_lock = threading.Lock()
+        self._workflow_id = "default"
+        self._workflow_entries: list[dict[str, Any]] = []
+        self._workflow_stage_map: dict[str, dict[str, Any]] = {}
+        self._reload_workflow_config(reason="startup")
+
+    def _reload_workflow_config(self, *, worker_id: str = "", reason: str = "") -> bool:
+        try:
+            workflow_id, workflow_entries = _load_workflow_entries(self.cfg.workflow_config, self.logger)
+            workflow_stage_map: dict[str, dict[str, Any]] = {
+                str(item.get("plugin_name") or item.get("stage") or "").strip().lower(): item
+                for item in workflow_entries
+            }
+            with self._workflow_lock:
+                self._workflow_id = str(workflow_id or "default").strip().lower() or "default"
+                self._workflow_entries = list(workflow_entries)
+                self._workflow_stage_map = workflow_stage_map
+            self.logger.info(
+                "workflow_scheduler_config_loaded",
+                workflow_config=str(self.cfg.workflow_config),
+                workflow_id=self._workflow_id,
+                workflow_scheduler_enabled=bool(self.cfg.workflow_scheduler_enabled),
+                workflow_scheduler_interval_seconds=float(self.cfg.workflow_scheduler_interval_seconds),
+                workflow_stage_count=len(self._workflow_entries),
+                workflow_stages=[str(item.get("plugin_name") or item.get("stage") or "") for item in self._workflow_entries],
+                reload_reason=str(reason or ""),
+                requested_by_worker=worker_id,
+            )
+            return True
+        except Exception as exc:
+            self.logger.error(
+                "workflow_scheduler_config_reload_failed",
+                workflow_config=str(self.cfg.workflow_config),
+                worker_id=worker_id,
+                reload_reason=str(reason or ""),
+                error=str(exc),
+            )
+            return False
 
     def _begin_job(self) -> None:
         with self._job_lock:
@@ -431,6 +455,11 @@ class DistributedCoordinator:
                 state = "stopped"
             elif command == "start":
                 state = "running"
+            elif command == "reload":
+                ok = self._reload_workflow_config(worker_id=worker_id, reason="worker_command")
+                if not ok:
+                    err = "workflow config reload failed"
+                    state = "errored"
             else:
                 ok = False
                 err = f"unsupported command: {command!r}"

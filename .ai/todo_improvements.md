@@ -20,3 +20,5 @@
 
 - Add targeted coordinator unit tests for recon plugin runtime methods (subdomain probe resume, per-subdomain spider resume, completion-flag artifact emission).
 - Add deploy bootstrap check/install for Sublist3r so active enumeration path is deterministic across fresh workers.
+- Add API-level tests for new workflow control endpoints (`workflow-config`, `workflow/run`, `workflow/mode`, `workflow/reload`) including malformed parameter JSON and workflow-not-found cases.
+- Add optimistic concurrency/versioning for workflow file saves to prevent accidental overwrite when multiple operators edit `/workflows#recon` simultaneously.

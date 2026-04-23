@@ -328,6 +328,17 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Coordinator API compatibility convention: legacy stage endpoints remain valid, but should accept optional `workflow_id` and plugin progress payloads.
 - Workflow UI convention: interactive workflow controls live on `/workflows` and must call coordinator endpoints directly (`/api/coord/workflow-snapshot`, `/api/coord/stage/enqueue`, `/api/coord/stage/reset`) with the same `nightmare_coord_token` auth-cookie/header pattern used by other coordinator ops pages.
 - Workflow timeline convention: lifecycle event views in `/workflows` should use `/api/coord/events` with `event_type=workflow.task.` and apply domain/workflow/plugin filtering in UI to preserve backend query compatibility.
+- Workflow operations UI convention:
+  - `/workflows` is the control plane for workflow scheduling and config edits (not just monitoring).
+  - Deep links should use hash tabs (for example `/workflows#recon`) and tab state should be hash-aware in client JS.
+- Workflow config API convention:
+  - Read/edit flow uses `/api/coord/workflow-config`.
+  - Running a workflow across all currently known domains uses `/api/coord/workflow/run`.
+  - Fleet state gating for workflow-only execution uses `/api/coord/workflow/mode`.
+  - Live config reload requests use `/api/coord/workflow/reload`.
+- Worker command convention update:
+  - Allowed command set includes `reload` in addition to `start|pause|stop`.
+  - `reload` should be handled in coordinator worker loops without changing running/paused semantics unless reload fails.
 - Schema bootstrap compatibility convention: `CREATE TABLE IF NOT EXISTS` bootstrap blocks must not reference columns that may only exist after migrations on legacy tables; workflow-specific keys/indices belong in post-bootstrap migration statements.
 - Migration transaction convention: schema migration statements should be applied as independently committed units (with per-statement rollback on failure) to prevent one failing migration from undoing previously successful schema upgrades.
 

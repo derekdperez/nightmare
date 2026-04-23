@@ -93,6 +93,8 @@ MAX_VIEW_LOG_FILE_SOURCES = 1000
 MAX_LOG_DOWNLOAD_BYTES = 25 * 1024 * 1024
 VIEW_LOG_SOURCES_CACHE_TTL_SECONDS = 30
 EST_TZ = timezone(timedelta(hours=-5), name="EST")
+WORKFLOW_FILE_SUFFIX = ".workflow.json"
+WORKFLOW_FILE_GLOB = f"*{WORKFLOW_FILE_SUFFIX}"
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -115,6 +117,80 @@ def _resolve_config_path(raw_path: str | None) -> Path:
     if p.parts and p.parts[0].lower() == "config":
         return (BASE_DIR / p).resolve()
     return (BASE_DIR / "config" / p).resolve()
+
+
+def _normalize_workflow_id(value: Any, *, default: str = "") -> str:
+    raw = str(value or "").strip().lower()
+    safe = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    if safe:
+        return safe
+    fallback = str(default or "").strip().lower()
+    return re.sub(r"[^a-z0-9._-]+", "-", fallback).strip("-")
+
+
+def _default_workflow_path_for_id(workflow_id: str) -> Path:
+    safe_id = _normalize_workflow_id(workflow_id)
+    return (BASE_DIR / "workflows" / f"{safe_id}{WORKFLOW_FILE_SUFFIX}").resolve()
+
+
+def _iter_workflow_paths() -> list[Path]:
+    workflows_dir = BASE_DIR / "workflows"
+    if not workflows_dir.is_dir():
+        return []
+    return sorted(path.resolve() for path in workflows_dir.glob(WORKFLOW_FILE_GLOB) if path.is_file())
+
+
+def _workflow_id_from_path(path: Path) -> str:
+    name = str(path.name or "")
+    lowered = name.lower()
+    if lowered.endswith(WORKFLOW_FILE_SUFFIX):
+        return _normalize_workflow_id(name[:-len(WORKFLOW_FILE_SUFFIX)])
+    return _normalize_workflow_id(path.stem)
+
+
+def _load_workflow_payload(path: Path) -> dict[str, Any]:
+    payload = _read_json_dict(path)
+    if not payload:
+        return {}
+    workflow_id = _normalize_workflow_id(payload.get("workflow_id"), default=_workflow_id_from_path(path))
+    payload["workflow_id"] = workflow_id or _workflow_id_from_path(path)
+    plugins = payload.get("plugins")
+    payload["plugins"] = [item for item in plugins if isinstance(item, dict)] if isinstance(plugins, list) else []
+    return payload
+
+
+def _workflow_index_payload() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in _iter_workflow_paths():
+        payload = _load_workflow_payload(path)
+        workflow_id = _normalize_workflow_id(payload.get("workflow_id"), default=_workflow_id_from_path(path))
+        if not workflow_id:
+            continue
+        out.append(
+            {
+                "workflow_id": workflow_id,
+                "description": str(payload.get("description") or "").strip(),
+                "plugin_count": len(payload.get("plugins") if isinstance(payload.get("plugins"), list) else []),
+                "path_rel": _to_repo_relative_path(path),
+            }
+        )
+    out.sort(key=lambda item: str(item.get("workflow_id") or ""))
+    return out
+
+
+def _resolve_workflow_path(workflow_id: str) -> Path | None:
+    safe_id = _normalize_workflow_id(workflow_id)
+    if not safe_id:
+        return None
+    direct = _default_workflow_path_for_id(safe_id)
+    if direct.is_file():
+        return direct
+    for path in _iter_workflow_paths():
+        payload = _load_workflow_payload(path)
+        payload_id = _normalize_workflow_id(payload.get("workflow_id"), default=_workflow_id_from_path(path))
+        if payload_id and payload_id == safe_id:
+            return path
+    return None
 
 
 def _default_server_config() -> dict[str, Any]:
@@ -4219,6 +4295,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json({"root_domain": root_domain, "artifacts": self.coordinator_store.list_artifacts(root_domain)})
             return
+        if path == "/api/coord/workflow-config":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            requested_id = _normalize_workflow_id((query.get("workflow_id") or [""])[0], default="run-recon")
+            workflow_path = _resolve_workflow_path(requested_id)
+            if workflow_path is None:
+                self._write_json(
+                    {
+                        "error": f"workflow not found: {requested_id or 'unknown'}",
+                        "available_workflows": _workflow_index_payload(),
+                    },
+                    status=404,
+                )
+                return
+            workflow = _load_workflow_payload(workflow_path)
+            if not workflow:
+                self._write_json({"error": f"workflow config is empty or invalid: {workflow_path.name}"}, status=500)
+                return
+            self._write_json(
+                {
+                    "ok": True,
+                    "workflow_id": str(workflow.get("workflow_id") or requested_id),
+                    "path_rel": _to_repo_relative_path(workflow_path),
+                    "workflow": workflow,
+                    "available_workflows": _workflow_index_payload(),
+                }
+            )
+            return
         if path == "/api/coord/workflow-snapshot":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
@@ -4615,6 +4723,284 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json(result)
             return
 
+        if path == "/api/coord/workflow-config":
+            raw_workflow = body.get("workflow", body)
+            if not isinstance(raw_workflow, dict):
+                self._write_json({"error": "workflow payload must be an object"}, status=400)
+                return
+            workflow_payload = dict(raw_workflow)
+            workflow_id = _normalize_workflow_id(
+                workflow_payload.get("workflow_id", body.get("workflow_id", "")),
+                default="run-recon",
+            )
+            if not workflow_id:
+                self._write_json({"error": "workflow_id is required"}, status=400)
+                return
+            plugins_raw = workflow_payload.get("plugins")
+            if not isinstance(plugins_raw, list):
+                self._write_json({"error": "workflow.plugins must be an array"}, status=400)
+                return
+            sanitized_plugins: list[dict[str, Any]] = []
+            for idx, item in enumerate(plugins_raw):
+                if not isinstance(item, dict):
+                    self._write_json({"error": f"workflow.plugins[{idx}] must be an object"}, status=400)
+                    return
+                plugin = dict(item)
+                plugin_name = str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
+                if not plugin_name:
+                    self._write_json({"error": f"workflow.plugins[{idx}] is missing name/plugin_name/stage"}, status=400)
+                    return
+                plugin["name"] = plugin_name
+                parameters = plugin.get("parameters")
+                if parameters is None:
+                    plugin["parameters"] = {}
+                elif not isinstance(parameters, dict):
+                    self._write_json({"error": f"workflow.plugins[{idx}].parameters must be an object"}, status=400)
+                    return
+                preconditions = plugin.get("preconditions")
+                if preconditions is not None and not isinstance(preconditions, dict):
+                    self._write_json({"error": f"workflow.plugins[{idx}].preconditions must be an object"}, status=400)
+                    return
+                sanitized_plugins.append(plugin)
+            workflow_payload["workflow_id"] = workflow_id
+            workflow_payload["plugins"] = sanitized_plugins
+            if not str(workflow_payload.get("workflow_type") or "").strip():
+                workflow_payload["workflow_type"] = "coordinator_plugin_scheduler"
+            if not str(workflow_payload.get("schema_version") or "").strip():
+                workflow_payload["schema_version"] = "2.0.0"
+            workflow_path = _resolve_workflow_path(workflow_id) or _default_workflow_path_for_id(workflow_id)
+            workflow_path.parent.mkdir(parents=True, exist_ok=True)
+            workflow_path.write_text(json.dumps(workflow_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            self.coordinator_store.record_system_event(
+                "workflow.config.updated",
+                f"workflow:{workflow_id}",
+                {
+                    "source": "server.api.workflow_config",
+                    "workflow_id": workflow_id,
+                    "plugin_count": len(sanitized_plugins),
+                    "path_rel": _to_repo_relative_path(workflow_path),
+                },
+            )
+            self._write_json(
+                {
+                    "ok": True,
+                    "workflow_id": workflow_id,
+                    "path_rel": _to_repo_relative_path(workflow_path),
+                    "workflow": workflow_payload,
+                    "available_workflows": _workflow_index_payload(),
+                }
+            )
+            return
+
+        if path == "/api/coord/workflow/run":
+            workflow_id = _normalize_workflow_id(body.get("workflow_id"), default="run-recon")
+            workflow_path = _resolve_workflow_path(workflow_id)
+            if workflow_path is None:
+                self._write_json(
+                    {
+                        "error": f"workflow not found: {workflow_id or 'unknown'}",
+                        "available_workflows": _workflow_index_payload(),
+                    },
+                    status=404,
+                )
+                return
+            workflow = _load_workflow_payload(workflow_path)
+            if not workflow:
+                self._write_json({"error": f"workflow config is empty or invalid: {workflow_path.name}"}, status=500)
+                return
+            plugins = [item for item in (workflow.get("plugins") if isinstance(workflow.get("plugins"), list) else []) if isinstance(item, dict)]
+            starter_plugins: list[dict[str, Any]] = []
+            for plugin in plugins:
+                if not bool(plugin.get("enabled", True)):
+                    continue
+                prereq = plugin.get("preconditions", plugin.get("prerequisites", {}))
+                prereq_dict = prereq if isinstance(prereq, dict) else {}
+                has_artifact_or_dependency_gate = any(
+                    bool(prereq_dict.get(key))
+                    for key in ("artifacts_all", "artifacts_any", "requires_plugins_all", "requires_plugins_any", "plugins_all", "plugins_any")
+                )
+                require_target_completed = bool(prereq_dict.get("require_target_completed", False))
+                if has_artifact_or_dependency_gate or require_target_completed:
+                    continue
+                starter_plugins.append(plugin)
+            if not starter_plugins:
+                for plugin in plugins:
+                    if bool(plugin.get("enabled", True)):
+                        starter_plugins.append(plugin)
+                        break
+            if not starter_plugins:
+                self._write_json({"error": "workflow has no enabled plugins"}, status=400)
+                return
+            root_domains_raw = body.get("root_domains")
+            root_domains: list[str] = []
+            if isinstance(root_domains_raw, list):
+                root_domains = sorted({str(item or "").strip().lower() for item in root_domains_raw if str(item or "").strip()})
+            if not root_domains:
+                domain_limit = max(1, min(20000, _safe_int(body.get("domain_limit", 5000), 5000)))
+                snapshot = self.coordinator_store.workflow_scheduler_snapshot(limit=domain_limit)
+                root_domains = sorted(
+                    {
+                        str(item.get("root_domain") or "").strip().lower()
+                        for item in (snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else [])
+                        if str(item.get("root_domain") or "").strip()
+                    }
+                )
+            if not root_domains:
+                self._write_json({"error": "no domains available to run workflow"}, status=400)
+                return
+            enqueue_reason = str(body.get("reason", "") or "").strip() or f"manual_run:{workflow_id}"
+            allow_retry_failed = bool(body.get("allow_retry_failed", False))
+            rows: list[dict[str, Any]] = []
+            counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
+            for root_domain in root_domains:
+                for plugin in starter_plugins:
+                    plugin_name = str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
+                    if not plugin_name:
+                        continue
+                    resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
+                    max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                    result = self.coordinator_store.schedule_stage(
+                        root_domain,
+                        plugin_name,
+                        workflow_id=workflow_id,
+                        reason=enqueue_reason,
+                        allow_retry_failed=allow_retry_failed,
+                        max_attempts=max_attempts,
+                        checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
+                        progress={"status": "queued", "plugin_name": plugin_name},
+                        progress_artifact_type=f"workflow_progress_{plugin_name}",
+                        resume_mode=resume_mode,
+                    )
+                    reason = str(result.get("reason") or "")
+                    if bool(result.get("scheduled")):
+                        counts["scheduled"] += 1
+                    elif reason == "already_pending":
+                        counts["already_pending"] += 1
+                    elif reason == "already_running":
+                        counts["already_running"] += 1
+                    elif reason == "already_completed":
+                        counts["already_completed"] += 1
+                    elif reason.startswith("unsupported_status_") or reason in {"retry_not_allowed", "max_attempts_reached"}:
+                        counts["failed"] += 1
+                    else:
+                        counts["other"] += 1
+                    rows.append(
+                        {
+                            "root_domain": root_domain,
+                            "plugin_name": plugin_name,
+                            "scheduled": bool(result.get("scheduled")),
+                            "reason": reason,
+                            "status": str(result.get("status") or ""),
+                        }
+                    )
+            self.coordinator_store.record_system_event(
+                "workflow.run.enqueued",
+                f"workflow:{workflow_id}",
+                {
+                    "source": "server.api.workflow_run",
+                    "workflow_id": workflow_id,
+                    "domains_count": len(root_domains),
+                    "starter_plugins": [
+                        str(item.get("name") or item.get("plugin_name") or item.get("stage") or "").strip().lower()
+                        for item in starter_plugins
+                    ],
+                    "counts": counts,
+                },
+            )
+            self._write_json(
+                {
+                    "ok": True,
+                    "workflow_id": workflow_id,
+                    "domains_count": len(root_domains),
+                    "domains": root_domains,
+                    "starter_plugins": [
+                        str(item.get("name") or item.get("plugin_name") or item.get("stage") or "").strip().lower()
+                        for item in starter_plugins
+                    ],
+                    "counts": counts,
+                    "results": rows[:1000],
+                    "results_truncated": max(0, len(rows) - 1000),
+                }
+            )
+            return
+
+        if path == "/api/coord/workflow/mode":
+            mode = str(body.get("mode", "workflow_only") or "workflow_only").strip().lower()
+            if mode not in {"workflow_only", "all_running"}:
+                self._write_json({"error": "mode must be one of: workflow_only, all_running"}, status=400)
+                return
+            snapshot = self.coordinator_store.worker_statuses(stale_after_seconds=DEFAULT_COORDINATOR_LEASE_SECONDS)
+            workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+            workflow_workers: list[str] = []
+            non_workflow_workers: list[str] = []
+            for row in workers:
+                if not isinstance(row, dict):
+                    continue
+                worker_id = str(row.get("worker_id") or "").strip()
+                if not worker_id:
+                    continue
+                if self._is_workflow_runtime_worker(worker_id):
+                    workflow_workers.append(worker_id)
+                else:
+                    non_workflow_workers.append(worker_id)
+            changed: list[dict[str, Any]] = []
+            if mode == "workflow_only":
+                for worker_id in workflow_workers:
+                    if self.coordinator_store.queue_worker_command(worker_id, "start", payload={"source": "workflow_mode", "mode": mode}):
+                        changed.append({"worker_id": worker_id, "command": "start"})
+                for worker_id in non_workflow_workers:
+                    if self.coordinator_store.queue_worker_command(worker_id, "pause", payload={"source": "workflow_mode", "mode": mode}):
+                        changed.append({"worker_id": worker_id, "command": "pause"})
+            else:
+                for worker_id in workflow_workers + non_workflow_workers:
+                    if self.coordinator_store.queue_worker_command(worker_id, "start", payload={"source": "workflow_mode", "mode": mode}):
+                        changed.append({"worker_id": worker_id, "command": "start"})
+            self.coordinator_store.record_system_event(
+                "workflow.mode.updated",
+                "workflow:mode",
+                {
+                    "source": "server.api.workflow_mode",
+                    "mode": mode,
+                    "workflow_workers": workflow_workers,
+                    "non_workflow_workers": non_workflow_workers,
+                    "commands_queued": len(changed),
+                },
+            )
+            self._write_json(
+                {
+                    "ok": True,
+                    "mode": mode,
+                    "workflow_workers": workflow_workers,
+                    "non_workflow_workers": non_workflow_workers,
+                    "commands_queued": changed,
+                }
+            )
+            return
+
+        if path == "/api/coord/workflow/reload":
+            snapshot = self.coordinator_store.worker_statuses(stale_after_seconds=DEFAULT_COORDINATOR_LEASE_SECONDS)
+            workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+            queued: list[str] = []
+            for row in workers:
+                if not isinstance(row, dict):
+                    continue
+                worker_id = str(row.get("worker_id") or "").strip()
+                if not worker_id or not self._is_workflow_runtime_worker(worker_id):
+                    continue
+                if self.coordinator_store.queue_worker_command(worker_id, "reload", payload={"source": "workflow_reload"}):
+                    queued.append(worker_id)
+            self.coordinator_store.record_system_event(
+                "workflow.config.reload_requested",
+                "workflow:reload",
+                {
+                    "source": "server.api.workflow_reload",
+                    "workers": queued,
+                    "queued_count": len(queued),
+                },
+            )
+            self._write_json({"ok": True, "workers_queued": queued, "queued_count": len(queued)})
+            return
+
         if path == "/api/coord/artifact":
             root_domain = str(body.get("root_domain", "") or "").strip().lower()
             artifact_type = str(body.get("artifact_type", "") or "").strip().lower()
@@ -4667,8 +5053,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "worker_ids must be an array"}, status=400)
                 return
             worker_ids = [str(item or "").strip() for item in worker_ids_raw if str(item or "").strip()]
-            if command not in {"start", "pause", "stop"}:
-                self._write_json({"error": "command must be one of: start, pause, stop"}, status=400)
+            if command not in {"start", "pause", "stop", "reload"}:
+                self._write_json({"error": "command must be one of: start, pause, stop, reload"}, status=400)
                 return
             if not worker_ids:
                 self._write_json({"error": "at least one worker_id is required"}, status=400)
@@ -4776,6 +5162,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _is_safe_worker_id(self, worker_id: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9._-]{1,80}", str(worker_id or "").strip()))
+
+    @staticmethod
+    def _is_workflow_runtime_worker(worker_id: str) -> bool:
+        text = str(worker_id or "").strip().lower()
+        return "-plugin-" in text or "-scheduler-" in text
 
     def _resolve_worker_config_path(self, worker_id: str) -> Path | None:
         wid = str(worker_id or "").strip()

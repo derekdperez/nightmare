@@ -1291,3 +1291,27 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Why: deliver queue-safe, resumable, pluginized recon orchestration where workflow prerequisites are data/flag driven.
 - Updated `recon_extractor_high_value` implementation to scan Nightmare output files directly using the high-value rule list, instead of requiring Fozzy artifacts.
 - Why: `run-recon` workflow does not run Fozzy, so extractor stage must be independent and still emit extractor-compatible artifacts.
+
+## 2026-04-22
+
+- Added web-driven recon workflow operations in `templates/workflows.html.j2`:
+  - New `Run Recon` tab on `/workflows`.
+  - Step-by-step plugin editor (enabled/retry/max-attempts/parameters JSON).
+  - One-click sequence: save config, enforce workflow-only mode, request worker reload, enqueue starter plugins for all domains.
+- Added workflow configuration APIs in `server.py`:
+  - `GET /api/coord/workflow-config`
+  - `POST /api/coord/workflow-config`
+  - `POST /api/coord/workflow/run`
+  - `POST /api/coord/workflow/mode`
+  - `POST /api/coord/workflow/reload`
+- Extended worker-command support for live workflow updates:
+  - `server_app/store.py` now accepts `reload` in `queue_worker_command`.
+  - `server.py` worker command endpoint now validates `reload`.
+  - `coordinator.py` now applies `reload` by re-reading workflow file and rebuilding stage map in-process.
+- Added main app navigation links to workflow controls:
+  - Navbar now includes direct `Run Recon` link (`/workflows#recon`).
+  - Dashboard now includes quick links to workflow monitor/recon controls.
+- Validation:
+  - `python -m py_compile server.py coordinator.py server_app/store.py`
+  - `pytest -q tests/test_recon_workflow_config.py`
+  - `pytest -q tests/test_reporting_and_store_helpers.py`

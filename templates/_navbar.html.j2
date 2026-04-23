@@ -70,6 +70,7 @@
       <a class="app-nav-link" href="/dashboard" data-nav-path="/dashboard">Dashboard</a>
       <a class="app-nav-link" href="/workers" data-nav-path="/workers">Workers</a>
       <a class="app-nav-link" href="/workflows" data-nav-path="/workflows">Workflows</a>
+      <a class="app-nav-link" href="/workflows#recon" data-nav-path="/workflows#recon">Run Recon</a>
       <a class="app-nav-link" href="/database" data-nav-path="/database">Database</a>
       <a class="app-nav-link" href="/crawl-progress" data-nav-path="/crawl-progress">Crawl Progress</a>
       <a class="app-nav-link" href="/discovered-targets" data-nav-path="/discovered-targets">Discovered Targets</a>
@@ -86,9 +87,20 @@
 </nav>
 <script>
   (() => {
-    const current = window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
+    const path = window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
+    const hash = String(window.location.hash || "").toLowerCase();
+    const currentWithHash = `${path}${hash}`;
+    let matched = false;
     document.querySelectorAll(".app-nav-link").forEach((link) => {
-      if (link.dataset.navPath === current) link.classList.add("active");
+      if (String(link.dataset.navPath || "") === currentWithHash) {
+        link.classList.add("active");
+        matched = true;
+      }
     });
+    if (!matched) {
+      document.querySelectorAll(".app-nav-link").forEach((link) => {
+        if (String(link.dataset.navPath || "") === path) link.classList.add("active");
+      });
+    }
   })();
 </script>

@@ -2262,7 +2262,7 @@ ORDER BY w.worker_id ASC;
     def queue_worker_command(self, worker_id: str, command: str, payload: Optional[dict[str, Any]] = None) -> bool:
         wid = str(worker_id or "").strip()
         cmd = str(command or "").strip().lower()
-        if not wid or cmd not in {"start", "pause", "stop"}:
+        if not wid or cmd not in {"start", "pause", "stop", "reload"}:
             return False
         safe_payload = payload if isinstance(payload, dict) else {}
         cancel_sql = """
