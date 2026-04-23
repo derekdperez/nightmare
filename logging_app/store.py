@@ -11,8 +11,10 @@ from typing import Any, Optional
 
 try:
     import psycopg
+    from psycopg_pool import ConnectionPool
 except Exception:  # pragma: no cover - optional dependency in some test envs
     psycopg = None  # type: ignore[assignment]
+    ConnectionPool = None  # type: ignore[assignment]
 
 
 class LogStore:
@@ -23,6 +25,7 @@ class LogStore:
         if psycopg is None:
             raise RuntimeError("psycopg is required for LogStore")
         self.connect_timeout_seconds = self._resolve_connect_timeout_seconds()
+        self._pool = self._build_pool()
         self._ensure_schema()
 
     @staticmethod
@@ -40,12 +43,27 @@ class LogStore:
             value = 8
         return max(1, min(60, value))
 
-    def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(
-            self.database_url,
-            autocommit=False,
-            connect_timeout=self.connect_timeout_seconds,
+
+    def _build_pool(self):
+        if ConnectionPool is None:
+            raise RuntimeError("psycopg_pool is required for LogStore")
+        min_size = max(1, int(str(os.getenv("LOG_DB_POOL_MIN_SIZE", "1") or "1").strip() or "1"))
+        max_size = max(min_size, int(str(os.getenv("LOG_DB_POOL_MAX_SIZE", "8") or "8").strip() or "8"))
+        kwargs = {
+            "autocommit": False,
+            "connect_timeout": self.connect_timeout_seconds,
+        }
+        return ConnectionPool(
+            conninfo=self.database_url,
+            min_size=min_size,
+            max_size=max_size,
+            kwargs=kwargs,
+            open=True,
         )
+
+    def _connect(self):
+        return self._pool.connection()
+
 
     def _ensure_schema(self) -> None:
         ddl = """

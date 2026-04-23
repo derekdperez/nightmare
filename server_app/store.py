@@ -18,8 +18,10 @@ from urllib.parse import quote, urljoin, urlparse
 
 try:
     import psycopg
+    from psycopg_pool import ConnectionPool
 except Exception:  # pragma: no cover - optional dependency at runtime
     psycopg = None
+    ConnectionPool = None
 
 from nightmare_app.artifacts import FileSystemArtifactStore
 from shared.events import EventStream, build_projection
@@ -278,6 +280,7 @@ class CoordinatorStore:
         if not self.database_url:
             raise ValueError("database_url is required for coordinator mode")
         self._connect_timeout_seconds = self._resolve_connect_timeout_seconds()
+        self._pool = self._build_pool()
         artifact_root = str(
             artifact_store_root
             or os.getenv("NIGHTMARE_ARTIFACT_STORE_ROOT", "").strip()
@@ -288,11 +291,31 @@ class CoordinatorStore:
             compression_threshold_bytes=int(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_THRESHOLD_BYTES", "1000000") or "1000000"),
             enable_compression=str(os.getenv("NIGHTMARE_ARTIFACT_COMPRESSION_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"},
         )
-        self._db_inline_artifact_max_bytes = max(0, int(os.getenv("NIGHTMARE_DB_INLINE_ARTIFACT_MAX_BYTES", "262144") or "262144"))
+        self._db_inline_artifact_max_bytes = max(0, int(os.getenv("NIGHTMARE_DB_INLINE_ARTIFACT_MAX_BYTES", "16384") or "16384"))
         self._event_stream = EventStream(Path(artifact_root) / "events.ndjson")
+        self._presence_update_interval_seconds = max(5, int(os.getenv("COORDINATOR_WORKER_PRESENCE_INTERVAL_SECONDS", "15") or "15"))
+        self._durable_checkpoint_interval_seconds = max(15, int(os.getenv("COORDINATOR_PROGRESS_PERSIST_INTERVAL_SECONDS", "60") or "60"))
         self._ensure_schema()
 
     @staticmethod
+
+    def _build_pool(self):
+        if ConnectionPool is None:
+            raise RuntimeError("psycopg_pool is required for CoordinatorStore")
+        min_size = max(1, int(str(os.getenv("COORDINATOR_DB_POOL_MIN_SIZE", "1") or "1").strip() or "1"))
+        max_size = max(min_size, int(str(os.getenv("COORDINATOR_DB_POOL_MAX_SIZE", "12") or "12").strip() or "12"))
+        kwargs = {
+            "autocommit": False,
+            "connect_timeout": self._connect_timeout_seconds,
+        }
+        return ConnectionPool(
+            conninfo=self.database_url,
+            min_size=min_size,
+            max_size=max_size,
+            kwargs=kwargs,
+            open=True,
+        )
+
     def _resolve_connect_timeout_seconds() -> int:
         raw = str(
             os.getenv(
@@ -308,11 +331,8 @@ class CoordinatorStore:
         return max(1, min(60, value))
 
     def _connect(self):
-        return psycopg.connect(
-            self.database_url,
-            autocommit=False,
-            connect_timeout=self._connect_timeout_seconds,
-        )
+        return self._pool.connection()
+
 
     def _emit_event(self, event_type: str, aggregate_key: str, payload: dict[str, Any]) -> None:
         try:
@@ -323,11 +343,40 @@ class CoordinatorStore:
                 payload=dict(payload or {}),
             )
             self._event_stream.append(event)
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+INSERT INTO coordinator_recent_events(
+    event_id, created_at_utc, event_type, aggregate_key, schema_version, source, message, payload_json
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+ON CONFLICT (event_id) DO UPDATE
+SET created_at_utc = EXCLUDED.created_at_utc,
+    event_type = EXCLUDED.event_type,
+    aggregate_key = EXCLUDED.aggregate_key,
+    schema_version = EXCLUDED.schema_version,
+    source = EXCLUDED.source,
+    message = EXCLUDED.message,
+    payload_json = EXCLUDED.payload_json;
+""",
+                        (
+                            str(getattr(event, "event_id", "") or ""),
+                            getattr(event, "created_at", None),
+                            str(event_type or ""),
+                            str(aggregate_key or ""),
+                            int(registry.current_version("event_record") or 1),
+                            str(payload.get("source") or "")[:256],
+                            str(payload.get("message") or "")[:2000],
+                            json.dumps(dict(payload or {}), ensure_ascii=False),
+                        ),
+                    )
+                conn.commit()
         except Exception:
             return
 
     def projection_snapshot(self) -> dict[str, dict[str, Any]]:
-        return build_projection(self._event_stream.read())
+        return build_projection(self.list_events(limit=5000).get("events", []))
 
     @staticmethod
     def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -380,53 +429,95 @@ class CoordinatorStore:
     ) -> dict[str, Any]:
         requested = max(1, min(5000, int(limit or 250)))
         skip = max(0, int(offset or 0))
-        read_limit = min(20000, max(requested + skip, requested * 4, 1000))
-        reverse = str(sort_dir or "desc").strip().lower() != "asc"
-        rows = self._event_stream.read(limit=read_limit, reverse=reverse)
-        needle = str(search or "").strip().lower()
-        event_type_q = str(event_type or "").strip().lower()
-        aggregate_q = str(aggregate_key or "").strip().lower()
-        source_q = str(source or "").strip().lower()
-        filtered: list[dict[str, Any]] = []
-        for item in rows:
-            if not isinstance(item, dict):
-                continue
-            payload = item.get("payload")
-            payload_dict = payload if isinstance(payload, dict) else {}
-            item_source = str(payload_dict.get("source") or "").strip()
-            item_message = str(payload_dict.get("message") or "").strip()
-            normalized = {
-                "event_id": str(item.get("event_id") or ""),
-                "created_at": str(item.get("created_at") or ""),
-                "event_type": str(item.get("event_type") or ""),
-                "aggregate_key": str(item.get("aggregate_key") or ""),
-                "schema_version": int(item.get("schema_version") or 1),
-                "source": item_source,
-                "message": item_message,
-                "payload": payload_dict,
-            }
-            if event_type_q and event_type_q not in normalized["event_type"].lower():
-                continue
-            if aggregate_q and aggregate_q not in normalized["aggregate_key"].lower():
-                continue
-            if source_q and source_q not in normalized["source"].lower():
-                continue
-            if needle:
-                haystack = " ".join(
-                    [
-                        normalized["created_at"],
-                        normalized["event_type"],
-                        normalized["aggregate_key"],
-                        normalized["source"],
-                        normalized["message"],
-                        json.dumps(payload_dict, sort_keys=True, default=str),
-                    ]
-                ).lower()
-                if needle not in haystack:
+        clauses: list[str] = ["1=1"]
+        params: list[Any] = []
+        if search:
+            needle = f"%{str(search).strip().lower()}%"
+            clauses.append(
+                "(LOWER(event_type) LIKE %s OR LOWER(aggregate_key) LIKE %s OR LOWER(source) LIKE %s OR LOWER(message) LIKE %s OR LOWER(payload_json::text) LIKE %s)"
+            )
+            params.extend([needle, needle, needle, needle, needle])
+        if event_type:
+            clauses.append("LOWER(event_type) LIKE %s")
+            params.append(f"%{str(event_type).strip().lower()}%")
+        if aggregate_key:
+            clauses.append("LOWER(aggregate_key) LIKE %s")
+            params.append(f"%{str(aggregate_key).strip().lower()}%")
+        if source:
+            clauses.append("LOWER(source) LIKE %s")
+            params.append(f"%{str(source).strip().lower()}%")
+        where_sql = " AND ".join(clauses)
+        order_sql = "ASC" if str(sort_dir or "desc").strip().lower() == "asc" else "DESC"
+        sql = f"""
+SELECT event_id, created_at_utc, event_type, aggregate_key, schema_version, source, message, payload_json
+FROM coordinator_recent_events
+WHERE {where_sql}
+ORDER BY created_at_utc {order_sql}, event_id {order_sql}
+LIMIT %s OFFSET %s;
+"""
+        count_sql = f"SELECT COUNT(*) FROM coordinator_recent_events WHERE {where_sql};"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(count_sql, params)
+                total_row = cur.fetchone()
+                total = int(total_row[0] or 0) if total_row else 0
+                cur.execute(sql, [*params, requested, skip])
+                rows = cur.fetchall()
+            conn.commit()
+        if not rows and total == 0:
+            reverse = order_sql == "DESC"
+            fallback = self._event_stream.read(limit=min(20000, max(requested + skip, requested * 4, 1000)), reverse=reverse)
+            filtered: list[dict[str, Any]] = []
+            needle = str(search or "").strip().lower()
+            event_type_q = str(event_type or "").strip().lower()
+            aggregate_q = str(aggregate_key or "").strip().lower()
+            source_q = str(source or "").strip().lower()
+            for item in fallback:
+                if not isinstance(item, dict):
                     continue
-            filtered.append(normalized)
-        total = len(filtered)
-        page = filtered[skip : skip + requested]
+                payload = item.get("payload")
+                payload_dict = payload if isinstance(payload, dict) else {}
+                normalized = {
+                    "event_id": str(item.get("event_id") or ""),
+                    "created_at": str(item.get("created_at") or ""),
+                    "event_type": str(item.get("event_type") or ""),
+                    "aggregate_key": str(item.get("aggregate_key") or ""),
+                    "schema_version": int(item.get("schema_version") or 1),
+                    "source": str(payload_dict.get("source") or "").strip(),
+                    "message": str(payload_dict.get("message") or "").strip(),
+                    "payload": payload_dict,
+                }
+                if event_type_q and event_type_q not in normalized["event_type"].lower():
+                    continue
+                if aggregate_q and aggregate_q not in normalized["aggregate_key"].lower():
+                    continue
+                if source_q and source_q not in normalized["source"].lower():
+                    continue
+                if needle and needle not in json.dumps(normalized, sort_keys=True, default=str).lower():
+                    continue
+                filtered.append(normalized)
+            total = len(filtered)
+            rows_payload = filtered[skip : skip + requested]
+            return {
+                "generated_at_utc": _iso_now(),
+                "total": total,
+                "offset": skip,
+                "limit": requested,
+                "events": rows_payload,
+            }
+        page = [
+            {
+                "event_id": str(row[0] or ""),
+                "created_at": row[1].isoformat() if row[1] else "",
+                "event_type": str(row[2] or ""),
+                "aggregate_key": str(row[3] or ""),
+                "schema_version": int(row[4] or 1),
+                "source": str(row[5] or ""),
+                "message": str(row[6] or ""),
+                "payload": row[7] if isinstance(row[7], dict) else {},
+            }
+            for row in rows
+        ]
         return {
             "generated_at_utc": _iso_now(),
             "total": total,
@@ -434,6 +525,73 @@ class CoordinatorStore:
             "limit": requested,
             "events": page,
         }
+
+    def _refresh_domain_projection(self, root_domain: str, *, conn: Any | None = None) -> None:
+        payload = self._build_workflow_domain_payload(root_domain, conn=conn)
+        if not payload:
+            return
+        owns_conn = conn is None
+        if owns_conn:
+            conn = self._connect()
+            conn.__enter__()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+INSERT INTO coordinator_domain_projection(root_domain, summary_json, updated_at_utc)
+VALUES (%s, %s::jsonb, NOW())
+ON CONFLICT (root_domain) DO UPDATE
+SET summary_json = EXCLUDED.summary_json,
+    updated_at_utc = NOW();
+""",
+                    (str(root_domain or "").strip().lower(), json.dumps(payload, ensure_ascii=False)),
+                )
+            if owns_conn:
+                conn.commit()
+        finally:
+            if owns_conn:
+                conn.__exit__(None, None, None)
+
+    def _upsert_stage_hot_status(
+        self,
+        *,
+        conn: Any,
+        workflow_id: str,
+        root_domain: str,
+        stage: str,
+        state: str,
+        progress: Optional[dict[str, Any]] = None,
+    ) -> None:
+        progress = dict(progress or {}) if isinstance(progress, dict) else {}
+        percent_raw = progress.get("percent") if isinstance(progress, dict) else 0
+        try:
+            percent = float(percent_raw or 0)
+        except Exception:
+            percent = 0.0
+        current_unit = str(progress.get("current_unit") or progress.get("unit") or "")[:256]
+        last_milestone = str(progress.get("milestone") or progress.get("message") or "")[:512]
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+INSERT INTO coordinator_stage_status_hot(workflow_id, root_domain, stage, state, progress_percent, current_unit, last_milestone, updated_at_utc)
+VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+ON CONFLICT (workflow_id, root_domain, stage) DO UPDATE
+SET state = EXCLUDED.state,
+    progress_percent = EXCLUDED.progress_percent,
+    current_unit = EXCLUDED.current_unit,
+    last_milestone = EXCLUDED.last_milestone,
+    updated_at_utc = NOW();
+""",
+                (
+                    str(workflow_id or "default").strip().lower() or "default",
+                    str(root_domain or "").strip().lower(),
+                    str(stage or "").strip().lower(),
+                    str(state or ""),
+                    float(percent),
+                    current_unit,
+                    last_milestone,
+                ),
+            )
 
     @staticmethod
     def _risk_score_for_artifact(artifact_type: str, size_bytes: int) -> float:
@@ -575,6 +733,24 @@ CREATE INDEX IF NOT EXISTS idx_worker_presence_last_seen
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS progress_json JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS progress_artifact_type TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS resume_mode TEXT NOT NULL DEFAULT 'exact'",
+
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT 'workflow_stage'",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'write'",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS concurrency_group TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE coordinator_stage_tasks ADD COLUMN IF NOT EXISTS max_parallelism INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS retention_class TEXT NOT NULL DEFAULT 'important_raw'",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS local_path TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE coordinator_artifacts ADD COLUMN IF NOT EXISTS local_available_on_worker TEXT NOT NULL DEFAULT ''",
+            "CREATE TABLE IF NOT EXISTS coordinator_recent_events (event_id TEXT PRIMARY KEY, created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), event_type TEXT NOT NULL, aggregate_key TEXT NOT NULL DEFAULT '', schema_version INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', payload_json JSONB NOT NULL DEFAULT '{}'::jsonb)",
+            "CREATE INDEX IF NOT EXISTS idx_coordinator_recent_events_created ON coordinator_recent_events(created_at_utc DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_coordinator_recent_events_type ON coordinator_recent_events(event_type, created_at_utc DESC)",
+            "CREATE TABLE IF NOT EXISTS coordinator_domain_projection (root_domain TEXT PRIMARY KEY, summary_json JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+            "CREATE TABLE IF NOT EXISTS coordinator_stage_status_hot (workflow_id TEXT NOT NULL DEFAULT 'default', root_domain TEXT NOT NULL, stage TEXT NOT NULL, state TEXT NOT NULL DEFAULT '', progress_percent DOUBLE PRECISION NOT NULL DEFAULT 0, current_unit TEXT NOT NULL DEFAULT '', last_milestone TEXT NOT NULL DEFAULT '', updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(workflow_id, root_domain, stage))",
+            "CREATE INDEX IF NOT EXISTS idx_targets_claim_partial ON coordinator_targets(line_number, created_at_utc) WHERE status IN ('pending','running')",
+            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_claim_partial ON coordinator_stage_tasks(workflow_id, created_at_utc) WHERE status IN ('pending','running')",
+            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_running_domain_partial ON coordinator_stage_tasks(root_domain, lease_expires_at) WHERE status = 'running'",
+            "CREATE INDEX IF NOT EXISTS idx_targets_running_domain_partial ON coordinator_targets(root_domain, lease_expires_at) WHERE status = 'running'",
             """
 DO $$
 BEGIN
@@ -608,8 +784,7 @@ END $$;
                 except Exception:
                     conn.rollback()
 
-    @staticmethod
-    def _touch_worker_presence(cur: Any, worker_id: str, activity: str) -> None:
+    def _touch_worker_presence(self, cur: Any, worker_id: str, activity: str, *, force: bool = False) -> None:
         wid = str(worker_id or "").strip()
         if not wid:
             return
@@ -618,11 +793,16 @@ END $$;
 INSERT INTO coordinator_worker_presence(worker_id, last_seen_at_utc, last_activity, updated_at_utc)
 VALUES (%s, NOW(), %s, NOW())
 ON CONFLICT (worker_id) DO UPDATE
-SET last_seen_at_utc = NOW(),
+SET last_seen_at_utc = CASE
+      WHEN %s THEN NOW()
+      WHEN coordinator_worker_presence.last_seen_at_utc IS NULL THEN NOW()
+      WHEN coordinator_worker_presence.last_seen_at_utc < NOW() - ((%s)::text || ' seconds')::interval THEN NOW()
+      ELSE coordinator_worker_presence.last_seen_at_utc
+    END,
     last_activity = EXCLUDED.last_activity,
     updated_at_utc = NOW();
 """
-        cur.execute(sql, (wid, act[:64]))
+        cur.execute(sql, (wid, act[:64], bool(force), int(self._presence_update_interval_seconds or 15)))
 
     def register_targets(self, targets: list[str], *, replace_existing: bool = False) -> dict[str, Any]:
         inserted = 0
@@ -694,6 +874,10 @@ WITH candidate AS (
             AND s.status = 'running'
             AND s.lease_expires_at IS NOT NULL
             AND s.lease_expires_at >= NOW()
+            AND (
+                COALESCE(s.resource_class, 'workflow_stage') IN ('crawl', 'network_scan')
+                OR COALESCE(s.access_mode, 'write') <> 'read'
+            )
       )
     ORDER BY ct.line_number ASC, ct.created_at_utc ASC
     FOR UPDATE SKIP LOCKED
@@ -766,18 +950,6 @@ WHERE entry_id = %s
                 cur.execute(sql, (lease, str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
             conn.commit()
-        if updated > 0:
-            self.record_system_event(
-                "target.heartbeat",
-                f"target:{str(entry_id)}",
-                {
-                    "source": "coordinator_store.heartbeat",
-                    "entry_id": str(entry_id),
-                    "worker_id": str(worker_id),
-                    "lease_seconds": lease,
-                    "status": "running",
-                },
-            )
         return updated > 0
 
     def finish(self, entry_id: str, worker_id: str, *, exit_code: int, error: str = "") -> bool:
@@ -797,9 +969,14 @@ WHERE entry_id = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                self._touch_worker_presence(cur, str(worker_id), "complete_target")
+                self._touch_worker_presence(cur, str(worker_id), "complete_target", force=True)
                 cur.execute(sql, (status, int(exit_code), str(error or "")[:2000], str(entry_id), str(worker_id)))
                 updated = int(cur.rowcount or 0)
+                if updated > 0:
+                    cur.execute("SELECT root_domain FROM coordinator_targets WHERE entry_id = %s;", (str(entry_id),))
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        self._refresh_domain_projection(str(row[0]), conn=conn)
             conn.commit()
         if updated > 0:
             self.record_system_event(
@@ -832,66 +1009,6 @@ WHERE entry_id = %s
         if not isinstance(artifact, dict):
             return {}
         return self._decode_json_bytes(bytes(artifact.get("content") or b""))
-
-    def _load_url_inventory_artifact_payload(self, root_domain: str) -> dict[str, Any]:
-        artifact = self.get_artifact(str(root_domain or "").strip().lower(), "nightmare_url_inventory_json")
-        if not isinstance(artifact, dict):
-            return {}
-        return self._decode_json_bytes(bytes(artifact.get("content") or b""))
-
-    def _iter_session_payload_candidates(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        queue: list[dict[str, Any]] = [payload] if isinstance(payload, dict) else []
-        seen: set[int] = set()
-        while queue:
-            current = queue.pop(0)
-            if not isinstance(current, dict):
-                continue
-            marker = id(current)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            out.append(current)
-            for key in ("state", "payload", "session", "data"):
-                child = current.get(key)
-                if isinstance(child, dict):
-                    queue.append(child)
-        return out
-
-    def _extract_url_inventory_map(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        out: dict[str, dict[str, Any]] = {}
-        for candidate in self._iter_session_payload_candidates(payload):
-            direct = candidate.get("url_inventory")
-            if isinstance(direct, dict):
-                for raw_url, raw_record in direct.items():
-                    url_text = str(raw_url or "").strip()
-                    if not url_text:
-                        continue
-                    out[url_text] = dict(raw_record) if isinstance(raw_record, dict) else {"url": url_text}
-            for entries_key in ("entries_raw", "entries"):
-                entries = candidate.get(entries_key)
-                if not isinstance(entries, list):
-                    continue
-                for row in entries:
-                    if not isinstance(row, dict):
-                        continue
-                    url_text = str(row.get("url") or row.get("requested_url") or "").strip()
-                    if not url_text:
-                        continue
-                    out[url_text] = dict(row)
-        return out
-
-    @staticmethod
-    def _extract_visited_urls_from_inventory(url_inventory: dict[str, dict[str, Any]]) -> list[str]:
-        visited: list[str] = []
-        for url_text, record in url_inventory.items():
-            if not isinstance(record, dict):
-                continue
-            was_crawled = bool(record.get("was_crawled") or record.get("crawl_requested"))
-            has_status = record.get("crawl_status_code") is not None or record.get("existence_status_code") is not None
-            if was_crawled or has_status:
-                visited.append(str(url_text))
-        return visited
 
 
     def _bulk_load_sessions(
@@ -1018,60 +1135,6 @@ WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_session_json';
             if int(artifact_metrics.get("discovered_urls_count") or 0) > int(current_metrics.get("discovered_urls_count") or 0):
                 sessions_by_domain[rd] = normalized
 
-        still_missing: list[str] = []
-        for rd in ordered_domains:
-            metrics = self._session_url_metrics(sessions_by_domain.get(rd))
-            if not bool(metrics.get("has_session_data")):
-                still_missing.append(rd)
-        if artifact_fallback_limit is not None and still_missing:
-            fallback_cap = max(0, int(artifact_fallback_limit or 0))
-            still_missing = still_missing[:fallback_cap]
-        if still_missing:
-            inventory_sql = """
-SELECT root_domain, content, content_encoding, storage_uri, compression, updated_at_utc
-FROM coordinator_artifacts
-WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_url_inventory_json';
-"""
-            with self._connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(inventory_sql, (still_missing,))
-                    inventory_rows = cur.fetchall()
-                conn.commit()
-            for row in inventory_rows:
-                rd = str(row[0] or "").strip().lower()
-                if not rd:
-                    continue
-                content = bytes(row[1] or b"")
-                encoding = str(row[2] or "identity")
-                storage_uri = str(row[3] or "").strip()
-                compression = str(row[4] or "identity")
-                updated_at = row[5].isoformat() if row[5] else None
-                if storage_uri and (not content):
-                    try:
-                        content = self._artifact_store.get_bytes(storage_uri, compression=compression)
-                    except Exception:
-                        content = b""
-                if encoding == "gzip":
-                    try:
-                        content = gzip.decompress(content)
-                    except Exception:
-                        content = b""
-                inventory_payload = self._decode_json_bytes(content)
-                current = sessions_by_domain.get(rd) if isinstance(sessions_by_domain.get(rd), dict) else {}
-                normalized = self._normalize_session_payload(
-                    rd,
-                    inventory_payload,
-                    fallback_start_url=str(current.get("start_url") or ""),
-                    fallback_saved_at_utc=updated_at,
-                    fallback_max_pages=current.get("max_pages"),
-                )
-                if normalized is None:
-                    continue
-                current_metrics = self._session_url_metrics(current)
-                normalized_metrics = self._session_url_metrics(normalized)
-                if not bool(current_metrics.get("has_session_data")) or int(normalized_metrics.get("discovered_urls_count") or 0) >= int(current_metrics.get("discovered_urls_count") or 0):
-                    sessions_by_domain[rd] = normalized
-
         return sessions_by_domain
 
     def _normalize_session_payload(
@@ -1086,131 +1149,35 @@ WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_url_inventory_json';
         body = payload if isinstance(payload, dict) else {}
         if not body:
             return None
-        candidates = self._iter_session_payload_candidates(body)
-        state: dict[str, Any] = {}
-        frontier: list[Any] = []
-        start_url = ""
-        saved_at_utc = None
-        max_pages = None
-        for candidate in candidates:
-            if not start_url:
-                start_url = str(candidate.get("start_url") or "").strip()
-            if saved_at_utc is None:
-                candidate_saved = candidate.get("saved_at_utc")
-                if candidate_saved is not None:
-                    saved_at_utc = candidate_saved
-            if max_pages is None:
-                candidate_max = candidate.get("max_pages")
-                if candidate_max is not None:
-                    max_pages = candidate_max
-            if not frontier and isinstance(candidate.get("frontier"), list):
-                frontier = list(candidate.get("frontier") or [])
-            candidate_state = candidate.get("state")
-            if not state and isinstance(candidate_state, dict):
-                state = dict(candidate_state)
-        url_inventory = self._extract_url_inventory_map(body)
-        if not state:
-            discovered_urls = []
-            visited_urls = []
-            for candidate in candidates:
-                if not discovered_urls and isinstance(candidate.get("discovered_urls"), list):
-                    discovered_urls = [str(item or "").strip() for item in candidate.get("discovered_urls", []) if str(item or "").strip()]
-                if not visited_urls and isinstance(candidate.get("visited_urls"), list):
-                    visited_urls = [str(item or "").strip() for item in candidate.get("visited_urls", []) if str(item or "").strip()]
-            if not discovered_urls and url_inventory:
-                discovered_urls = sorted(url_inventory.keys())
-            if not visited_urls and url_inventory:
-                visited_urls = self._extract_visited_urls_from_inventory(url_inventory)
-            state = {
-                "discovered_urls": discovered_urls,
-                "visited_urls": visited_urls,
-                "url_inventory": url_inventory,
-            }
-        elif url_inventory and not isinstance(state.get("url_inventory"), dict):
-            state["url_inventory"] = url_inventory
-
-        if not start_url:
-            start_url = str(fallback_start_url or "").strip()
-        if saved_at_utc is None:
-            saved_at_utc = fallback_saved_at_utc
+        state = body.get("state") if isinstance(body.get("state"), dict) else {}
+        frontier = body.get("frontier") if isinstance(body.get("frontier"), list) else []
+        start_url = str(body.get("start_url") or fallback_start_url or "").strip()
+        saved_at_utc = body.get("saved_at_utc") or fallback_saved_at_utc
+        max_pages = body.get("max_pages")
         if max_pages is None:
             max_pages = fallback_max_pages
-
-        normalized_payload = {
+        return {
             "root_domain": str(body.get("root_domain") or root_domain or "").strip().lower(),
             "start_url": start_url,
             "max_pages": max_pages,
             "saved_at_utc": saved_at_utc,
-            "frontier": frontier,
-            "state": state,
-        }
-        return {
-            "root_domain": str(normalized_payload.get("root_domain") or root_domain or "").strip().lower(),
-            "start_url": start_url,
-            "max_pages": max_pages,
-            "saved_at_utc": saved_at_utc,
             "state": state,
             "frontier": frontier,
-            "payload": normalized_payload,
+            "payload": body,
         }
 
 
     def _session_url_metrics(self, session: Optional[dict[str, Any]]) -> dict[str, Any]:
         body = session if isinstance(session, dict) else {}
-        candidates = self._iter_session_payload_candidates(body) if body else []
-        state: dict[str, Any] = {}
-        frontier: list[Any] = []
-        discovered_urls: list[Any] = []
-        visited_urls: list[Any] = []
-        for candidate in candidates:
-            candidate_state = candidate.get("state")
-            if not state and isinstance(candidate_state, dict):
-                state = candidate_state
-            if not frontier and isinstance(candidate.get("frontier"), list):
-                frontier = candidate.get("frontier", [])
-            if not discovered_urls and isinstance(candidate.get("discovered_urls"), list):
-                discovered_urls = candidate.get("discovered_urls", [])
-            if not visited_urls and isinstance(candidate.get("visited_urls"), list):
-                visited_urls = candidate.get("visited_urls", [])
-        if isinstance(state.get("discovered_urls"), list):
-            discovered_urls = state.get("discovered_urls", [])
-        if isinstance(state.get("visited_urls"), list):
-            visited_urls = state.get("visited_urls", [])
-        url_inventory = self._extract_url_inventory_map(body) if body else {}
-        if not url_inventory and isinstance(state.get("url_inventory"), dict):
-            raw_inventory = state.get("url_inventory")
-            url_inventory = {
-                str(raw_url or "").strip(): (dict(raw_record) if isinstance(raw_record, dict) else {"url": str(raw_url or "").strip()})
-                for raw_url, raw_record in raw_inventory.items()
-                if str(raw_url or "").strip()
-            }
+        state = body.get("state") if isinstance(body.get("state"), dict) else {}
+        frontier = body.get("frontier") if isinstance(body.get("frontier"), list) else []
+        discovered_urls = state.get("discovered_urls") if isinstance(state.get("discovered_urls"), list) else []
+        visited_urls = state.get("visited_urls") if isinstance(state.get("visited_urls"), list) else []
+        url_inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
 
         discovered_urls_count = len(discovered_urls)
         if discovered_urls_count <= 0 and url_inventory:
             discovered_urls_count = len([u for u in url_inventory.keys() if str(u or "").strip()])
-        if discovered_urls_count <= 0:
-            for candidate in candidates:
-                for key in ("total_urls_raw", "total_urls", "entry_count", "unique_urls_discovered"):
-                    try:
-                        candidate_count = int(candidate.get(key) or 0)
-                    except Exception:
-                        candidate_count = 0
-                    if candidate_count > discovered_urls_count:
-                        discovered_urls_count = candidate_count
-
-        visited_urls_count = len(visited_urls)
-        if visited_urls_count <= 0 and url_inventory:
-            visited_urls_count = len(self._extract_visited_urls_from_inventory(url_inventory))
-
-        frontier_count = len(frontier)
-        if frontier_count <= 0:
-            for candidate in candidates:
-                try:
-                    candidate_frontier = int(candidate.get("frontier_count") or 0)
-                except Exception:
-                    candidate_frontier = 0
-                if candidate_frontier > frontier_count:
-                    frontier_count = candidate_frontier
 
         method_counts: dict[str, int] = {}
         spider_stats: dict[str, int] = {}
@@ -1236,14 +1203,14 @@ WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_url_inventory_json';
 
         return {
             "discovered_urls_count": discovered_urls_count,
-            "visited_urls_count": visited_urls_count,
-            "frontier_count": frontier_count,
+            "visited_urls_count": len(visited_urls),
+            "frontier_count": len(frontier),
             "method_counts": method_counts,
             "spider_stats": spider_stats,
             "has_session_data": bool(body) and (
                 discovered_urls_count > 0
-                or visited_urls_count > 0
-                or frontier_count > 0
+                or len(visited_urls) > 0
+                or len(frontier) > 0
                 or bool(url_inventory)
             ),
         }
@@ -1279,9 +1246,10 @@ WHERE root_domain = %s;
         if not include_artifact_fallback:
             return db_session
         artifact_session = self._normalize_session_payload(rd, self._load_session_artifact_payload(rd))
-        selected_session = db_session
-        if artifact_session is not None and selected_session is None:
-            selected_session = artifact_session
+        if artifact_session is None:
+            return db_session
+        if db_session is None:
+            return artifact_session
         def _parse_ts(value: Any) -> Optional[datetime]:
             raw = str(value or "").strip()
             if not raw:
@@ -1290,35 +1258,17 @@ WHERE root_domain = %s;
                 return datetime.fromisoformat(raw.replace("Z", "+00:00"))
             except Exception:
                 return None
-        if artifact_session is not None and db_session is not None:
-            db_saved = _parse_ts(db_session.get("saved_at_utc"))
-            artifact_saved = _parse_ts(artifact_session.get("saved_at_utc"))
-            if artifact_saved and (db_saved is None or artifact_saved >= db_saved):
-                selected_session = artifact_session
-            else:
-                db_metrics = self._session_url_metrics(db_session)
-                artifact_metrics = self._session_url_metrics(artifact_session)
-                if int(artifact_metrics.get("discovered_urls_count") or 0) > int(db_metrics.get("discovered_urls_count") or 0):
-                    selected_session = artifact_session
-
-        selected_metrics = self._session_url_metrics(selected_session)
-        if bool(selected_metrics.get("has_session_data")):
-            return selected_session
-
-        inventory_payload = self._load_url_inventory_artifact_payload(rd)
-        inventory_session = self._normalize_session_payload(
-            rd,
-            inventory_payload,
-            fallback_start_url=str((selected_session or {}).get("start_url") or ""),
-            fallback_saved_at_utc=str((selected_session or {}).get("saved_at_utc") or "") or None,
-            fallback_max_pages=(selected_session or {}).get("max_pages"),
-        )
-        if inventory_session is None:
-            return selected_session
-        inventory_metrics = self._session_url_metrics(inventory_session)
-        if bool(inventory_metrics.get("has_session_data")):
-            return inventory_session
-        return selected_session
+        db_saved = _parse_ts(db_session.get("saved_at_utc"))
+        artifact_saved = _parse_ts(artifact_session.get("saved_at_utc"))
+        if artifact_saved and (db_saved is None or artifact_saved >= db_saved):
+            return artifact_session
+        db_state = db_session.get("state") if isinstance(db_session.get("state"), dict) else {}
+        artifact_state = artifact_session.get("state") if isinstance(artifact_session.get("state"), dict) else {}
+        db_urls = db_state.get("discovered_urls") if isinstance(db_state.get("discovered_urls"), list) else []
+        artifact_urls = artifact_state.get("discovered_urls") if isinstance(artifact_state.get("discovered_urls"), list) else []
+        if len(artifact_urls) > len(db_urls):
+            return artifact_session
+        return db_session
 
     def save_session(
         self,
@@ -1362,6 +1312,7 @@ SET start_url = EXCLUDED.start_url,
                         json.dumps(payload, ensure_ascii=False),
                     ),
                 )
+                self._refresh_domain_projection(rd, conn=conn)
             conn.commit()
         self.record_system_event(
             "session.saved",
@@ -1629,6 +1580,137 @@ ORDER BY ordinal_position;
             "generated_at_utc": _iso_now(),
         }
 
+    def _build_workflow_domain_payload(self, root_domain: str, *, conn: Any | None = None) -> dict[str, Any]:
+        rd = str(root_domain or "").strip().lower()
+        if not rd:
+            return {}
+        owns_conn = conn is None
+        if owns_conn:
+            conn = self._connect()
+            conn.__enter__()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+SELECT workflow_id, stage, status, attempt_count, exit_code, error, updated_at_utc, completed_at_utc,
+       checkpoint_json, progress_json, progress_artifact_type, resume_mode, worker_id,
+       COALESCE(resource_class, 'workflow_stage') AS resource_class,
+       COALESCE(access_mode, 'write') AS access_mode,
+       COALESCE(concurrency_group, '') AS concurrency_group
+FROM coordinator_stage_tasks
+WHERE root_domain = %s
+ORDER BY workflow_id ASC, stage ASC;
+""",
+                    (rd,),
+                )
+                stage_rows = cur.fetchall()
+                cur.execute(
+                    """
+SELECT artifact_type, updated_at_utc, content_sha256, content_size_bytes, storage_backend, storage_uri,
+       retention_class, manifest_json
+FROM coordinator_artifacts
+WHERE root_domain = %s
+ORDER BY artifact_type ASC;
+""",
+                    (rd,),
+                )
+                artifact_rows = cur.fetchall()
+                cur.execute(
+                    """
+SELECT
+  COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
+  COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
+  COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
+  COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets
+FROM coordinator_targets
+WHERE root_domain = %s;
+""",
+                    (rd,),
+                )
+                target_row = cur.fetchone()
+                cur.execute(
+                    """
+SELECT summary_json, updated_at_utc
+FROM coordinator_domain_projection
+WHERE root_domain = %s;
+""",
+                    (rd,),
+                )
+                proj_row = cur.fetchone()
+            if owns_conn:
+                conn.commit()
+        finally:
+            if owns_conn:
+                conn.__exit__(None, None, None)
+        stage_map: dict[str, dict[str, dict[str, Any]]] = {}
+        legacy_stage_map: dict[str, dict[str, Any]] = {}
+        for row in stage_rows:
+            workflow_id = str(row[0] or "default").strip().lower() or "default"
+            stg = str(row[1] or "").strip().lower()
+            if not stg:
+                continue
+            item = {
+                "workflow_id": workflow_id,
+                "stage": stg,
+                "plugin_name": stg,
+                "status": str(row[2] or "").strip().lower(),
+                "attempt_count": int(row[3] or 0),
+                "exit_code": (int(row[4]) if row[4] is not None else None),
+                "error": str(row[5] or ""),
+                "updated_at_utc": row[6].isoformat() if row[6] else None,
+                "completed_at_utc": row[7].isoformat() if row[7] else None,
+                "checkpoint": row[8] if isinstance(row[8], dict) else {},
+                "progress": row[9] if isinstance(row[9], dict) else {},
+                "progress_artifact_type": str(row[10] or ""),
+                "resume_mode": str(row[11] or "exact"),
+                "worker_id": str(row[12] or ""),
+                "resource_class": str(row[13] or "workflow_stage"),
+                "access_mode": str(row[14] or "write"),
+                "concurrency_group": str(row[15] or ""),
+            }
+            stage_map.setdefault(workflow_id, {})[stg] = item
+            legacy_stage_map[stg] = item
+        artifacts = [
+            {
+                "artifact_type": str(row[0] or ""),
+                "updated_at_utc": row[1].isoformat() if row[1] else None,
+                "sha256": str(row[2] or ""),
+                "size_bytes": int(row[3] or 0),
+                "storage_backend": str(row[4] or ""),
+                "storage_uri": str(row[5] or ""),
+                "retention_class": str(row[6] or "important_raw"),
+                "manifest": row[7] if isinstance(row[7], dict) else {},
+            }
+            for row in artifact_rows
+            if str(row[0] or "")
+        ]
+        projection = proj_row[0] if proj_row and isinstance(proj_row[0], dict) else {}
+        pending_targets = int((target_row[0] if target_row else 0) or 0)
+        running_targets = int((target_row[1] if target_row else 0) or 0)
+        completed_targets = int((target_row[2] if target_row else 0) or 0)
+        failed_targets = int((target_row[3] if target_row else 0) or 0)
+        return {
+            "root_domain": rd,
+            "target_counts": {
+                "pending": pending_targets,
+                "running": running_targets,
+                "completed": completed_targets,
+                "failed": failed_targets,
+            },
+            "stages_by_workflow": stage_map,
+            "stages": legacy_stage_map,
+            "artifacts": artifacts,
+            "summary": projection if isinstance(projection, dict) else {},
+        }
+
+    def workflow_domain_snapshot(self, root_domain: str) -> dict[str, Any]:
+        payload = self._build_workflow_domain_payload(root_domain)
+        return {
+            "generated_at_utc": _iso_now(),
+            "found": bool(payload),
+            "domain": payload,
+        }
+
     def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         safe_limit = max(1, min(5000, int(limit or 2000)))
         domains_sql = """
@@ -1645,353 +1727,22 @@ ORDER BY root_domain ASC
 LIMIT %s;
 """
         domains: list[str] = []
-        stage_rows: list[Any] = []
-        artifact_rows: list[Any] = []
-        target_rows: list[Any] = []
+        payloads: list[dict[str, Any]] = []
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(domains_sql, (safe_limit,))
                 domains = [str(row[0] or "").strip().lower() for row in cur.fetchall() if str(row[0] or "").strip()]
-                if domains:
-                    cur.execute(
-                        """
-SELECT workflow_id, root_domain, stage, status, attempt_count, exit_code, error, updated_at_utc, completed_at_utc,
-       checkpoint_json, progress_json, progress_artifact_type, resume_mode, worker_id
-FROM coordinator_stage_tasks
-WHERE root_domain = ANY(%s)
-ORDER BY workflow_id ASC, root_domain ASC, stage ASC;
-""",
-                        (domains,),
-                    )
-                    stage_rows = cur.fetchall()
-                    cur.execute(
-                        """
-SELECT root_domain, artifact_type, updated_at_utc
-FROM coordinator_artifacts
-WHERE root_domain = ANY(%s)
-ORDER BY root_domain ASC, artifact_type ASC;
-""",
-                        (domains,),
-                    )
-                    artifact_rows = cur.fetchall()
-                    cur.execute(
-                        """
-SELECT
-  root_domain,
-  COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
-  COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
-  COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
-  COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets
-FROM coordinator_targets
-WHERE root_domain = ANY(%s)
-GROUP BY root_domain
-ORDER BY root_domain ASC;
-""",
-                        (domains,),
-                    )
-                    target_rows = cur.fetchall()
+            for domain in domains:
+                payload = self._build_workflow_domain_payload(domain, conn=conn)
+                if payload:
+                    payloads.append(payload)
             conn.commit()
-
-        stage_map: dict[str, dict[str, dict[str, Any]]] = {}
-        legacy_stage_map: dict[str, dict[str, Any]] = {}
-        for row in stage_rows:
-            workflow_id = str(row[0] or "default").strip().lower() or "default"
-            rd = str(row[1] or "").strip().lower()
-            stg = str(row[2] or "").strip().lower()
-            if not rd or not stg:
-                continue
-            row_payload = {
-                "workflow_id": workflow_id,
-                "stage": stg,
-                "plugin_name": stg,
-                "status": str(row[3] or "").strip().lower(),
-                "attempt_count": int(row[4] or 0),
-                "exit_code": (int(row[5]) if row[5] is not None else None),
-                "error": str(row[6] or ""),
-                "updated_at_utc": row[7].isoformat() if row[7] else None,
-                "completed_at_utc": row[8].isoformat() if row[8] else None,
-                "checkpoint": row[9] if isinstance(row[9], dict) else {},
-                "progress": row[10] if isinstance(row[10], dict) else {},
-                "progress_artifact_type": str(row[11] or ""),
-                "resume_mode": str(row[12] or "exact"),
-                "worker_id": str(row[13] or ""),
-            }
-            stage_map.setdefault(rd, {}).setdefault(workflow_id, {})[stg] = row_payload
-            if workflow_id == "default":
-                legacy_stage_map.setdefault(rd, {})[stg] = row_payload
-
-        artifact_map: dict[str, list[dict[str, Any]]] = {}
-        for row in artifact_rows:
-            rd = str(row[0] or "").strip().lower()
-            artifact_type = str(row[1] or "").strip().lower()
-            if not rd or not artifact_type:
-                continue
-            artifact_map.setdefault(rd, []).append(
-                {
-                    "artifact_type": artifact_type,
-                    "updated_at_utc": row[2].isoformat() if row[2] else None,
-                }
-            )
-
-        target_map: dict[str, dict[str, int]] = {}
-        for row in target_rows:
-            rd = str(row[0] or "").strip().lower()
-            if not rd:
-                continue
-            target_map[rd] = {
-                "pending": int(row[1] or 0),
-                "running": int(row[2] or 0),
-                "completed": int(row[3] or 0),
-                "failed": int(row[4] or 0),
-            }
-
-        domain_rows: list[dict[str, Any]] = []
-        for rd in domains:
-            artifacts = artifact_map.get(rd, [])
-            domain_rows.append(
-                {
-                    "root_domain": rd,
-                    "targets": target_map.get(rd, {"pending": 0, "running": 0, "completed": 0, "failed": 0}),
-                    "plugin_tasks": stage_map.get(rd, {}),
-                    "stage_tasks": legacy_stage_map.get(rd, {}),
-                    "artifact_types": [item["artifact_type"] for item in artifacts],
-                    "artifacts": artifacts,
-                }
-            )
-
         return {
             "generated_at_utc": _iso_now(),
             "limit": safe_limit,
-            "domain_count": len(domain_rows),
-            "domains": domain_rows,
+            "domains": payloads,
         }
 
-    
-    def crawl_progress_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
-        safe_limit = max(1, min(2000, int(limit or 2000)))
-        sql = """
-WITH domain_set AS (
-    SELECT DISTINCT root_domain FROM coordinator_targets
-    UNION
-    SELECT DISTINCT root_domain FROM coordinator_stage_tasks
-    UNION
-    SELECT DISTINCT root_domain FROM coordinator_sessions
-    UNION
-    SELECT DISTINCT root_domain FROM coordinator_artifacts WHERE artifact_type = 'nightmare_session_json'
-),
-target_agg AS (
-    SELECT
-      root_domain,
-      COUNT(*) FILTER (WHERE status = 'pending') AS pending_targets,
-      COUNT(*) FILTER (WHERE status = 'running') AS running_targets,
-      COUNT(*) FILTER (WHERE status = 'completed') AS completed_targets,
-      COUNT(*) FILTER (WHERE status = 'failed') AS failed_targets,
-      MAX(heartbeat_at_utc) AS last_target_heartbeat,
-      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN worker_id ELSE NULL END), NULL) AS target_workers,
-      MIN(start_url) FILTER (WHERE start_url IS NOT NULL AND start_url <> '') AS sample_start_url
-    FROM coordinator_targets
-    GROUP BY root_domain
-),
-stage_agg AS (
-    SELECT
-      root_domain,
-      COUNT(*) FILTER (WHERE status = 'pending') AS pending_stage_tasks,
-      COUNT(*) FILTER (WHERE status = 'running') AS running_stage_tasks,
-      COUNT(*) FILTER (WHERE status = 'completed') AS completed_stage_tasks,
-      COUNT(*) FILTER (WHERE status = 'failed') AS failed_stage_tasks,
-      MAX(heartbeat_at_utc) AS last_stage_heartbeat,
-      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN stage ELSE NULL END), NULL) AS active_stages,
-      ARRAY_REMOVE(ARRAY_AGG(DISTINCT CASE WHEN status = 'running' THEN worker_id ELSE NULL END), NULL) AS stage_workers
-    FROM coordinator_stage_tasks
-    GROUP BY root_domain
-),
-artifact_agg AS (
-    SELECT
-      root_domain,
-      MAX(updated_at_utc) FILTER (WHERE artifact_type = 'nightmare_session_json') AS nightmare_session_updated_at_utc
-    FROM coordinator_artifacts
-    GROUP BY root_domain
-)
-SELECT
-  d.root_domain,
-  COALESCE(t.sample_start_url, sess.start_url, '') AS start_url,
-  sess.saved_at_utc,
-  COALESCE(
-    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, sess.saved_at_utc, art.nightmare_session_updated_at_utc),
-    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, sess.saved_at_utc),
-    GREATEST(t.last_target_heartbeat, st.last_stage_heartbeat, art.nightmare_session_updated_at_utc),
-    GREATEST(t.last_target_heartbeat, sess.saved_at_utc, art.nightmare_session_updated_at_utc),
-    GREATEST(st.last_stage_heartbeat, sess.saved_at_utc, art.nightmare_session_updated_at_utc),
-    t.last_target_heartbeat,
-    st.last_stage_heartbeat,
-    sess.saved_at_utc,
-    art.nightmare_session_updated_at_utc
-  ) AS last_activity_at_utc,
-  COALESCE(t.pending_targets, 0) AS pending_targets,
-  COALESCE(t.running_targets, 0) AS running_targets,
-  COALESCE(t.completed_targets, 0) AS completed_targets,
-  COALESCE(t.failed_targets, 0) AS failed_targets,
-  COALESCE(st.pending_stage_tasks, 0) AS pending_stage_tasks,
-  COALESCE(st.running_stage_tasks, 0) AS running_stage_tasks,
-  COALESCE(st.completed_stage_tasks, 0) AS completed_stage_tasks,
-  COALESCE(st.failed_stage_tasks, 0) AS failed_stage_tasks,
-  COALESCE(st.active_stages, ARRAY[]::text[]) AS active_stages,
-  COALESCE(t.target_workers, ARRAY[]::text[]) AS target_workers,
-  COALESCE(st.stage_workers, ARRAY[]::text[]) AS stage_workers,
-  art.nightmare_session_updated_at_utc
-FROM domain_set d
-LEFT JOIN target_agg t ON t.root_domain = d.root_domain
-LEFT JOIN stage_agg st ON st.root_domain = d.root_domain
-LEFT JOIN coordinator_sessions sess ON sess.root_domain = d.root_domain
-LEFT JOIN artifact_agg art ON art.root_domain = d.root_domain
-ORDER BY last_activity_at_utc DESC NULLS LAST, d.root_domain ASC
-LIMIT %s;
-"""
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (safe_limit,))
-                rows = cur.fetchall()
-            conn.commit()
-
-        row_map: dict[str, tuple[Any, ...]] = {}
-        ordered_domains: list[str] = []
-        for row in rows:
-            root_domain = str(row[0] or "").strip().lower()
-            if not root_domain:
-                continue
-            ordered_domains.append(root_domain)
-            row_map[root_domain] = row
-
-        sessions_by_domain = self._bulk_load_sessions(
-            ordered_domains,
-            include_artifact_fallback=True,
-            artifact_fallback_limit=None,
-        )
-
-        now_utc = datetime.now(timezone.utc)
-        domains: list[dict[str, Any]] = []
-        running_domains = 0
-        queued_domains = 0
-        failed_domains = 0
-        completed_domains = 0
-
-        for root_domain in ordered_domains:
-            row = row_map[root_domain]
-            session = sessions_by_domain.get(root_domain) or {}
-            metrics = self._session_url_metrics(session)
-            discovered_urls_count = int(metrics.get("discovered_urls_count") or 0)
-            visited_urls_count = int(metrics.get("visited_urls_count") or 0)
-            frontier_count = int(metrics.get("frontier_count") or 0)
-            spider_stats = metrics.get("spider_stats") if isinstance(metrics.get("spider_stats"), dict) else {}
-
-            active_stages_raw = row[12] if isinstance(row[12], list) else []
-            active_stages = [str(item).strip() for item in active_stages_raw if str(item or "").strip()]
-            target_workers_raw = row[13] if isinstance(row[13], list) else []
-            stage_workers_raw = row[14] if isinstance(row[14], list) else []
-            active_workers = sorted({
-                str(item).strip()
-                for item in [*target_workers_raw, *stage_workers_raw]
-                if str(item or "").strip()
-            })
-
-            last_activity = row[3]
-            for raw_ts in (
-                session.get("saved_at_utc"),
-                row[15].isoformat() if row[15] else None,
-                row[2].isoformat() if row[2] else None,
-            ):
-                if not raw_ts:
-                    continue
-                try:
-                    dt = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
-                except Exception:
-                    continue
-                if last_activity is None or dt > last_activity:
-                    last_activity = dt
-
-            last_activity_iso: Optional[str] = None
-            seconds_since_activity: Optional[int] = None
-            if last_activity is not None:
-                last_activity_iso = last_activity.isoformat()
-                seconds_since_activity = max(0, int((now_utc - last_activity).total_seconds()))
-
-            pending_targets = int(row[4] or 0)
-            running_targets = int(row[5] or 0)
-            completed_targets = int(row[6] or 0)
-            failed_targets = int(row[7] or 0)
-            pending_stage_tasks = int(row[8] or 0)
-            running_stage_tasks = int(row[9] or 0)
-            completed_stage_tasks = int(row[10] or 0)
-            failed_stage_tasks = int(row[11] or 0)
-
-            phase = "idle"
-            if running_targets > 0:
-                phase = "nightmare_running"
-            elif running_stage_tasks > 0:
-                if any(str(item).startswith("nightmare_") for item in active_stages):
-                    phase = "nightmare_plugin_running"
-                elif "fozzy" in active_stages:
-                    phase = "fozzy_running"
-                elif "extractor" in active_stages:
-                    phase = "extractor_running"
-                else:
-                    phase = "stage_running"
-            elif pending_targets > 0:
-                phase = "nightmare_pending"
-            elif pending_stage_tasks > 0:
-                phase = "stage_pending"
-            elif failed_targets > 0 or failed_stage_tasks > 0:
-                phase = "failed"
-            elif completed_targets > 0 or completed_stage_tasks > 0 or discovered_urls_count > 0:
-                phase = "completed"
-
-            if phase.endswith("_running"):
-                running_domains += 1
-            elif phase.endswith("_pending"):
-                queued_domains += 1
-            elif phase == "failed":
-                failed_domains += 1
-            elif phase == "completed":
-                completed_domains += 1
-
-            domains.append({
-                "root_domain": root_domain,
-                "start_url": str(session.get("start_url") or row[1] or ""),
-                "phase": phase,
-                "discovered_urls_count": discovered_urls_count,
-                "visited_urls_count": visited_urls_count,
-                "frontier_count": frontier_count,
-                "spider_stats": spider_stats,
-                "session_saved_at_utc": session.get("saved_at_utc") or (row[2].isoformat() if row[2] else None),
-                "last_activity_at_utc": last_activity_iso,
-                "seconds_since_activity": seconds_since_activity,
-                "pending_targets": pending_targets,
-                "running_targets": running_targets,
-                "completed_targets": completed_targets,
-                "failed_targets": failed_targets,
-                "pending_stage_tasks": pending_stage_tasks,
-                "running_stage_tasks": running_stage_tasks,
-                "completed_stage_tasks": completed_stage_tasks,
-                "failed_stage_tasks": failed_stage_tasks,
-                "active_stages": active_stages,
-                "active_workers": active_workers,
-            })
-
-        return {
-            "generated_at_utc": _iso_now(),
-            "limit": safe_limit,
-            "counts": {
-                "total_domains": len(domains),
-                "running_domains": running_domains,
-                "queued_domains": queued_domains,
-                "failed_domains": failed_domains,
-                "completed_domains": completed_domains,
-            },
-            "domains": domains,
-        }
-
-
-    
     def list_discovered_target_domains(self, *, limit: int = 5000, q: str = "") -> list[dict[str, Any]]:
         safe_limit = max(1, min(20000, int(limit or 5000)))
         needle = str(q or "").strip().lower()
@@ -2073,7 +1824,7 @@ LIMIT %s;
         sessions_by_domain = self._bulk_load_sessions(
             ordered_domains,
             include_artifact_fallback=True,
-            artifact_fallback_limit=None,
+            artifact_fallback_limit=max(25, min(300, len(ordered_domains))),
         )
 
         rows_out: list[dict[str, Any]] = []
@@ -3842,6 +3593,14 @@ WITH candidate AS (
             AND r.lease_expires_at IS NOT NULL
             AND r.lease_expires_at >= NOW()
             AND NOT (r.workflow_id = t.workflow_id AND r.stage = t.stage)
+            AND (
+                COALESCE(r.access_mode, 'write') = 'write'
+                OR COALESCE(t.access_mode, 'write') = 'write'
+                OR (
+                    COALESCE(r.resource_class, 'workflow_stage') = COALESCE(t.resource_class, 'workflow_stage')
+                    AND COALESCE(r.concurrency_group, '') = COALESCE(t.concurrency_group, '')
+                )
+            )
       )
       AND NOT EXISTS (
           SELECT 1
@@ -3850,6 +3609,7 @@ WITH candidate AS (
             AND q.status = 'running'
             AND q.lease_expires_at IS NOT NULL
             AND q.lease_expires_at >= NOW()
+            AND COALESCE(t.resource_class, 'workflow_stage') IN ('crawl', 'network_scan')
       )
     ORDER BY created_at_utc ASC
     FOR UPDATE SKIP LOCKED
@@ -4014,21 +3774,6 @@ WHERE workflow_id = %s
                 )
                 updated = int(cur.rowcount or 0)
             conn.commit()
-        if updated > 0:
-            self.record_system_event(
-                "workflow.task.heartbeat",
-                f"workflow_task:{widf}:{rd}:{stg}",
-                {
-                    "source": "coordinator_store.heartbeat_stage_with_workflow",
-                    "workflow_id": widf,
-                    "root_domain": rd,
-                    "stage": stg,
-                    "plugin_name": stg,
-                    "worker_id": wid,
-                    "lease_seconds": lease,
-                    "status": "running",
-                },
-            )
         return updated > 0
 
     def update_stage_progress(
@@ -4092,6 +3837,16 @@ WHERE workflow_id = %s
                     ),
                 )
                 updated = int(cur.rowcount or 0)
+                if updated > 0:
+                    self._upsert_stage_hot_status(
+                        conn=conn,
+                        workflow_id=widf,
+                        root_domain=rd,
+                        stage=stg,
+                        state="running",
+                        progress=progress,
+                    )
+                    self._refresh_domain_projection(rd, conn=conn)
             conn.commit()
         if updated > 0:
             checkpoint_payload = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
@@ -4174,7 +3929,7 @@ WHERE workflow_id = %s
 """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                self._touch_worker_presence(cur, wid, f"complete_stage_{stg}")
+                self._touch_worker_presence(cur, wid, f"complete_stage_{stg}", force=True)
                 cur.execute(
                     sql,
                     (
@@ -4194,6 +3949,16 @@ WHERE workflow_id = %s
                     ),
                 )
                 updated = int(cur.rowcount or 0)
+                if updated > 0:
+                    self._upsert_stage_hot_status(
+                        conn=conn,
+                        workflow_id=widf,
+                        root_domain=rd,
+                        stage=stg,
+                        state=next_status,
+                        progress=progress,
+                    )
+                    self._refresh_domain_projection(rd, conn=conn)
             conn.commit()
         if updated > 0:
             self.record_system_event(
@@ -4304,6 +4069,9 @@ WHERE {where_clause};
         content: bytes,
         source_worker: str = "",
         content_encoding: str = "identity",
+        retention_class: str = "important_raw",
+        manifest: Optional[dict[str, Any]] = None,
+        local_path: str = "",
     ) -> bool:
         rd = str(root_domain or "").strip().lower()
         at = str(artifact_type or "").strip().lower()
@@ -4321,9 +4089,9 @@ WHERE {where_clause};
         sql = """
 INSERT INTO coordinator_artifacts(
     root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
-    storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc
+    storage_backend, storage_uri, media_type, compression, schema_version, retention_class, manifest_json, local_path, local_available_on_worker, updated_at_utc
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, NOW())
 ON CONFLICT (root_domain, artifact_type) DO UPDATE
 SET source_worker = EXCLUDED.source_worker,
     content = EXCLUDED.content,
@@ -4335,6 +4103,10 @@ SET source_worker = EXCLUDED.source_worker,
     media_type = EXCLUDED.media_type,
     compression = EXCLUDED.compression,
     schema_version = EXCLUDED.schema_version,
+    retention_class = EXCLUDED.retention_class,
+    manifest_json = EXCLUDED.manifest_json,
+    local_path = EXCLUDED.local_path,
+    local_available_on_worker = EXCLUDED.local_available_on_worker,
     updated_at_utc = NOW();
 """
         with self._connect() as conn:
@@ -4354,6 +4126,10 @@ SET source_worker = EXCLUDED.source_worker,
                         metadata.media_type,
                         metadata.compression,
                         metadata.schema_version,
+                        str(retention_class or "important_raw")[:64],
+                        json.dumps(dict(manifest or {}), ensure_ascii=False),
+                        str(local_path or "")[:2000],
+                        str(source_worker or "")[:200],
                     ),
                 )
                 summary_payload = json.dumps(
@@ -4405,7 +4181,7 @@ SET source_worker = EXCLUDED.source_worker,
             return None
         sql = """
 SELECT root_domain, artifact_type, source_worker, content, content_encoding, content_sha256, content_size_bytes,
-       storage_backend, storage_uri, media_type, compression, schema_version, updated_at_utc
+       storage_backend, storage_uri, media_type, compression, schema_version, retention_class, manifest_json, local_path, local_available_on_worker, updated_at_utc
 FROM coordinator_artifacts
 WHERE root_domain = %s AND artifact_type = %s;
 """
@@ -4438,7 +4214,11 @@ WHERE root_domain = %s AND artifact_type = %s;
             "media_type": row[9] or "application/octet-stream",
             "compression": compression,
             "schema_version": int(row[11] or 1),
-            "updated_at_utc": row[12].isoformat() if row[12] else None,
+            "retention_class": str(row[12] or "important_raw"),
+            "manifest": row[13] if isinstance(row[13], dict) else {},
+            "local_path": str(row[14] or ""),
+            "local_available_on_worker": str(row[15] or ""),
+            "updated_at_utc": row[16].isoformat() if row[16] else None,
         }
 
     def list_artifacts(self, root_domain: str) -> list[dict[str, Any]]:

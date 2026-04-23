@@ -43,6 +43,7 @@ import sys
 import time
 import threading
 import zipfile
+import uvicorn
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -72,6 +73,7 @@ from reporting.server_pages import (
     render_workers_html,
 )
 from server_app.store import CoordinatorStore
+from server_app.fastapi_app import create_app
 from auth0r.profile_store import Auth0rProfileStore
 from logging_app.store import LogStore
 
@@ -492,30 +494,6 @@ def _latest_worker_log_line_from_links(logs: list[dict[str, Any]]) -> dict[str, 
     return {"message": message, "event_time_utc": event_time_utc}
 
 
-def _worker_log_link_from_event_metadata(log_info: dict[str, Any]) -> dict[str, str]:
-    if not isinstance(log_info, dict):
-        return {}
-    metadata = log_info.get("metadata_json") if isinstance(log_info.get("metadata_json"), dict) else {}
-    log_path_raw = str(metadata.get("log_path") or "").strip()
-    if not log_path_raw:
-        return {}
-    try:
-        candidate = Path(log_path_raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = (BASE_DIR / candidate).resolve()
-        else:
-            candidate = candidate.resolve()
-    except Exception:
-        return {}
-    if not candidate.is_file():
-        return {}
-    relative = _to_repo_relative_path(candidate)
-    if not relative:
-        return {}
-    label = f"Current Run: {candidate.name}"
-    return {"label": label, "relative": relative}
-
-
 def _enrich_worker_snapshot_with_live_details(
     snapshot: dict[str, Any],
     *,
@@ -539,21 +517,6 @@ def _enrich_worker_snapshot_with_live_details(
             continue
         worker_id = str(worker.get("worker_id") or "").strip()
         log_info = log_map.get(worker_id, {})
-        current_run_log = _worker_log_link_from_event_metadata(log_info)
-        if current_run_log:
-            worker["current_run_log"] = current_run_log
-            existing_logs = worker.get("logs") if isinstance(worker.get("logs"), list) else []
-            existing_relatives = {str(item.get("relative") or "").strip().lower() for item in existing_logs if isinstance(item, dict)}
-            rel_text = str(current_run_log.get("relative") or "").strip().lower()
-            if rel_text and rel_text not in existing_relatives:
-                worker["logs"] = [current_run_log, *existing_logs]
-        elif isinstance(worker.get("logs"), list) and worker.get("logs"):
-            first_log = next((item for item in worker.get("logs", []) if isinstance(item, dict)), None)
-            if isinstance(first_log, dict):
-                worker["current_run_log"] = {
-                    "label": str(first_log.get("label") or "Current Run Log"),
-                    "relative": str(first_log.get("relative") or ""),
-                }
         last_log_message = str(log_info.get("description") or "").strip() or str(log_info.get("raw_line") or "").strip()
         last_log_message_at_utc = str(log_info.get("event_time_utc") or "").strip()
         if not last_log_message:
@@ -6386,7 +6349,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             str(self.output_root.resolve() / f"**/*{wid}*.log"),
             str(self.app_root / f"**/*{wid}*.log"),
         ]
-        discovered: list[tuple[float, dict[str, str]]] = []
+        out: list[dict[str, str]] = []
         seen: set[str] = set()
         for pattern in patterns:
             for raw_path in glob.iglob(pattern, recursive=True):
@@ -6400,14 +6363,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if key in seen:
                     continue
                 seen.add(key)
-                mtime = 0.0
-                try:
-                    mtime = float(path.stat().st_mtime)
-                except Exception:
-                    mtime = 0.0
-                discovered.append((mtime, {"label": path.name, "relative": rel}))
-        discovered.sort(key=lambda item: item[0], reverse=True)
-        return [item[1] for item in discovered[:12]]
+                out.append({"label": path.name, "relative": rel})
+                if len(out) >= 8:
+                    return out
+        return out
 
     def _load_extractor_matches_domain(self, root_domain: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()
@@ -6715,85 +6674,19 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
-    def _prepare_server(port_value: int) -> ThreadingHTTPServer:
-        srv = ThreadingHTTPServer((host, port_value), DashboardHandler)
-        srv.app_root = BASE_DIR  # type: ignore[attr-defined]
-        srv.output_root = output_root  # type: ignore[attr-defined]
-        srv.coordinator_store = coordinator_store  # type: ignore[attr-defined]
-        srv.coordinator_token = coordinator_token  # type: ignore[attr-defined]
-        srv.master_report_regen_token = master_report_regen_token  # type: ignore[attr-defined]
-        srv._master_regen_lock = threading.Lock()  # type: ignore[attr-defined]
-        srv.page_data_cache = _PageDataCache()  # type: ignore[attr-defined]
-        srv.extractor_matches_cache = _ExtractorMatchesCache()  # type: ignore[attr-defined]
-        srv.fuzzing_summary_cache = _FozzySummaryCache()  # type: ignore[attr-defined]
-        srv.fuzzing_zip_index_cache = _ZipFileIndexCache()  # type: ignore[attr-defined]
-        srv.log_store = log_store  # type: ignore[attr-defined]
-        srv.auth0r_store = auth0r_store  # type: ignore[attr-defined]
-        srv.base_web_server_settings = _sanitize_web_server_settings((merged_cfg.get("web_server") if isinstance(merged_cfg, dict) else {}), base=DEFAULT_WEB_SERVER_SETTINGS)  # type: ignore[attr-defined]
-        srv.runtime_settings_path = _default_runtime_settings_path(config_path)  # type: ignore[attr-defined]
-        srv.runtime_settings_lock = threading.Lock()  # type: ignore[attr-defined]
-        _start_default_page_cache_warmer(srv, coordinator_store=coordinator_store)
-        return srv
-
-    servers: list[tuple[str, ThreadingHTTPServer]] = []
-    if http_port:
-        servers.append(("http", _prepare_server(http_port)))
-    if https_port:
-        cert_file = Path(cert_file_raw).expanduser().resolve() if cert_file_raw else None
-        key_file = Path(key_file_raw).expanduser().resolve() if key_file_raw else None
-        if cert_file is None or key_file is None or not cert_file.is_file() or not key_file.is_file():
-            print(
-                "[server] https listener disabled: provide valid cert_file/key_file for port 443",
-                flush=True,
-            )
-        else:
-            https_server = _prepare_server(https_port)
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-            https_server.socket = context.wrap_socket(https_server.socket, server_side=True)
-            servers.append(("https", https_server))
-
-    if not servers:
-        raise RuntimeError("No active listeners configured. Enable http_port and/or https_port with valid TLS files.")
-
-    print("[server] starting coordinator UI server", flush=True)
+    app = create_app(
+        output_root=output_root,
+        database_url=database_url,
+        log_database_url=log_database_url,
+        coordinator_token=coordinator_token,
+    )
+    listen_port = int(http_port or https_port or legacy_port or 8000)
+    print("[server] starting coordinator API/UI server (FastAPI)", flush=True)
     print(f"[server] config={config_path}", flush=True)
-    print(f"[server] app_root={BASE_DIR}", flush=True)
     print(f"[server] output_root={output_root}", flush=True)
-    if coordinator_store is not None:
-        print("[server] coordinator mode enabled (Postgres backend)", flush=True)
-    if log_store is not None:
-        print("[server] structured log store enabled (dedicated logging/reporting DB)", flush=True)
-    all_domains_html = _find_all_domains_report_html(output_root)
-    if all_domains_html is not None:
-        print(f"[server] default route / serving all-domains report: {all_domains_html}", flush=True)
-    else:
-        print("[server] default route / serving workers (all_domains.results_summary.html not found)", flush=True)
-    for scheme, srv in servers:
-        bound = srv.server_address[1]
-        print(f"[server] {scheme} listening on {scheme}://{host}:{bound}", flush=True)
-    print(f"[server] workers route: http://{host}:{http_port or legacy_port}/workers", flush=True)
-
-    threads: list[threading.Thread] = []
-    for _scheme, srv in servers:
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        threads.append(t)
-    try:
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        print("\n[server] interrupt received, shutting down.", flush=True)
-    finally:
-        for _scheme, srv in servers:
-            stop_event = getattr(srv, "page_cache_warm_stop", None)
-            if isinstance(stop_event, threading.Event):
-                stop_event.set()
-            try:
-                srv.shutdown()
-            except Exception:
-                pass
-            srv.server_close()
+    print(f"[server] listening on http://{host}:{listen_port}", flush=True)
+    uvicorn.run(app, host=host, port=listen_port, log_level="info")
+    return 0
     return 0
 
 

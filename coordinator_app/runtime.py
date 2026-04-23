@@ -452,6 +452,24 @@ class CoordinatorClient:
         )
         return bool(rsp.get("ok"))
 
+    def upload_artifact_from_path(
+        self,
+        root_domain: str,
+        artifact_type: str,
+        path: Path,
+        *,
+        source_worker: str,
+        content_encoding: str = "identity",
+    ) -> bool:
+        with Path(path).open("rb") as handle:
+            return self.upload_artifact(
+                root_domain,
+                artifact_type,
+                handle.read(),
+                source_worker=source_worker,
+                content_encoding=content_encoding,
+            )
+
     def download_artifact(self, root_domain: str, artifact_type: str) -> Optional[dict[str, Any] ]:
         query = urlencode({"root_domain": root_domain, "artifact_type": artifact_type})
         rsp = self._request_json("GET", f"/api/coord/artifact?{query}")
@@ -476,6 +494,11 @@ class CoordinatorClient:
     def get_workflow_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         query = urlencode({"limit": max(1, int(limit or 1))})
         return self._request_json("GET", f"/api/coord/workflow-snapshot?{query}")
+
+    def get_workflow_domain(self, root_domain: str) -> dict[str, Any]:
+        safe_domain = str(root_domain or "").strip().lower()
+        query = urlencode({"root_domain": safe_domain})
+        return self._request_json("GET", f"/api/coord/workflow-domain?{query}")
 
     def claim_worker_command(self, worker_id: str, *, worker_state: str = "idle") -> Optional[dict[str, Any]]:
         rsp = self._request_json(
@@ -620,19 +643,8 @@ def _unzip_bytes_to_directory(content: bytes, target_dir: Path) -> None:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(zf.read(member))
 
-def run_subprocess(
-    cmd: list[str],
-    *,
-    cwd: Path,
-    log_path: Path,
-    mirror_log_path: Path | None = None,
-) -> int:
+def run_subprocess(cmd: list[str], *, cwd: Path, log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    start_offset = 0
-    try:
-        start_offset = int(log_path.stat().st_size) if log_path.is_file() else 0
-    except Exception:
-        start_offset = 0
     with log_path.open("a", encoding="utf-8") as log_handle:
         log_handle.write(f"\n=== RUN {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n$ {' '.join(cmd)}\n")
         log_handle.flush()
@@ -691,17 +703,6 @@ def run_subprocess(
                     raw_line=tail,
                     metadata={"command": run_cmd, "log_path": str(log_path), "exit_code": exit_code},
                 )
-            except Exception:
-                pass
-        if isinstance(mirror_log_path, Path):
-            try:
-                mirror_log_path.parent.mkdir(parents=True, exist_ok=True)
-                with log_path.open("r", encoding="utf-8", errors="replace") as src:
-                    src.seek(max(0, int(start_offset)))
-                    chunk = src.read()
-                if chunk:
-                    with mirror_log_path.open("a", encoding="utf-8") as mirror:
-                        mirror.write(chunk)
             except Exception:
                 pass
         return exit_code

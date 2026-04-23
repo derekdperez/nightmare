@@ -465,16 +465,6 @@ class DistributedCoordinator:
         with self._worker_state_lock:
             return str(self._worker_states.get(str(worker_id), "running") or "running")
 
-    @staticmethod
-    def _safe_worker_id_fragment(worker_id: str) -> str:
-        raw = str(worker_id or "").strip().lower()
-        safe = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
-        return safe or "worker"
-
-    def _worker_current_run_log_path(self, worker_id: str) -> Path:
-        safe = self._safe_worker_id_fragment(worker_id)
-        return (self.cfg.output_root / "_worker_logs" / f"{safe}.current.log").resolve()
-
     def _record_worker_error(
         self,
         *,
@@ -510,8 +500,9 @@ class DistributedCoordinator:
         if not safe_domain:
             return 0
         try:
-            snapshot = self.client.get_workflow_snapshot(limit=5000)
-            rows = snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else []
+            snapshot = self.client.get_workflow_domain(safe_domain)
+            domain_payload = snapshot.get("domain") if isinstance(snapshot, dict) else None
+            rows = [domain_payload] if isinstance(domain_payload, dict) and domain_payload else []
         except Exception as exc:
             self.logger.error(
                 "workflow_domain_snapshot_refresh_failed",
@@ -988,23 +979,23 @@ class DistributedCoordinator:
                 artifact_path=str(path),
             )
             return
-        content = path.read_bytes()
+        size_bytes = int(path.stat().st_size if path.exists() else 0)
         self.logger.info(
             "artifact_file_upload_start",
             root_domain=root_domain,
             worker_id=worker_id,
             artifact_type=artifact_type,
             artifact_path=str(path),
-            bytes=len(content),
+            bytes=size_bytes,
         )
-        self.client.upload_artifact(root_domain, artifact_type, content, source_worker=worker_id)
+        self.client.upload_artifact_from_path(root_domain, artifact_type, path, source_worker=worker_id)
         self.logger.info(
             "artifact_file_upload_complete",
             root_domain=root_domain,
             worker_id=worker_id,
             artifact_type=artifact_type,
             artifact_path=str(path),
-            bytes=len(content),
+            bytes=size_bytes,
         )
 
     def _upload_zip_artifact(self, root_domain: str, artifact_type: str, path: Path, worker_id: str) -> None:
@@ -1285,12 +1276,7 @@ class DistributedCoordinator:
                     log_path=str(log_path),
                 )
                 try:
-                    exit_code = run_subprocess(
-                        cmd,
-                        cwd=BASE_DIR,
-                        log_path=log_path,
-                        mirror_log_path=self._worker_current_run_log_path(worker_id),
-                    )
+                    exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
                         err_text = summarize_subprocess_failure("nightmare", log_path, exit_code)
                     self.logger.info(
@@ -1557,12 +1543,7 @@ class DistributedCoordinator:
             sublist3r_exit = 0
             sublist3r_error = ""
             try:
-                sublist3r_exit = run_subprocess(
-                    enumeration_cmd,
-                    cwd=BASE_DIR,
-                    log_path=log_path,
-                    mirror_log_path=self._worker_current_run_log_path(worker_id),
-                )
+                sublist3r_exit = run_subprocess(enumeration_cmd, cwd=BASE_DIR, log_path=log_path)
                 if int(sublist3r_exit) != 0:
                     sublist3r_error = summarize_subprocess_failure("sublist3r", log_path, sublist3r_exit)
             except Exception as exc:
@@ -1906,12 +1887,7 @@ class DistributedCoordinator:
             exit_code = 1
             err_text = ""
             try:
-                exit_code = run_subprocess(
-                    cmd,
-                    cwd=BASE_DIR,
-                    log_path=log_path,
-                    mirror_log_path=self._worker_current_run_log_path(worker_id),
-                )
+                exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                 if exit_code != 0:
                     err_text = summarize_subprocess_failure("nightmare", log_path, exit_code)
             except Exception as exc:
@@ -2335,12 +2311,7 @@ class DistributedCoordinator:
             log_path=str(log_path),
         )
         try:
-            exit_code = run_subprocess(
-                cmd,
-                cwd=BASE_DIR,
-                log_path=log_path,
-                mirror_log_path=self._worker_current_run_log_path(worker_id),
-            )
+            exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
             err_text = summarize_subprocess_failure("fozzy", log_path, exit_code) if exit_code != 0 else ""
         except Exception as exc:
             return 1, str(exc)
@@ -2406,12 +2377,7 @@ class DistributedCoordinator:
             log_path=str(log_path),
         )
         try:
-            exit_code = run_subprocess(
-                cmd,
-                cwd=BASE_DIR,
-                log_path=log_path,
-                mirror_log_path=self._worker_current_run_log_path(worker_id),
-            )
+            exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
             err_text = summarize_subprocess_failure("auth0r", log_path, exit_code) if exit_code != 0 else ""
         except Exception as exc:
             return 1, str(exc)
@@ -2478,12 +2444,7 @@ class DistributedCoordinator:
             log_path=str(log_path),
         )
         try:
-            exit_code = run_subprocess(
-                cmd,
-                cwd=BASE_DIR,
-                log_path=log_path,
-                mirror_log_path=self._worker_current_run_log_path(worker_id),
-            )
+            exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
             err_text = summarize_subprocess_failure("extractor", log_path, exit_code) if exit_code != 0 else ""
         except Exception as exc:
             return 1, str(exc)
@@ -2819,12 +2780,7 @@ class DistributedCoordinator:
                     log_path=str(log_path),
                 )
                 try:
-                    exit_code = run_subprocess(
-                        cmd,
-                        cwd=BASE_DIR,
-                        log_path=log_path,
-                        mirror_log_path=self._worker_current_run_log_path(worker_id),
-                    )
+                    exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
                         err_text = summarize_subprocess_failure("fozzy", log_path, exit_code)
                     self.logger.info(
@@ -3009,12 +2965,7 @@ class DistributedCoordinator:
                     log_path=str(log_path),
                 )
                 try:
-                    exit_code = run_subprocess(
-                        cmd,
-                        cwd=BASE_DIR,
-                        log_path=log_path,
-                        mirror_log_path=self._worker_current_run_log_path(worker_id),
-                    )
+                    exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
                         err_text = summarize_subprocess_failure("auth0r", log_path, exit_code)
                     self.logger.info(
@@ -3176,12 +3127,7 @@ class DistributedCoordinator:
                     log_path=str(log_path),
                 )
                 try:
-                    exit_code = run_subprocess(
-                        cmd,
-                        cwd=BASE_DIR,
-                        log_path=log_path,
-                        mirror_log_path=self._worker_current_run_log_path(worker_id),
-                    )
+                    exit_code = run_subprocess(cmd, cwd=BASE_DIR, log_path=log_path)
                     if exit_code != 0:
                         err_text = summarize_subprocess_failure("extractor", log_path, exit_code)
                     self.logger.info(
