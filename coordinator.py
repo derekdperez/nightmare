@@ -465,6 +465,82 @@ class DistributedCoordinator:
         with self._worker_state_lock:
             return str(self._worker_states.get(str(worker_id), "running") or "running")
 
+    def _record_worker_error(
+        self,
+        *,
+        worker_id: str,
+        description: str,
+        exception: BaseException | None = None,
+        metadata: Optional[dict[str, Any]] = None,
+        mark_errored: bool = True,
+    ) -> None:
+        safe_worker_id = str(worker_id or "").strip() or "unknown-worker"
+        safe_description = str(description or "Worker error").strip() or "Worker error"
+        if mark_errored:
+            self._set_worker_state(safe_worker_id, "errored")
+        try:
+            report_error(
+                safe_description,
+                program_name="coordinator",
+                component_name="distributed_worker",
+                source_type="worker",
+                exception=exception,
+                raw_line=str(exception or safe_description),
+                metadata={
+                    "worker_id": safe_worker_id,
+                    **(dict(metadata) if isinstance(metadata, dict) else {}),
+                },
+                severity="error",
+            )
+        except Exception:
+            pass
+
+    def _refresh_domain_workflow_schedule(self, *, root_domain: str, worker_id: str) -> int:
+        safe_domain = str(root_domain or "").strip().lower()
+        if not safe_domain:
+            return 0
+        try:
+            snapshot = self.client.get_workflow_snapshot(limit=5000)
+            rows = snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else []
+        except Exception as exc:
+            self.logger.error(
+                "workflow_domain_snapshot_refresh_failed",
+                worker_id=worker_id,
+                root_domain=safe_domain,
+                error=str(exc),
+            )
+            self._record_worker_error(
+                worker_id=worker_id,
+                description=f"Failed to refresh workflow snapshot for {safe_domain}",
+                exception=exc,
+                metadata={"root_domain": safe_domain, "source": "_refresh_domain_workflow_schedule"},
+                mark_errored=False,
+            )
+            return 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("root_domain", "") or "").strip().lower() != safe_domain:
+                continue
+            try:
+                return self._schedule_domain_workflows(row, worker_id=worker_id)
+            except Exception as exc:
+                self.logger.error(
+                    "workflow_domain_reschedule_failed",
+                    worker_id=worker_id,
+                    root_domain=safe_domain,
+                    error=str(exc),
+                )
+                self._record_worker_error(
+                    worker_id=worker_id,
+                    description=f"Failed to schedule downstream workflow tasks for {safe_domain}",
+                    exception=exc,
+                    metadata={"root_domain": safe_domain, "source": "_refresh_domain_workflow_schedule"},
+                    mark_errored=False,
+                )
+                return 0
+        return 0
+
     def _poll_worker_commands(self, worker_id: str) -> str:
         state = self._get_worker_state(worker_id)
         while not self.stop_event.is_set():
@@ -503,10 +579,22 @@ class DistributedCoordinator:
                 if not ok:
                     err = "workflow config reload failed"
                     state = "errored"
+                    self._record_worker_error(
+                        worker_id=worker_id,
+                        description="Worker command reload failed",
+                        metadata={"command": command, "command_id": command_id, "error": err},
+                        mark_errored=True,
+                    )
             else:
                 ok = False
                 err = f"unsupported command: {command!r}"
                 state = "errored"
+                self._record_worker_error(
+                    worker_id=worker_id,
+                    description="Worker received unsupported command",
+                    metadata={"command": command, "command_id": command_id, "error": err},
+                    mark_errored=True,
+                )
             self._set_worker_state(worker_id, state)
             self.logger.info(
                 "worker_command_applied",
@@ -733,8 +821,15 @@ class DistributedCoordinator:
                 attempt_count = _safe_int(task_row.get("attempt_count", 0), 0)
                 retry_failed = bool(entry.get("retry_failed", False))
                 max_attempts = max(0, _safe_int(entry.get("max_attempts", 0), 0))
-                if status in {"pending", "running", "completed", "failed"}:
+                if status in {"pending", "running", "completed"}:
                     continue
+                allow_retry_failed = False
+                if status == "failed":
+                    if not retry_failed:
+                        continue
+                    if max_attempts > 0 and attempt_count >= max_attempts:
+                        continue
+                    allow_retry_failed = True
                 resume_mode = str(entry.get("resume_mode") or "exact").strip().lower() or "exact"
                 details = self.client.enqueue_stage_detailed(
                     root_domain,
@@ -742,7 +837,7 @@ class DistributedCoordinator:
                     workflow_id=workflow_id,
                     worker_id=worker_id,
                     reason=f"workflow:{entry.get('name', plugin_name)}",
-                    allow_retry_failed=False,
+                    allow_retry_failed=allow_retry_failed,
                     max_attempts=max_attempts,
                     checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
                     progress={"status": "queued", "plugin_name": plugin_name},
@@ -801,11 +896,19 @@ class DistributedCoordinator:
                 try:
                     scheduled += self._schedule_domain_workflows(row, worker_id=worker_id)
                 except Exception as exc:
+                    root_domain = str(row.get("root_domain", "") or "").strip().lower()
                     self.logger.error(
                         "workflow_scheduler_domain_failed",
                         worker_id=worker_id,
-                        root_domain=str(row.get("root_domain", "") or "").strip().lower(),
+                        root_domain=root_domain,
                         error=str(exc),
+                    )
+                    self._record_worker_error(
+                        worker_id=worker_id,
+                        description=f"Workflow scheduler failed while processing {root_domain or 'unknown-domain'}",
+                        exception=exc,
+                        metadata={"root_domain": root_domain, "source": "workflow_scheduler_loop"},
+                        mark_errored=False,
                     )
             self.logger.info(
                 "workflow_scheduler_cycle_complete",
@@ -2446,6 +2549,32 @@ class DistributedCoordinator:
                 exit_code=int(exit_code),
                 error=str(err_text or ""),
             )
+            try:
+                scheduled_count = self._refresh_domain_workflow_schedule(root_domain=root_domain, worker_id=worker_id)
+                self.logger.info(
+                    "workflow_domain_rescheduled_after_task_completion",
+                    worker_id=worker_id,
+                    workflow_id=workflow_id,
+                    root_domain=root_domain,
+                    stage=plugin_name,
+                    tasks_scheduled=int(scheduled_count),
+                )
+            except Exception as exc:
+                self.logger.error(
+                    "workflow_domain_reschedule_after_task_completion_failed",
+                    worker_id=worker_id,
+                    workflow_id=workflow_id,
+                    root_domain=root_domain,
+                    stage=plugin_name,
+                    error=str(exc),
+                )
+                self._record_worker_error(
+                    worker_id=worker_id,
+                    description=f"Failed to schedule follow-on tasks after {plugin_name} for {root_domain}",
+                    exception=exc,
+                    metadata={"workflow_id": workflow_id, "root_domain": root_domain, "stage": plugin_name},
+                    mark_errored=False,
+                )
         except Exception as exc:
             self.logger.error(
                 "workflow_task_run_failed",
@@ -2454,6 +2583,13 @@ class DistributedCoordinator:
                 root_domain=root_domain,
                 stage=plugin_name,
                 error=str(exc),
+            )
+            self._record_worker_error(
+                worker_id=worker_id,
+                description=f"Workflow task failed: {plugin_name} for {root_domain}",
+                exception=exc,
+                metadata={"workflow_id": workflow_id, "root_domain": root_domain, "stage": plugin_name},
+                mark_errored=False,
             )
             try:
                 self.client.complete_stage(
@@ -3050,13 +3186,51 @@ class DistributedCoordinator:
             finally:
                 self._end_job()
 
+    def _thread_target_with_error_capture(self, *, worker_id: str, target: Any, metadata: Optional[dict[str, Any]] = None) -> None:
+        try:
+            target()
+        except Exception as exc:
+            self.logger.error(
+                "worker_thread_unhandled_exception",
+                worker_id=worker_id,
+                error=str(exc),
+            )
+            self._record_worker_error(
+                worker_id=worker_id,
+                description=f"Unhandled worker thread exception for {worker_id}",
+                exception=exc,
+                metadata=metadata or {},
+                mark_errored=True,
+            )
+            raise
+
     def run(self) -> int:
         threads: list[threading.Thread] = []
         if self.cfg.workflow_scheduler_enabled:
-            threads.append(threading.Thread(target=self._workflow_scheduler_loop, daemon=True))
+            scheduler_worker_id = f"{self.worker_prefix}-scheduler-1"
+            threads.append(
+                threading.Thread(
+                    target=lambda wid=scheduler_worker_id: self._thread_target_with_error_capture(
+                        worker_id=wid,
+                        target=self._workflow_scheduler_loop,
+                        metadata={"loop": "workflow_scheduler"},
+                    ),
+                    daemon=True,
+                    name=f"{scheduler_worker_id}-thread",
+                )
+            )
         plugin_worker_count = max(0, int(self.cfg.plugin_workers or 0))
         for idx in range(1, plugin_worker_count + 1):
-            t = threading.Thread(target=self._plugin_worker_loop, args=(idx,), daemon=True)
+            worker_id = f"{self.worker_prefix}-plugin-{idx}"
+            t = threading.Thread(
+                target=lambda index=idx, wid=worker_id: self._thread_target_with_error_capture(
+                    worker_id=wid,
+                    target=lambda: self._plugin_worker_loop(index),
+                    metadata={"loop": "plugin_worker", "worker_index": index},
+                ),
+                daemon=True,
+                name=f"{worker_id}-thread",
+            )
             threads.append(t)
 
         for t in threads:
