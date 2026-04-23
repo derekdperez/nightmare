@@ -1387,3 +1387,27 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile server.py server_app/store.py`
   - `pytest -q tests/test_reporting_and_store_helpers.py -k "discovered_target or discovered_files or render_discovered_targets_html_contains_expected_heading"`
+
+## 2026-04-23
+
+- Added generalized server-side per-page cache for coordinator list APIs in `server.py`:
+  - New `_PageDataCache` with TTL + bounded entries.
+  - New API cache metadata envelope (`page_cache`) and cache mode support (`cache_mode=prefer|refresh`).
+  - Applied to:
+    - `GET /api/coord/crawl-progress`
+    - `GET /api/coord/discovered-targets`
+    - `GET /api/coord/discovered-target-sitemap`
+    - `GET /api/coord/discovered-files`
+    - `GET /api/coord/high-value-files`
+- Added periodic default-query warming thread in `server.py`:
+  - Preloads cache entries for default crawl progress, discovered targets, discovered files, and high-value files.
+  - Preloads first-page sitemap cache for a small top-domain sample.
+- Updated templates for cache-first, non-blocking refresh behavior:
+  - `templates/crawl_progress.html.j2`
+  - `templates/discovered_targets.html.j2`
+  - `templates/discovered_files.html.j2`
+  - Initial load now prefers cached API payloads and follows with background source refresh when applicable.
+- Validation:
+  - `python -m py_compile server.py`
+  - `pytest tests/test_reporting_and_store_helpers.py -k "render_crawl_progress_html or render_discovered_targets_html or render_discovered_files_html"`
+  - `pytest tests/test_reporting_and_store_helpers.py -k "list_discovered_target_domains or get_discovered_target_response_and_row_enrichment_include_download_links or list_discovered_files_returns_template_compatible_keys or list_high_value_files_returns_template_compatible_keys or crawl_progress_snapshot_reports_domain_counts"` (existing unrelated failure remains in `test_crawl_progress_snapshot_reports_domain_counts`)

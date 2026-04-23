@@ -3258,9 +3258,25 @@ def _start_default_page_cache_warmer(server: ThreadingHTTPServer, *, coordinator
     server.page_cache_warm_stop = stop_event  # type: ignore[attr-defined]
 
     def _warm_defaults_once() -> None:
+        def _ensure_cached(
+            *,
+            cache_key: str,
+            ttl_seconds: int,
+            loader: Callable[[], dict[str, Any]],
+        ) -> dict[str, Any]:
+            cached = cache.get(cache_key)
+            if cached is not None and isinstance(cached.get("payload"), dict):
+                return cached.get("payload", {})
+            payload = loader()
+            cache.set(cache_key, payload, ttl_seconds=ttl_seconds)
+            return payload
+
         crawl_key = _build_page_cache_key("crawl_progress", {"limit": 2000})
-        crawl_payload = _build_crawl_progress_payload(coordinator_store, limit=2000)
-        cache.set(crawl_key, crawl_payload, ttl_seconds=CRAWL_PROGRESS_PAGE_CACHE_TTL_SECONDS)
+        _ensure_cached(
+            cache_key=crawl_key,
+            ttl_seconds=CRAWL_PROGRESS_PAGE_CACHE_TTL_SECONDS,
+            loader=lambda: _build_crawl_progress_payload(coordinator_store, limit=2000),
+        )
 
         domain_defaults = {
             "q": "",
@@ -3270,24 +3286,33 @@ def _start_default_page_cache_warmer(server: ThreadingHTTPServer, *, coordinator
             "sort_dir": "desc",
         }
         discovered_targets_key = _build_page_cache_key("discovered_targets", domain_defaults)
-        discovered_targets_payload = _build_discovered_target_domains_payload(
-            coordinator_store,
-            limit=100,
-            offset=0,
-            search_text="",
-            sort_key="saved_at_utc",
-            sort_dir="desc",
+        discovered_targets_payload = _ensure_cached(
+            cache_key=discovered_targets_key,
+            ttl_seconds=DISCOVERED_TARGETS_PAGE_CACHE_TTL_SECONDS,
+            loader=lambda: _build_discovered_target_domains_payload(
+                coordinator_store,
+                limit=100,
+                offset=0,
+                search_text="",
+                sort_key="saved_at_utc",
+                sort_dir="desc",
+            ),
         )
-        cache.set(discovered_targets_key, discovered_targets_payload, ttl_seconds=DISCOVERED_TARGETS_PAGE_CACHE_TTL_SECONDS)
 
         files_defaults = {"limit": 5000, "q": ""}
         discovered_files_key = _build_page_cache_key("discovered_files", files_defaults)
-        discovered_files_payload = _build_discovered_files_payload(coordinator_store, limit=5000, search_text="")
-        cache.set(discovered_files_key, discovered_files_payload, ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS)
+        _ensure_cached(
+            cache_key=discovered_files_key,
+            ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS,
+            loader=lambda: _build_discovered_files_payload(coordinator_store, limit=5000, search_text=""),
+        )
 
         high_value_files_key = _build_page_cache_key("high_value_files", files_defaults)
-        high_value_files_payload = _build_high_value_files_payload(coordinator_store, limit=5000, search_text="")
-        cache.set(high_value_files_key, high_value_files_payload, ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS)
+        _ensure_cached(
+            cache_key=high_value_files_key,
+            ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS,
+            loader=lambda: _build_high_value_files_payload(coordinator_store, limit=5000, search_text=""),
+        )
 
         warmed_domains = discovered_targets_payload.get("rows", []) if isinstance(discovered_targets_payload, dict) else []
         if isinstance(warmed_domains, list):
@@ -3306,18 +3331,21 @@ def _start_default_page_cache_warmer(server: ThreadingHTTPServer, *, coordinator
                     "include_details": True,
                 }
                 sitemap_key = _build_page_cache_key("discovered_target_sitemap", sitemap_defaults)
-                sitemap_payload = _build_discovered_target_sitemap_payload(
-                    coordinator_store,
-                    root_domain=root_domain,
-                    limit=200,
-                    offset=0,
-                    search_text="",
-                    subdomain="",
-                    sort_key=DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY,
-                    sort_dir="asc",
-                    include_details=True,
+                _ensure_cached(
+                    cache_key=sitemap_key,
+                    ttl_seconds=DISCOVERED_TARGET_SITEMAP_PAGE_CACHE_TTL_SECONDS,
+                    loader=lambda rd=root_domain: _build_discovered_target_sitemap_payload(
+                        coordinator_store,
+                        root_domain=rd,
+                        limit=200,
+                        offset=0,
+                        search_text="",
+                        subdomain="",
+                        sort_key=DISCOVERED_TARGET_SITEMAP_DEFAULT_SORT_KEY,
+                        sort_dir="asc",
+                        include_details=True,
+                    ),
                 )
-                cache.set(sitemap_key, sitemap_payload, ttl_seconds=DISCOVERED_TARGET_SITEMAP_PAGE_CACHE_TTL_SECONDS)
 
     def _loop() -> None:
         while not stop_event.is_set():

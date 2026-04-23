@@ -26,3 +26,5 @@
 - Remove dead legacy worker-loop methods from `coordinator.py` (`_nightmare_worker_loop`, `_fozzy_worker_loop`, `_auth0r_worker_loop`, `_extractor_worker_loop`) now that runtime startup is plugin-worker-only.
 - Consider persisting response summary fields (`response_status_code`, `response_elapsed_ms`, `response_size_bytes`, `response_content_type`) directly in `url_inventory` during crawl/probe writes to avoid evidence-file reads on every sitemap enrichment call.
 - Consider adding a small server-side LRU cache for `get_discovered_target_response` / sitemap row enrichment keyed by `(root_domain, url, evidence_path)` to further reduce repeated gzip evidence parsing on rapid UI refresh intervals.
+- Add API-level tests for `cache_mode` behavior on cache-enabled coordinator endpoints, including stale-cache fallback path and `page_cache` metadata assertions.
+- Move page-cache TTL/warm settings from hard-coded `server.py` constants into config (`server.json`) with sane defaults and guardrails.

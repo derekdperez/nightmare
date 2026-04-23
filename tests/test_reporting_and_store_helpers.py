@@ -5,6 +5,7 @@ import re
 import io
 import json
 import gzip
+import time
 import zipfile
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -26,9 +27,12 @@ from reporting.server_pages import (
     render_workers_html,
 )
 from server import (
+    _PageDataCache,
     _apply_extractor_row_query,
     _apply_fuzzing_row_query,
+    _build_page_cache_key,
     _extractor_match_stats_from_zip_bytes,
+    _normalize_page_cache_mode,
     _top_extractor_filters,
     collect_dashboard_data,
 )
@@ -174,6 +178,39 @@ def test_make_target_entry_id_is_stable_and_short():
     assert a == b
     assert a != c
     assert re.fullmatch(r"[0-9a-f]{16}", a)
+
+
+def test_normalize_page_cache_mode_defaults_to_prefer():
+    assert _normalize_page_cache_mode(None) == "prefer"
+    assert _normalize_page_cache_mode("") == "prefer"
+    assert _normalize_page_cache_mode("refresh") == "refresh"
+    assert _normalize_page_cache_mode("live") == "refresh"
+    assert _normalize_page_cache_mode("bypass") == "refresh"
+    assert _normalize_page_cache_mode("unknown-mode") == "prefer"
+
+
+def test_page_data_cache_honors_ttl_and_stale_reads():
+    cache = _PageDataCache(max_entries=8, ttl_seconds=1)
+    key = _build_page_cache_key("crawl_progress", {"limit": 10})
+    payload = {"rows": [{"root_domain": "example.com"}], "counts": {"total_domains": 1}}
+    cache.set(key, payload, ttl_seconds=1)
+
+    fresh = cache.get(key)
+    assert fresh is not None
+    assert fresh["stale"] is False
+    assert fresh["payload"]["counts"]["total_domains"] == 1
+
+    time.sleep(1.05)
+    stale = cache.get(key, allow_stale=True)
+    assert stale is not None
+    assert stale["stale"] is True
+    stale["payload"]["counts"]["total_domains"] = 9
+
+    # Cached payloads are returned as deep copies, not direct references.
+    again = cache.get(key, allow_stale=True)
+    assert again is not None
+    assert again["payload"]["counts"]["total_domains"] == 1
+    assert cache.get(key) is None
 
 
 def test_database_status_limits_rows_per_table():

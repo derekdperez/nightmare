@@ -28,3 +28,6 @@
 - Discovered-target metrics completeness:
   - Crawl evidence (`crawl_response`) currently does not guarantee elapsed-time capture, while probe evidence (`existence_probe`) does.
   - Confirm whether URL inventory should store a canonical per-URL elapsed metric so sitemap rows can always show load time without heuristic fallback.
+- Page-cache policy tuning:
+  - Confirm preferred production TTL and warm intervals for server-side page caches (current defaults are short, hard-coded values in `server.py`).
+  - Confirm whether sitemap warmer should cover only top domains (current: first 3) or be configurable by fleet size.
