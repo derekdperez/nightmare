@@ -399,3 +399,7 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Worker log convention:
   - Worker-facing current-run logs are mirrored to `output/_worker_logs/<worker_id>.current.log` during subprocess execution.
   - Worker UI should prefer event metadata `log_path` for active-run link and fall back to newest discovered worker log file.
+
+- Server deploy CLI compatibility convention:
+  - `server.py` must retain compatibility with deploy compose flags `--http-port`, `--https-port`, `--cert-file`, and `--key-file` (not only `--port`).
+  - In central/local docker deployment mode, server should bind TLS on `--https-port` when provided and validate cert/key paths before startup.

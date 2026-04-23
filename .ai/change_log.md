@@ -1456,3 +1456,20 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile server_app/store.py server.py coordinator.py coordinator_app/runtime.py`
   - `pytest -q tests/test_refactor_modules.py -k "worker_template_renders_database_link or crawl_progress_template_renders or discovered_targets_template_renders"`
+
+## 2026-04-23
+
+- Fixed central deploy crash-loop caused by server CLI incompatibility.
+  - `server.py` now accepts compose/deploy TLS arguments:
+    - `--http-port`
+    - `--https-port`
+    - `--cert-file`
+    - `--key-file`
+  - Server startup now selects port precedence as `--port` (legacy) -> `--https-port` -> `--http-port`.
+  - When `--https-port` is used, startup validates cert/key presence and file existence before launching uvicorn with TLS.
+  - Added env/config fallbacks for TLS path fields (`CERT_FILE` / `KEY_FILE` and `TLS_CERT_FILE` / `TLS_KEY_FILE`).
+- Why:
+  - `deploy/docker-compose.central.yml` and `deploy/docker-compose.local.yml` pass TLS flags by default; without flag support the server container exits immediately and coordinator readiness checks never succeed.
+- Validation:
+  - `python -m py_compile server.py`
+  - `pytest -q tests/test_runtime_unit.py -k "test_read_json_dict_handles_invalid_content"`
