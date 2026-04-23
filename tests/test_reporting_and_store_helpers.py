@@ -22,6 +22,7 @@ from reporting.server_pages import (
     render_events_html,
     render_extractor_matches_html,
     render_fuzzing_html,
+    render_http_requests_html,
     render_view_logs_html,
     render_workflows_html,
     render_workers_html,
@@ -115,6 +116,12 @@ def test_render_workflows_html_contains_expected_heading():
     assert "/api/coord/events" in html
     assert "/api/coord/stage/enqueue" in html
     assert "/api/coord/stage/reset" in html
+
+
+def test_render_http_requests_html_contains_expected_heading():
+    html = render_http_requests_html()
+    assert "HTTP Requests" in html
+    assert "/api/coord/http-requests" in html
 
 
 def test_ensure_schema_bootstrap_stage_index_is_legacy_safe():

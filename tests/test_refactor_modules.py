@@ -9,6 +9,7 @@ from reporting.server_pages import (
     render_discovered_targets_html,
     render_extractor_matches_html,
     render_fuzzing_html,
+    render_http_requests_html,
     render_view_logs_html,
     render_workflows_html,
     render_workers_html,
@@ -83,7 +84,8 @@ def test_database_template_renders():
     html = render_database_html()
     assert "<!doctype html>" in html.lower()
     assert "Database Status" in html
-    assert 'href="/dashboard"' in html
+    assert 'href="/workers"' in html
+    assert 'href="/http-requests"' in html
     assert 'href="/workers"' in html
     assert 'href="/crawl-progress"' in html
     assert "/api/coord/database-status" in html
@@ -94,7 +96,8 @@ def test_crawl_progress_template_renders():
     html = render_crawl_progress_html()
     assert "<!doctype html>" in html.lower()
     assert "Crawl Progress" in html
-    assert 'href="/dashboard"' in html
+    assert 'href="/workers"' in html
+    assert 'href="/http-requests"' in html
     assert 'href="/workers"' in html
     assert 'href="/database"' in html
     assert "/api/coord/crawl-progress" in html
@@ -106,7 +109,8 @@ def test_extractor_matches_template_renders():
     html = render_extractor_matches_html()
     assert "<!doctype html>" in html.lower()
     assert "Extractor Matches" in html
-    assert 'href="/dashboard"' in html
+    assert 'href="/workers"' in html
+    assert 'href="/http-requests"' in html
     assert 'href="/workers"' in html
     assert 'href="/database"' in html
     assert 'href="/crawl-progress"' in html
@@ -125,7 +129,8 @@ def test_fuzzing_template_renders():
     html = render_fuzzing_html()
     assert "<!doctype html>" in html.lower()
     assert "Fuzzing" in html
-    assert 'href="/dashboard"' in html
+    assert 'href="/workers"' in html
+    assert 'href="/http-requests"' in html
     assert 'href="/workers"' in html
     assert 'href="/database"' in html
     assert 'href="/crawl-progress"' in html
@@ -162,3 +167,12 @@ def test_discovered_targets_template_renders():
     html = render_discovered_targets_html()
     assert "Discovered Targets" in html
     assert '/api/coord/discovered-targets' in html
+
+
+def test_http_requests_template_renders():
+    html = render_http_requests_html()
+    assert "<!doctype html>" in html.lower()
+    assert "HTTP Requests" in html
+    assert "/api/coord/http-requests" in html
+    assert "Double-click any clipped cell to select full content" in html
+    assert "max-width: 15vw" in html
