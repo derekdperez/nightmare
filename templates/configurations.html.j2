@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configurations</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 8px; }
+    .meta { margin-bottom: 14px; color: #475569; font-size: 13px; }
+    .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 14px; }
+    .panel h2 { margin: 0 0 10px; font-size: 18px; }
+    .row { display: grid; grid-template-columns: 1fr 120px 120px; gap: 10px; align-items: center; margin-bottom: 10px; }
+    .label { font-weight: 600; }
+    .hint { color: #64748b; font-size: 12px; margin-top: 3px; }
+    input[type="number"], input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #94a3b8; border-radius: 8px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: white; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+    .status { min-height: 20px; color: #475569; }
+    .muted { color: #64748b; }
+    @media (max-width: 760px) {
+      .row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  {% include "_navbar.html.j2" %}
+  <h1>Configurations</h1>
+  <div class="meta">Configure web-server behavior that affects UI responsiveness and API response sizes.</div>
+
+  <div class="toolbar">
+    <label>Coordinator token <input id="token" type="password" placeholder="Bearer token"></label>
+    <button id="reloadBtn">Reload</button>
+    <button id="saveBtn" class="primary">Save configuration</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>API response limits</h2>
+      <div class="row">
+        <div>
+          <div class="label">Crawl Progress</div>
+          <div class="hint">Default limit used by the page and maximum limit accepted by the API.</div>
+        </div>
+        <label>Default<input id="crawl_progress_default_limit" type="number" min="1" step="1"></label>
+        <label>Max<input id="crawl_progress_max_limit" type="number" min="1" step="1"></label>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">Discovered Files</div>
+          <div class="hint">Controls artifact and high-value file response sizes.</div>
+        </div>
+        <label>Default<input id="discovered_files_default_limit" type="number" min="1" step="1"></label>
+        <label>Max<input id="discovered_files_max_limit" type="number" min="1" step="1"></label>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">High Value Files</div>
+          <div class="hint">Separate cap for the high-value files API if you want it to differ.</div>
+        </div>
+        <label>Default<input id="high_value_files_default_limit" type="number" min="1" step="1"></label>
+        <label>Max<input id="high_value_files_max_limit" type="number" min="1" step="1"></label>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">HTTP Requests</div>
+          <div class="hint">Useful when the requests table needs a different cap.</div>
+        </div>
+        <label>Default<input id="http_requests_default_limit" type="number" min="1" step="1"></label>
+        <label>Max<input id="http_requests_max_limit" type="number" min="1" step="1"></label>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    const FIELD_IDS = [
+      "crawl_progress_default_limit",
+      "crawl_progress_max_limit",
+      "discovered_files_default_limit",
+      "discovered_files_max_limit",
+      "high_value_files_default_limit",
+      "high_value_files_max_limit",
+      "http_requests_default_limit",
+      "http_requests_max_limit",
+    ];
+
+    function readCookie(name) {
+      const parts = document.cookie ? document.cookie.split("; ") : [];
+      for (const part of parts) {
+        const idx = part.indexOf("=");
+        if (idx === -1) continue;
+        const key = decodeURIComponent(part.slice(0, idx));
+        if (key !== name) continue;
+        return decodeURIComponent(part.slice(idx + 1));
+      }
+      return "";
+    }
+    function writeCookie(name, value) {
+      document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; path=/; max-age=${60*60*24*30}; SameSite=Lax`;
+    }
+    function authHeaders() {
+      const token = document.getElementById("token").value.trim();
+      const headers = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      return headers;
+    }
+    async function apiGet(url) {
+      const rsp = await fetch(url, { cache: "no-store", headers: authHeaders() });
+      const bodyText = await rsp.text();
+      let payload = {};
+      try { payload = bodyText ? JSON.parse(bodyText) : {}; } catch {}
+      if (!rsp.ok) throw new Error(payload.detail || payload.error || bodyText || `HTTP ${rsp.status}`);
+      return payload;
+    }
+    async function apiPost(url, body) {
+      const rsp = await fetch(url, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(body || {}),
+      });
+      const bodyText = await rsp.text();
+      let payload = {};
+      try { payload = bodyText ? JSON.parse(bodyText) : {}; } catch {}
+      if (!rsp.ok) throw new Error(payload.detail || payload.error || bodyText || `HTTP ${rsp.status}`);
+      return payload;
+    }
+    function fillForm(settings) {
+      for (const fieldId of FIELD_IDS) {
+        const el = document.getElementById(fieldId);
+        if (!el) continue;
+        el.value = Number((settings || {})[fieldId] || 0);
+      }
+    }
+    function collectForm() {
+      const settings = {};
+      for (const fieldId of FIELD_IDS) {
+        const el = document.getElementById(fieldId);
+        settings[fieldId] = Math.max(1, Number(el.value || 0));
+      }
+      return settings;
+    }
+    async function loadConfig() {
+      document.getElementById("status").textContent = "Loading...";
+      const payload = await apiGet("/api/coord/configurations");
+      fillForm((payload || {}).web_server || {});
+      document.getElementById("status").textContent = `Loaded configuration from ${payload.source || "server"}.`;
+    }
+    async function saveConfig() {
+      document.getElementById("status").textContent = "Saving...";
+      const payload = await apiPost("/api/coord/configurations", { web_server: collectForm() });
+      fillForm((payload || {}).web_server || {});
+      document.getElementById("status").textContent = "Saved. New requests will use the updated limits.";
+    }
+
+    const token = readCookie(TOKEN_COOKIE_NAME);
+    if (token) document.getElementById("token").value = token;
+    document.getElementById("token").addEventListener("change", (ev) => writeCookie(TOKEN_COOKIE_NAME, ev.target.value.trim()));
+    document.getElementById("token").addEventListener("blur", (ev) => writeCookie(TOKEN_COOKIE_NAME, ev.target.value.trim()));
+    document.getElementById("reloadBtn").addEventListener("click", () => loadConfig().catch((err) => {
+      document.getElementById("status").textContent = `Load failed: ${err.message || err}`;
+    }));
+    document.getElementById("saveBtn").addEventListener("click", () => saveConfig().catch((err) => {
+      document.getElementById("status").textContent = `Save failed: ${err.message || err}`;
+    }));
+    loadConfig().catch((err) => {
+      document.getElementById("status").textContent = `Load failed: ${err.message || err}`;
+    });
+  </script>
+</body>
+</html>

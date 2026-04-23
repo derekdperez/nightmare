@@ -8,5 +8,15 @@
   "log_database_url": "",
   "coordinator_api_token": "",
   "master_report_regen_token": "",
-  "output_root": "output"
+  "output_root": "output",
+  "web_server": {
+    "crawl_progress_default_limit": 2500,
+    "crawl_progress_max_limit": 2500,
+    "discovered_files_default_limit": 2500,
+    "discovered_files_max_limit": 2500,
+    "high_value_files_default_limit": 2500,
+    "high_value_files_max_limit": 2500,
+    "http_requests_default_limit": 500,
+    "http_requests_max_limit": 5000
+  }
 }

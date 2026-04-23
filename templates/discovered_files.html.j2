@@ -38,7 +38,7 @@
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="searchText" type="text" placeholder="Search artifacts and high value files">
-    <input id="limit" type="number" min="1" max="50000" value="1000" style="max-width: 120px;" title="Max rows">
+    <input id="limit" type="number" min="1" max="50000" value="2500" style="max-width: 120px;" title="Max rows">
     <button class="primary" onclick="refreshPage({ forceRefresh: true })">Refresh</button>
     <span id="msg" class="muted"></span>
   </div>
@@ -310,6 +310,16 @@
       }
       msg.textContent = `Loaded ${artifactRowsCache.length} artifacts and ${highValueRowsCache.length} high value items.`;
     }
+
+    async function loadServerConfig() {
+      try {
+        const payload = await apiGet(`/api/coord/configurations`);
+        return (payload && payload.web_server) || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
     function hydrateTokenFromCookie() {
       const token = readCookie(TOKEN_COOKIE_NAME);
       if (token) document.getElementById("token").value = token;
@@ -317,8 +327,21 @@
     document.getElementById("token").addEventListener("change", () => refreshPage({ forceRefresh: true }));
     document.getElementById("searchText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") refreshPage({ forceRefresh: true }); });
     document.getElementById("limit").addEventListener("change", () => refreshPage({ forceRefresh: true }));
+
+    function applyConfiguredLimitDefaults(settings) {
+      const limitInput = document.getElementById("limit");
+      if (!limitInput) return;
+      const defaultValue = Number((settings || {})['discovered_files_default_limit'] || 2500);
+      const maxValue = Number((settings || {})['discovered_files_max_limit'] || defaultValue || 2500);
+      limitInput.value = String(Math.max(1, defaultValue));
+      limitInput.max = String(Math.max(1, maxValue));
+    }
+
     hydrateTokenFromCookie();
-    refreshPage({ useCacheFirst: true }).catch((err) => {
+    loadServerConfig().then((settings) => {
+      applyConfiguredLimitDefaults(settings);
+      return refreshPage({ useCacheFirst: true });
+    }).catch((err) => {
       document.getElementById("msg").textContent = `Error: ${err.message || err}`;
       document.getElementById("artifactRows").innerHTML = `<tr><td colspan="6">${esc(err.message || err)}</td></tr>`;
       document.getElementById("highValueRows").innerHTML = `<tr><td colspan="5">${esc(err.message || err)}</td></tr>`;

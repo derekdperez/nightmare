@@ -35,7 +35,7 @@
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="filter" type="text" placeholder="Filter domain...">
-    <input id="limit" type="number" min="1" max="2000" value="500" style="max-width: 120px;" title="Max domains">
+    <input id="limit" type="number" min="1" max="2000" value="2500" style="max-width: 120px;" title="Max domains">
     <button class="primary" onclick="refresh({ forceRefresh: true })">Refresh</button>
     <span id="msg" class="muted"></span>
   </div>
@@ -87,6 +87,16 @@
       const secure = location.protocol === "https:" ? "; Secure" : "";
       document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`;
     }
+
+    async function loadServerConfig() {
+      try {
+        const payload = await apiGet(`/api/coord/configurations`);
+        return (payload && payload.web_server) || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
     function hydrateTokenFromCookie() {
       const token = readCookie(TOKEN_COOKIE_NAME);
       if (token) document.getElementById("token").value = token;
@@ -279,12 +289,27 @@
       }
     }
 
+
+    function applyConfiguredLimitDefaults(settings) {
+      const limitInput = document.getElementById("limit");
+      if (!limitInput) return;
+      const defaultValue = Number((settings || {})['crawl_progress_default_limit'] || 2500);
+      const maxValue = Number((settings || {})['crawl_progress_max_limit'] || defaultValue || 2500);
+      limitInput.value = String(Math.max(1, defaultValue));
+      limitInput.max = String(Math.max(1, maxValue));
+    }
+
     hydrateTokenFromCookie();
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
     document.getElementById("filter").addEventListener("input", refresh);
     document.getElementById("limit").addEventListener("change", refresh);
-    refresh({ useCacheFirst: true });
+    loadServerConfig().then((settings) => {
+      applyConfiguredLimitDefaults(settings);
+      refresh({ useCacheFirst: true });
+    }).catch(() => {
+      refresh({ useCacheFirst: true });
+    });
     setInterval(() => refresh({ forceRefresh: true }), 30000);
   </script>
 </body>

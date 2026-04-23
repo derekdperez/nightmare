@@ -54,6 +54,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from output_cleanup import clear_output_root_children
 from reporting.server_pages import (
     render_auth0r_html,
+    render_configurations_html,
     render_crawl_progress_html,
     render_dashboard_html,
     render_database_html,
@@ -106,6 +107,19 @@ EST_TZ = timezone(timedelta(hours=-5), name="EST")
 WORKFLOW_FILE_SUFFIX = ".workflow.json"
 WORKFLOW_FILE_GLOB = f"*{WORKFLOW_FILE_SUFFIX}"
 
+DEFAULT_WEB_SERVER_SETTINGS: dict[str, int] = {
+    "crawl_progress_default_limit": 2500,
+    "crawl_progress_max_limit": 2500,
+    "discovered_files_default_limit": 2500,
+    "discovered_files_max_limit": 2500,
+    "high_value_files_default_limit": 2500,
+    "high_value_files_max_limit": 2500,
+    "http_requests_default_limit": 500,
+    "http_requests_max_limit": 5000,
+}
+MAX_CONFIGURABLE_WEB_LIMIT = 50000
+
+
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
     try:
@@ -127,6 +141,75 @@ def _resolve_config_path(raw_path: str | None) -> Path:
     if p.parts and p.parts[0].lower() == "config":
         return (BASE_DIR / p).resolve()
     return (BASE_DIR / "config" / p).resolve()
+
+
+
+
+def _default_runtime_settings_path(config_path: Path) -> Path:
+    return config_path.with_name(f"{config_path.stem}.runtime.json").resolve()
+
+
+def _normalize_positive_int(value: Any, default: int, *, minimum: int = 1, maximum: int = MAX_CONFIGURABLE_WEB_LIMIT) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(minimum, min(maximum, parsed))
+
+
+def _sanitize_web_server_settings(payload: Any, *, base: dict[str, int] | None = None) -> dict[str, int]:
+    merged = dict(DEFAULT_WEB_SERVER_SETTINGS)
+    if isinstance(base, dict):
+        for key, default in DEFAULT_WEB_SERVER_SETTINGS.items():
+            merged[key] = _normalize_positive_int(base.get(key), default)
+    if isinstance(payload, dict):
+        for key, default in DEFAULT_WEB_SERVER_SETTINGS.items():
+            if key in payload:
+                merged[key] = _normalize_positive_int(payload.get(key), merged.get(key, default))
+    pairs = (
+        ("crawl_progress_default_limit", "crawl_progress_max_limit"),
+        ("discovered_files_default_limit", "discovered_files_max_limit"),
+        ("high_value_files_default_limit", "high_value_files_max_limit"),
+        ("http_requests_default_limit", "http_requests_max_limit"),
+    )
+    for default_key, max_key in pairs:
+        merged[max_key] = max(1, int(merged.get(max_key, DEFAULT_WEB_SERVER_SETTINGS[max_key]) or 1))
+        merged[default_key] = max(1, min(int(merged.get(default_key, DEFAULT_WEB_SERVER_SETTINGS[default_key]) or 1), merged[max_key]))
+    return merged
+
+
+def _read_runtime_server_settings(path: Path) -> dict[str, Any]:
+    payload = _read_json_dict(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_runtime_server_settings(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _resolve_effective_web_server_settings(server: Any) -> dict[str, int]:
+    base = getattr(server, "base_web_server_settings", None)
+    if not isinstance(base, dict):
+        base = dict(DEFAULT_WEB_SERVER_SETTINGS)
+    runtime_path = getattr(server, "runtime_settings_path", None)
+    lock = getattr(server, "runtime_settings_lock", None)
+    runtime_payload: dict[str, Any] = {}
+    if isinstance(runtime_path, Path):
+        if lock is not None:
+            with lock:
+                runtime_payload = _read_runtime_server_settings(runtime_path)
+        else:
+            runtime_payload = _read_runtime_server_settings(runtime_path)
+    return _sanitize_web_server_settings((runtime_payload or {}).get("web_server", {}), base=base)
+
+
+def _limit_from_settings(server: Any, *, query: dict[str, list[str]], default_key: str, max_key: str) -> int:
+    settings = _resolve_effective_web_server_settings(server)
+    default_value = int(settings.get(default_key, DEFAULT_WEB_SERVER_SETTINGS[default_key]) or DEFAULT_WEB_SERVER_SETTINGS[default_key])
+    max_value = int(settings.get(max_key, DEFAULT_WEB_SERVER_SETTINGS[max_key]) or DEFAULT_WEB_SERVER_SETTINGS[max_key])
+    requested = _safe_int((query.get("limit") or [default_value])[0], default_value)
+    return max(1, min(max_value, requested))
 
 
 def _normalize_workflow_id(value: Any, *, default: str = "") -> str:
@@ -3307,11 +3390,17 @@ def _start_default_page_cache_warmer(server: ThreadingHTTPServer, *, coordinator
             cache.set(cache_key, payload, ttl_seconds=ttl_seconds)
             return payload
 
-        crawl_key = _build_page_cache_key("crawl_progress", {"limit": 500})
+        web_settings = _resolve_effective_web_server_settings(server)
+        crawl_limit = int(web_settings.get("crawl_progress_default_limit", DEFAULT_WEB_SERVER_SETTINGS["crawl_progress_default_limit"]) or DEFAULT_WEB_SERVER_SETTINGS["crawl_progress_default_limit"])
+        discovered_files_limit = int(web_settings.get("discovered_files_default_limit", DEFAULT_WEB_SERVER_SETTINGS["discovered_files_default_limit"]) or DEFAULT_WEB_SERVER_SETTINGS["discovered_files_default_limit"])
+        high_value_files_limit = int(web_settings.get("high_value_files_default_limit", DEFAULT_WEB_SERVER_SETTINGS["high_value_files_default_limit"]) or DEFAULT_WEB_SERVER_SETTINGS["high_value_files_default_limit"])
+        http_requests_limit = int(web_settings.get("http_requests_default_limit", DEFAULT_WEB_SERVER_SETTINGS["http_requests_default_limit"]) or DEFAULT_WEB_SERVER_SETTINGS["http_requests_default_limit"])
+
+        crawl_key = _build_page_cache_key("crawl_progress", {"limit": crawl_limit})
         _ensure_cached(
             cache_key=crawl_key,
             ttl_seconds=CRAWL_PROGRESS_PAGE_CACHE_TTL_SECONDS,
-            loader=lambda: _build_crawl_progress_payload(coordinator_store, limit=500),
+            loader=lambda: _build_crawl_progress_payload(coordinator_store, limit=crawl_limit),
         )
 
         domain_defaults = {
@@ -3335,29 +3424,29 @@ def _start_default_page_cache_warmer(server: ThreadingHTTPServer, *, coordinator
             ),
         )
 
-        files_defaults = {"limit": 1000, "q": ""}
+        files_defaults = {"limit": discovered_files_limit, "q": ""}
         discovered_files_key = _build_page_cache_key("discovered_files", files_defaults)
         _ensure_cached(
             cache_key=discovered_files_key,
             ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS,
-            loader=lambda: _build_discovered_files_payload(coordinator_store, limit=1000, search_text=""),
+            loader=lambda: _build_discovered_files_payload(coordinator_store, limit=discovered_files_limit, search_text=""),
         )
 
         high_value_files_key = _build_page_cache_key("high_value_files", files_defaults)
         _ensure_cached(
             cache_key=high_value_files_key,
             ttl_seconds=DISCOVERED_FILES_PAGE_CACHE_TTL_SECONDS,
-            loader=lambda: _build_high_value_files_payload(coordinator_store, limit=1000, search_text=""),
+            loader=lambda: _build_high_value_files_payload(coordinator_store, limit=high_value_files_limit, search_text=""),
         )
 
-        http_requests_defaults = {"limit": 500, "offset": 0, "q": "", "root_domain": ""}
+        http_requests_defaults = {"limit": http_requests_limit, "offset": 0, "q": "", "root_domain": ""}
         http_requests_key = _build_page_cache_key("http_requests", http_requests_defaults)
         _ensure_cached(
             cache_key=http_requests_key,
             ttl_seconds=HTTP_REQUESTS_PAGE_CACHE_TTL_SECONDS,
             loader=lambda: _build_http_requests_payload(
                 coordinator_store,
-                limit=500,
+                limit=http_requests_limit,
                 offset=0,
                 search_text="",
                 root_domain="",
@@ -3557,6 +3646,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     @property
     def master_report_regen_token(self) -> str:
         return str(getattr(self.server, "master_report_regen_token", "") or "").strip()  # type: ignore[attr-defined]
+
+    @property
+    def web_server_settings(self) -> dict[str, int]:
+        return _resolve_effective_web_server_settings(self.server)
 
     def log_message(self, format: str, *args: Any) -> None:
         # Keep server output concise.
@@ -3897,6 +3990,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/crawl-progress":
             self._write_text(render_crawl_progress_html(), content_type="text/html; charset=utf-8")
             return
+        if path == "/configurations":
+            self._write_text(render_configurations_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/extractor-matches":
             self._write_text(render_extractor_matches_html(), content_type="text/html; charset=utf-8")
             return
@@ -3932,7 +4028,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._is_coordinator_authorized():
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
-            limit = max(1, min(5000, _safe_int((query.get("limit") or [500])[0], 500)))
+            limit = _limit_from_settings(self.server, query=query, default_key="http_requests_default_limit", max_key="http_requests_max_limit")
             offset = max(0, _safe_int((query.get("offset") or [0])[0], 0))
             search_text = str((query.get("q") or [""])[0] or "").strip()
             root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
@@ -4168,7 +4264,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._is_coordinator_authorized():
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
-            limit = _safe_int((query.get("limit") or [1000])[0], 1000)
+            limit = _limit_from_settings(self.server, query=query, default_key="discovered_files_default_limit", max_key="discovered_files_max_limit")
             search_text = str((query.get("q") or [""])[0] or "").strip().lower()
             cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
             cache_key_parts = {"limit": limit, "q": search_text}
@@ -4197,7 +4293,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._is_coordinator_authorized():
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
-            limit = _safe_int((query.get("limit") or [1000])[0], 1000)
+            limit = _limit_from_settings(self.server, query=query, default_key="high_value_files_default_limit", max_key="high_value_files_max_limit")
             search_text = str((query.get("q") or [""])[0] or "").strip().lower()
             cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
             cache_key_parts = {"limit": limit, "q": search_text}
@@ -4665,6 +4761,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             snapshot = _enrich_worker_snapshot_with_live_details(snapshot, log_store=self.log_store)
             self._write_json(snapshot)
             return
+        if path == "/api/coord/configurations":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            runtime_path = getattr(self.server, "runtime_settings_path", None)
+            runtime_payload = {}
+            lock = getattr(self.server, "runtime_settings_lock", None)
+            if isinstance(runtime_path, Path):
+                if lock is not None:
+                    with lock:
+                        runtime_payload = _read_runtime_server_settings(runtime_path)
+                else:
+                    runtime_payload = _read_runtime_server_settings(runtime_path)
+            self._write_json(
+                {
+                    "ok": True,
+                    "source": "runtime" if isinstance(runtime_payload, dict) and runtime_payload else "defaults",
+                    "runtime_settings_path": str(runtime_path) if isinstance(runtime_path, Path) else "",
+                    "web_server": self.web_server_settings,
+                }
+            )
+            return
         if path == "/api/coord/crawl-progress":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
@@ -4672,7 +4790,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._is_coordinator_authorized():
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
-            limit = _safe_int((query.get("limit") or [500])[0], 500)
+            limit = _limit_from_settings(self.server, query=query, default_key="crawl_progress_default_limit", max_key="crawl_progress_max_limit")
             cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
             try:
                 payload = self._resolve_cached_page_payload(
@@ -5404,6 +5522,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if not path.startswith("/api/coord/"):
             self._write_json({"error": "not found"}, status=404)
+            return
+        if path == "/api/coord/configurations":
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            runtime_path = getattr(self.server, "runtime_settings_path", None)
+            lock = getattr(self.server, "runtime_settings_lock", None)
+            if not isinstance(runtime_path, Path):
+                self._write_json({"error": "runtime settings path is not configured"}, status=500)
+                return
+            incoming = body.get("web_server", {})
+            current = _resolve_effective_web_server_settings(self.server)
+            sanitized = _sanitize_web_server_settings(incoming, base=current)
+            payload = {"web_server": sanitized, "updated_at_utc": datetime.now(timezone.utc).isoformat()}
+            if lock is not None:
+                with lock:
+                    _write_runtime_server_settings(runtime_path, payload)
+            else:
+                _write_runtime_server_settings(runtime_path, payload)
+            cache = getattr(self.server, "page_data_cache", None)
+            if cache is not None and hasattr(cache, "_entries"):
+                try:
+                    with cache._lock:
+                        cache._entries.clear()
+                except Exception:
+                    pass
+            self._write_json({"ok": True, "runtime_settings_path": str(runtime_path), "web_server": sanitized})
             return
         if self.coordinator_store is None:
             self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
@@ -6541,6 +6686,9 @@ def main(argv: list[str] | None = None) -> int:
         srv.fuzzing_zip_index_cache = _ZipFileIndexCache()  # type: ignore[attr-defined]
         srv.log_store = log_store  # type: ignore[attr-defined]
         srv.auth0r_store = auth0r_store  # type: ignore[attr-defined]
+        srv.base_web_server_settings = _sanitize_web_server_settings((merged_cfg.get("web_server") if isinstance(merged_cfg, dict) else {}), base=DEFAULT_WEB_SERVER_SETTINGS)  # type: ignore[attr-defined]
+        srv.runtime_settings_path = _default_runtime_settings_path(config_path)  # type: ignore[attr-defined]
+        srv.runtime_settings_lock = threading.Lock()  # type: ignore[attr-defined]
         _start_default_page_cache_warmer(srv, coordinator_store=coordinator_store)
         return srv
 
