@@ -30,7 +30,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Crawl Progress</h1>
-  <div class="meta">Live coordinator crawl status by domain. Auto-refresh every 3s.</div>
+  <div class="meta">Live coordinator crawl status by domain. Auto-refresh every 30s.</div>
 
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
@@ -275,7 +275,7 @@
     document.getElementById("filter").addEventListener("input", refresh);
     document.getElementById("limit").addEventListener("change", refresh);
     refresh({ useCacheFirst: true });
-    setInterval(() => refresh({ forceRefresh: true }), 3000);
+    setInterval(() => refresh({ forceRefresh: true }), 30000);
   </script>
 </body>
 </html>

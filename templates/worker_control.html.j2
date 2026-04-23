@@ -35,7 +35,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Worker Control Center</h1>
-  <div class="meta">Asynchronous auto-refresh every 3s. Use row selection to run bulk start/stop/pause commands.</div>
+  <div class="meta">Asynchronous auto-refresh every 30s. Use row selection to run bulk start/stop/pause commands.</div>
   <div id="cards" class="cards"></div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
@@ -520,8 +520,7 @@
       return originalRender(data);
     };
     refresh({ useCacheFirst: true });
-    setInterval(() => refresh(), 3000);
+    setInterval(() => refresh(), 30000);
   </script>
 </body>
 </html>
-

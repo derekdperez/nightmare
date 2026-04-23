@@ -1504,6 +1504,7 @@ LIMIT %s;
         queued_domains = 0
         failed_domains = 0
         completed_domains = 0
+        artifact_fallback_budget = max(25, min(250, safe_limit // 2))
 
         for row in rows:
             root_domain = str(row[0] or "").strip().lower()
@@ -1512,6 +1513,17 @@ LIMIT %s;
 
             session = self.load_session(root_domain, include_artifact_fallback=False) or {}
             metrics = self._session_url_metrics(session)
+            if (
+                not bool(metrics.get("has_session_data"))
+                and row[15] is not None
+                and artifact_fallback_budget > 0
+            ):
+                artifact_fallback_budget -= 1
+                fallback_session = self.load_session(root_domain, include_artifact_fallback=True) or {}
+                fallback_metrics = self._session_url_metrics(fallback_session)
+                if bool(fallback_metrics.get("has_session_data")):
+                    session = fallback_session
+                    metrics = fallback_metrics
             discovered_urls_count = int(metrics.get("discovered_urls_count") or 0)
             visited_urls_count = int(metrics.get("visited_urls_count") or 0)
             frontier_count = int(metrics.get("frontier_count") or 0)
@@ -1691,6 +1703,7 @@ LIMIT %s;
                 rows = cur.fetchall()
             conn.commit()
 
+        artifact_fallback_budget = max(25, min(300, safe_limit // 2))
         for row in rows:
             root_domain = str(row[0] or "").strip().lower()
             if not root_domain:
@@ -1700,6 +1713,17 @@ LIMIT %s;
 
             session = self.load_session(root_domain, include_artifact_fallback=False) or {}
             metrics = self._session_url_metrics(session)
+            if (
+                not bool(metrics.get("has_session_data"))
+                and row[11] is not None
+                and artifact_fallback_budget > 0
+            ):
+                artifact_fallback_budget -= 1
+                fallback_session = self.load_session(root_domain, include_artifact_fallback=True) or {}
+                fallback_metrics = self._session_url_metrics(fallback_session)
+                if bool(fallback_metrics.get("has_session_data")):
+                    session = fallback_session
+                    metrics = fallback_metrics
             discovered_count = int(metrics.get("discovered_urls_count") or 0)
             method_counts = metrics.get("method_counts") if isinstance(metrics.get("method_counts"), dict) else {}
 

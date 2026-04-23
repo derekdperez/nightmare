@@ -42,7 +42,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Discovered Targets</h1>
-  <div class="meta">Fast, cached, paged target explorer. Domain rows load first, URL rows are then loaded lazily by domain with sorting, filtering, and virtualized rendering.</div>
+  <div class="meta">Fast, cached, paged target explorer. Domain rows load first, URL rows are then loaded lazily by domain with sorting, filtering, and virtualized rendering. Auto-refresh every 30s.</div>
 
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
@@ -176,8 +176,10 @@
       domainBackgroundRefreshPending: false,
       sitemapBackgroundRefreshPending: false,
     };
-
-    const activeControllers = new Map();
+    const requestState = {
+      domainsSeq: 0,
+      sitemapSeq: 0,
+    };
 
     function esc(v) {
       return String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
@@ -205,6 +207,14 @@
       if (token) writeCookie(TOKEN_COOKIE_NAME, token, 30);
       else deleteCookie(TOKEN_COOKIE_NAME);
       return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    function withAuthToken(path) {
+      const raw = String(path || "").trim();
+      if (!raw) return "";
+      const token = document.getElementById("token").value.trim();
+      if (!token) return raw;
+      const separator = raw.includes("?") ? "&" : "?";
+      return `${raw}${separator}coordinator_token=${encodeURIComponent(token)}`;
     }
     function formatBytes(value) {
       const n = Number(value || 0);
@@ -246,25 +256,15 @@
     }
     async function fetchJson(path, requestKey, options) {
       const cacheMode = String(options?.cacheMode || "prefer").toLowerCase() === "refresh" ? "refresh" : "prefer";
-      const previous = activeControllers.get(requestKey);
-      if (previous) previous.abort();
-      const controller = new AbortController();
-      activeControllers.set(requestKey, controller);
-      try {
-        const separator = path.includes("?") ? "&" : "?";
-        const url = `${path}${separator}cache_mode=${encodeURIComponent(cacheMode)}`;
-        const rsp = await fetch(url, { cache: "no-store", headers: authHeaders(), signal: controller.signal });
-        const payload = await rsp.json().catch(() => ({}));
-        if (!rsp.ok) {
-          const message = String(payload.error || `HTTP ${rsp.status}`);
-          throw new Error(message);
-        }
-        return payload;
-      } finally {
-        if (activeControllers.get(requestKey) === controller) {
-          activeControllers.delete(requestKey);
-        }
+      const separator = path.includes("?") ? "&" : "?";
+      const url = `${path}${separator}cache_mode=${encodeURIComponent(cacheMode)}`;
+      const rsp = await fetch(url, { cache: "no-store", headers: authHeaders() });
+      const payload = await rsp.json().catch(() => ({}));
+      if (!rsp.ok) {
+        const message = String(payload.error || `HTTP ${rsp.status}`);
+        throw new Error(message);
       }
+      return payload;
     }
 
     function renderCards() {
@@ -374,7 +374,7 @@
     function actionsHtml(row) {
       const links = [];
       const maybePush = (href, label) => {
-        const path = String(href || "").trim();
+        const path = withAuthToken(href);
         if (!path) return;
         links.push(`<a href="${esc(path)}" target="_blank" rel="noopener">${esc(label)}</a>`);
       };
@@ -454,6 +454,7 @@
     }
 
     async function loadDomains(options) {
+      const requestSeq = ++requestState.domainsSeq;
       const useCacheFirst = Boolean(options && options.useCacheFirst);
       const forceRefresh = Boolean(options && options.forceRefresh);
       const q = document.getElementById("domainSearch").value.trim();
@@ -484,6 +485,7 @@
           "domains",
           { cacheMode: forceRefresh ? "refresh" : "prefer" }
         );
+        if (requestSeq !== requestState.domainsSeq) return;
         cacheSet(cacheKey, payload);
         renderDomains(payload);
         if (!state.selectedDomain && state.domains.length) {
@@ -508,6 +510,7 @@
           }, 0);
         }
       } catch (err) {
+        if (requestSeq !== requestState.domainsSeq) return;
         if (!renderedCached) {
           document.getElementById("domainRows").innerHTML = `<tr><td colspan="5">${esc(err.message || err)}</td></tr>`;
         }
@@ -516,6 +519,7 @@
     }
 
     async function loadSitemap(options) {
+      const requestSeq = ++requestState.sitemapSeq;
       if (!state.selectedDomain) {
         state.sitemapRows = [];
         state.sitemapTotal = 0;
@@ -559,6 +563,7 @@
           "sitemap",
           { cacheMode: forceRefresh ? "refresh" : "prefer" }
         );
+        if (requestSeq !== requestState.sitemapSeq) return;
         cacheSet(cacheKey, payload);
         renderSitemap(payload);
         setBusy("sitemap", false, `Loaded ${state.sitemapRows.length} URL rows.`);
@@ -574,6 +579,7 @@
           }, 0);
         }
       } catch (err) {
+        if (requestSeq !== requestState.sitemapSeq) return;
         if (!renderedCached) {
           document.getElementById("sitemapRows").innerHTML = `<tr><td colspan="12">${esc(err.message || err)}</td></tr>`;
         }
@@ -669,10 +675,7 @@
       loadDomains({ useCacheFirst: true });
       setInterval(() => {
         loadDomains({ useCacheFirst: true, forceRefresh: true });
-        if (state.selectedDomain) {
-          loadSitemap({ useCacheFirst: true, forceRefresh: true });
-        }
-      }, 20000);
+      }, 30000);
     }
 
     init();

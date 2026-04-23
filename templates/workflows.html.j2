@@ -64,7 +64,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Workflow Monitor</h1>
-  <div class="meta">Live view of workflow/plugin readiness and execution state, with manual enqueue and reset controls. Auto-refresh every 3s.</div>
+  <div class="meta">Live view of workflow/plugin readiness and execution state, with manual enqueue and reset controls. Auto-refresh every 30s.</div>
 
   <div class="cards">
     <div class="card"><div class="k">Visible Domains</div><div class="v" id="visibleDomains">0</div></div>
@@ -848,7 +848,7 @@
     }
     function scheduleRefresh() {
       if (state.timer) clearInterval(state.timer);
-      state.timer = setInterval(refreshAllData, 3000);
+      state.timer = setInterval(refreshAllData, 30000);
     }
 
     document.getElementById("refreshButton").addEventListener("click", refreshAllData);

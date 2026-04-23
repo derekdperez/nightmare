@@ -28,7 +28,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Docker Status</h1>
-  <div class="meta">Live container status for central + worker VMs (via SSM when configured).</div>
+  <div class="meta">Live container status for central + worker VMs (via SSM when configured). Auto-refresh every 30s.</div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <input id="containerSearch" type="text" placeholder="Search containers table">
@@ -286,7 +286,7 @@
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
     refreshDockerStatus({ useCacheFirst: true });
-    setInterval(() => refreshDockerStatus(), 10000);
+    setInterval(() => refreshDockerStatus(), 30000);
   </script>
 </body>
 </html>

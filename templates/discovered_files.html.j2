@@ -33,7 +33,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Discovered Files</h1>
-  <div class="meta">Artifacts stored in the coordinator database, plus extracted High Value items and matched high-value text from crawl output.</div>
+  <div class="meta">Artifacts stored in the coordinator database, plus extracted High Value items and matched high-value text from crawl output. Auto-refresh every 30s.</div>
 
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
@@ -137,6 +137,14 @@
       else deleteCookie(TOKEN_COOKIE_NAME);
       return token ? { Authorization: `Bearer ${token}` } : {};
     }
+    function withAuthToken(path) {
+      const raw = String(path || "").trim();
+      if (!raw) return "";
+      const token = document.getElementById("token").value.trim();
+      if (!token) return raw;
+      const separator = raw.includes("?") ? "&" : "?";
+      return `${raw}${separator}coordinator_token=${encodeURIComponent(token)}`;
+    }
     function bindGridControls() {
       if (!window.NightmareGridControls) return;
       if (!artifactGridCtrl) {
@@ -191,7 +199,7 @@
             <td class="col-url">${esc(row.source_url || "")}</td>
             <td class="col-type">${esc(row.artifact_type || "")}</td>
             <td class="col-size" data-raw="${size}">${size}</td>
-            <td class="col-dl"><a href="/api/coord/discovered-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&artifact_type=${encodeURIComponent(row.artifact_type || "")}" target="_blank" rel="noopener noreferrer">Download</a></td>
+            <td class="col-dl"><a href="${esc(withAuthToken(`/api/coord/discovered-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&artifact_type=${encodeURIComponent(row.artifact_type || "")}`))}" target="_blank" rel="noopener noreferrer">Download</a></td>
           </tr>
         `;
       }).join("");
@@ -216,7 +224,7 @@
             <td class="col-domain">${esc(row.root_domain || "")}</td>
             <td class="col-url">${esc(row.source_url || "")}</td>
             <td class="col-size" data-raw="${size}">${size}</td>
-            <td class="col-dl"><a href="/api/coord/high-value-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&saved_relative=${encodeURIComponent(row.saved_relative || "")}" target="_blank" rel="noopener noreferrer">Download</a></td>
+            <td class="col-dl"><a href="${esc(withAuthToken(`/api/coord/high-value-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&saved_relative=${encodeURIComponent(row.saved_relative || "")}`))}" target="_blank" rel="noopener noreferrer">Download</a></td>
           </tr>
         `;
       }).join("");
@@ -270,6 +278,9 @@
       document.getElementById("artifactRows").innerHTML = `<tr><td colspan="6">${esc(err.message || err)}</td></tr>`;
       document.getElementById("highValueRows").innerHTML = `<tr><td colspan="5">${esc(err.message || err)}</td></tr>`;
     });
+    setInterval(() => {
+      refreshPage({ forceRefresh: true, quiet: true }).catch(() => {});
+    }, 30000);
   </script>
 </body>
 </html>
