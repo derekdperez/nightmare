@@ -861,6 +861,55 @@ WHERE entry_id = %s
             "payload": body,
         }
 
+
+    def _session_url_metrics(self, session: Optional[dict[str, Any]]) -> dict[str, Any]:
+        body = session if isinstance(session, dict) else {}
+        state = body.get("state") if isinstance(body.get("state"), dict) else {}
+        frontier = body.get("frontier") if isinstance(body.get("frontier"), list) else []
+        discovered_urls = state.get("discovered_urls") if isinstance(state.get("discovered_urls"), list) else []
+        visited_urls = state.get("visited_urls") if isinstance(state.get("visited_urls"), list) else []
+        url_inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
+
+        discovered_urls_count = len(discovered_urls)
+        if discovered_urls_count <= 0 and url_inventory:
+            discovered_urls_count = len([u for u in url_inventory.keys() if str(u or "").strip()])
+
+        method_counts: dict[str, int] = {}
+        spider_stats: dict[str, int] = {}
+        for _url, record in url_inventory.items():
+            if not isinstance(record, dict):
+                continue
+            discovered_via = record.get("discovered_via")
+            methods = discovered_via if isinstance(discovered_via, list) else [discovered_via]
+            for method in methods:
+                key = str(method or "").strip()
+                if not key:
+                    continue
+                method_counts[key] = int(method_counts.get(key, 0) or 0) + 1
+                spider_key = key
+                if spider_key.startswith("spider:"):
+                    spider_key = spider_key.split(":", 1)[1].strip()
+                if spider_key.startswith("crawler:"):
+                    spider_key = spider_key.split(":", 1)[1].strip()
+                if spider_key.startswith("nightmare_spider_"):
+                    spider_key = spider_key.removeprefix("nightmare_spider_")
+                if spider_key:
+                    spider_stats[spider_key] = int(spider_stats.get(spider_key, 0) or 0) + 1
+
+        return {
+            "discovered_urls_count": discovered_urls_count,
+            "visited_urls_count": len(visited_urls),
+            "frontier_count": len(frontier),
+            "method_counts": method_counts,
+            "spider_stats": spider_stats,
+            "has_session_data": bool(body) and (
+                discovered_urls_count > 0
+                or len(visited_urls) > 0
+                or len(frontier) > 0
+                or bool(url_inventory)
+            ),
+        }
+
     def load_session(self, root_domain: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()
         if not rd:
@@ -1453,28 +1502,23 @@ LIMIT %s;
             root_domain = str(row[0] or "").strip().lower()
             if not root_domain:
                 continue
-            session = self.load_session(root_domain) or {}
-            state = session.get("state") if isinstance(session.get("state"), dict) else {}
-            discovered_urls = state.get("discovered_urls") if isinstance(state.get("discovered_urls"), list) else []
-            visited_urls = state.get("visited_urls") if isinstance(state.get("visited_urls"), list) else []
-            frontier = session.get("frontier") if isinstance(session.get("frontier"), list) else []
-            url_inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
 
-            discovered_urls_count = len(discovered_urls) if discovered_urls else len(url_inventory)
-            visited_urls_count = len(visited_urls)
-            frontier_count = len(frontier)
+            session = self.load_session(root_domain) or {}
+            metrics = self._session_url_metrics(session)
+            discovered_urls_count = int(metrics.get("discovered_urls_count") or 0)
+            visited_urls_count = int(metrics.get("visited_urls_count") or 0)
+            frontier_count = int(metrics.get("frontier_count") or 0)
+            spider_stats = metrics.get("spider_stats") if isinstance(metrics.get("spider_stats"), dict) else {}
 
             active_stages_raw = row[12] if isinstance(row[12], list) else []
-            active_stages = [str(item) for item in active_stages_raw if str(item or "").strip()]
+            active_stages = [str(item).strip() for item in active_stages_raw if str(item or "").strip()]
             target_workers_raw = row[13] if isinstance(row[13], list) else []
             stage_workers_raw = row[14] if isinstance(row[14], list) else []
-            active_workers = sorted(
-                {
-                    str(item).strip()
-                    for item in [*target_workers_raw, *stage_workers_raw]
-                    if str(item or "").strip()
-                }
-            )
+            active_workers = sorted({
+                str(item).strip()
+                for item in [*target_workers_raw, *stage_workers_raw]
+                if str(item or "").strip()
+            })
 
             last_activity = row[3]
             for raw_ts in (
@@ -1536,30 +1580,28 @@ LIMIT %s;
             elif phase == "completed":
                 completed_domains += 1
 
-            domains.append(
-                {
-                    "root_domain": root_domain,
-                    "start_url": str(session.get("start_url") or row[1] or ""),
-                    "phase": phase,
-                    "discovered_urls_count": discovered_urls_count,
-                    "visited_urls_count": visited_urls_count,
-                    "frontier_count": frontier_count,
-                    "session_saved_at_utc": session.get("saved_at_utc") or (row[2].isoformat() if row[2] else None),
-                    "last_activity_at_utc": last_activity_iso,
-                    "seconds_since_activity": seconds_since_activity,
-                    "pending_targets": pending_targets,
-                    "running_targets": running_targets,
-                    "completed_targets": completed_targets,
-                    "failed_targets": failed_targets,
-                    "pending_stage_tasks": pending_stage_tasks,
-                    "running_stage_tasks": running_stage_tasks,
-                    "completed_stage_tasks": completed_stage_tasks,
-                    "failed_stage_tasks": failed_stage_tasks,
-                    "active_stages": active_stages,
-                    "active_workers": active_workers,
-                "spider_stats": self._collect_spider_stats(domain_row),
-                }
-            )
+            domains.append({
+                "root_domain": root_domain,
+                "start_url": str(session.get("start_url") or row[1] or ""),
+                "phase": phase,
+                "discovered_urls_count": discovered_urls_count,
+                "visited_urls_count": visited_urls_count,
+                "frontier_count": frontier_count,
+                "spider_stats": spider_stats,
+                "session_saved_at_utc": session.get("saved_at_utc") or (row[2].isoformat() if row[2] else None),
+                "last_activity_at_utc": last_activity_iso,
+                "seconds_since_activity": seconds_since_activity,
+                "pending_targets": pending_targets,
+                "running_targets": running_targets,
+                "completed_targets": completed_targets,
+                "failed_targets": failed_targets,
+                "pending_stage_tasks": pending_stage_tasks,
+                "running_stage_tasks": running_stage_tasks,
+                "completed_stage_tasks": completed_stage_tasks,
+                "failed_stage_tasks": failed_stage_tasks,
+                "active_stages": active_stages,
+                "active_workers": active_workers,
+            })
 
         return {
             "generated_at_utc": _iso_now(),
@@ -1588,6 +1630,16 @@ WITH target_status AS (
     FROM coordinator_targets
     GROUP BY root_domain
 ),
+stage_status AS (
+    SELECT
+      root_domain,
+      COUNT(*) FILTER (WHERE status = 'pending') AS pending_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'running') AS running_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed_stage_tasks,
+      COUNT(*) FILTER (WHERE status = 'failed') AS failed_stage_tasks
+    FROM coordinator_stage_tasks
+    GROUP BY root_domain
+),
 artifact_status AS (
     SELECT
       root_domain,
@@ -1612,10 +1664,15 @@ SELECT
   COALESCE(ts.running_targets, 0) AS running_targets,
   COALESCE(ts.completed_targets, 0) AS completed_targets,
   COALESCE(ts.failed_targets, 0) AS failed_targets,
+  COALESCE(ss.pending_stage_tasks, 0) AS pending_stage_tasks,
+  COALESCE(ss.running_stage_tasks, 0) AS running_stage_tasks,
+  COALESCE(ss.completed_stage_tasks, 0) AS completed_stage_tasks,
+  COALESCE(ss.failed_stage_tasks, 0) AS failed_stage_tasks,
   art.nightmare_session_updated_at_utc
 FROM domain_rows d
 LEFT JOIN coordinator_sessions sess ON sess.root_domain = d.root_domain
 LEFT JOIN target_status ts ON ts.root_domain = d.root_domain
+LEFT JOIN stage_status ss ON ss.root_domain = d.root_domain
 LEFT JOIN artifact_status art ON art.root_domain = d.root_domain
 ORDER BY COALESCE(art.nightmare_session_updated_at_utc, sess.saved_at_utc, NOW()) DESC, d.root_domain ASC
 LIMIT %s;
@@ -1626,51 +1683,54 @@ LIMIT %s;
                 cur.execute(sql, (safe_limit,))
                 rows = cur.fetchall()
             conn.commit()
+
         for row in rows:
             root_domain = str(row[0] or "").strip().lower()
             if not root_domain:
                 continue
             if needle and needle not in root_domain:
                 continue
+
             session = self.load_session(root_domain) or {}
-            state = session.get("state") if isinstance(session.get("state"), dict) else {}
-            discovered_urls = state.get("discovered_urls")
-            discovered_count = len(discovered_urls) if isinstance(discovered_urls, list) else 0
-            url_inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
-            if discovered_count <= 0 and url_inventory:
-                discovered_count = len([u for u in url_inventory.keys() if str(u or "").strip()])
-            if discovered_count <= 0:
-                continue
-            method_counts: dict[str, int] = {}
-            for _url, record in url_inventory.items():
-                if not isinstance(record, dict):
-                    continue
-                discovered_via = record.get("discovered_via")
-                if isinstance(discovered_via, list):
-                    for method in discovered_via:
-                        key = str(method or "").strip()
-                        if key:
-                            method_counts[key] = int(method_counts.get(key, 0) or 0) + 1
+            metrics = self._session_url_metrics(session)
+            discovered_count = int(metrics.get("discovered_urls_count") or 0)
+            method_counts = metrics.get("method_counts") if isinstance(metrics.get("method_counts"), dict) else {}
+
             pending_targets = int(row[3] or 0)
             running_targets = int(row[4] or 0)
             completed_targets = int(row[5] or 0)
             failed_targets = int(row[6] or 0)
-            if running_targets > 0:
+            pending_stage_tasks = int(row[7] or 0)
+            running_stage_tasks = int(row[8] or 0)
+            completed_stage_tasks = int(row[9] or 0)
+            failed_stage_tasks = int(row[10] or 0)
+
+            has_any_work = any((
+                pending_targets, running_targets, completed_targets, failed_targets,
+                pending_stage_tasks, running_stage_tasks, completed_stage_tasks, failed_stage_tasks,
+            ))
+            has_any_session = bool(metrics.get("has_session_data"))
+            if not has_any_work and not has_any_session:
+                continue
+
+            if running_targets > 0 or running_stage_tasks > 0:
                 status = "running"
-            elif pending_targets > 0:
+            elif pending_targets > 0 or pending_stage_tasks > 0:
                 status = "pending"
-            elif failed_targets > 0 and completed_targets == 0:
-                status = "failed"
-            elif failed_targets > 0:
-                status = "completed_with_failures"
-            elif completed_targets > 0:
+            elif failed_targets > 0 or failed_stage_tasks > 0:
+                status = "failed" if (completed_targets + completed_stage_tasks) == 0 else "completed_with_failures"
+            elif completed_targets > 0 or completed_stage_tasks > 0:
                 status = "completed"
+            elif discovered_count > 0:
+                status = "discovered"
             else:
                 status = "unknown"
+
+            saved_at = session.get("saved_at_utc") or (row[11].isoformat() if row[11] else None) or (row[2].isoformat() if row[2] else None)
             rows_out.append({
                 "root_domain": root_domain,
                 "start_url": str(session.get("start_url") or row[1] or "").strip(),
-                "saved_at_utc": session.get("saved_at_utc") or (row[7].isoformat() if row[7] else None) or (row[2].isoformat() if row[2] else None),
+                "saved_at_utc": saved_at,
                 "discovered_urls_count": discovered_count,
                 "method_counts": method_counts,
                 "status": status,
@@ -1760,46 +1820,15 @@ LIMIT %s
             })
         return out
 
-
-
-    def _collect_spider_stats(self, domain_row: dict[str, Any]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        plugin_tasks = domain_row.get("plugin_tasks") if isinstance(domain_row.get("plugin_tasks"), dict) else {}
-        for workflow_id, workflow_tasks in plugin_tasks.items():
-            if not isinstance(workflow_tasks, dict):
-                continue
-            for stage_name, task in workflow_tasks.items():
-                task_row = task if isinstance(task, dict) else {}
-                stage_key = str(stage_name or task_row.get("stage") or "").strip().lower()
-                if not stage_key.startswith("recon_spider_"):
-                    continue
-                progress = task_row.get("progress") if isinstance(task_row.get("progress"), dict) else {}
-                subdomains = progress.get("subdomains") if isinstance(progress.get("subdomains"), list) else []
-                out.append({
-                    "workflow_id": str(workflow_id or "").strip().lower(),
-                    "plugin_name": stage_key,
-                    "status": str(task_row.get("status") or "").strip().lower(),
-                    "completed_runs": sum(1 for item in subdomains if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "completed"),
-                    "running_runs": sum(1 for item in subdomains if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "running"),
-                    "failed_runs": sum(1 for item in subdomains if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed"),
-                    "subdomain_count": len(subdomains),
-                    "last_frontier_size": _safe_int(progress.get("last_frontier_size", 0), 0),
-                })
-        return out
-
     def list_high_value_files(self, *, limit: int = 5000) -> list[dict[str, Any]]:
         safe_limit = max(1, min(20000, int(limit or 5000)))
         sql = """
-    SELECT root_domain, artifact_type, content, content_encoding, updated_at_utc
-    FROM coordinator_artifacts
-    WHERE artifact_type IN (
-        'nightmare_high_value_zip',
-        'recon_extractor_high_value_matches_zip',
-        'recon_extractor_high_value_summary_json'
-    )
-    ORDER BY updated_at_utc DESC NULLS LAST, root_domain ASC, artifact_type ASC
-    LIMIT %s
-    """
+SELECT root_domain, content, content_encoding, updated_at_utc
+FROM coordinator_artifacts
+WHERE artifact_type = 'nightmare_high_value_zip'
+ORDER BY updated_at_utc DESC NULLS LAST, root_domain ASC
+LIMIT %s
+"""
         out: list[dict[str, Any]] = []
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -1808,57 +1837,32 @@ LIMIT %s
             conn.commit()
         for row in rows:
             root_domain = str(row[0] or "").strip().lower()
-            artifact_type = str(row[1] or "").strip().lower()
-            data = bytes(row[2] or b"")
-            encoding = str(row[3] or "identity")
-            updated_at = row[4].isoformat() if row[4] else None
-            if artifact_type.endswith("_zip") and encoding == "zip" and data:
-                try:
-                    with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
-                        for name in zf.namelist():
-                            if name.endswith("/") or name.lower().endswith(".json"):
-                                continue
-                            info = zf.getinfo(name)
-                            content_size = int(info.file_size or 0)
-                            out.append({
-                                "captured_at_utc": updated_at,
-                                "updated_at_utc": updated_at,
-                                "discovered_at_utc": updated_at,
-                                "root_domain": root_domain,
-                                "saved_relative": name,
-                                "content_size_bytes": content_size,
-                                "file_size": content_size,
-                                "source_url": "",
-                                "artifact_type": artifact_type,
-                            })
-                except Exception:
-                    continue
+            data = bytes(row[1] or b"")
+            encoding = str(row[2] or "identity")
+            updated_at = row[3].isoformat() if row[3] else None
+            if encoding != "zip" or not data:
                 continue
-            if artifact_type == "recon_extractor_high_value_summary_json" and data:
-                try:
-                    summary = json.loads(data.decode("utf-8", errors="ignore"))
-                except Exception:
-                    summary = {}
-                rows_out = summary.get("rows") if isinstance(summary.get("rows"), list) else []
-                for idx, item in enumerate(rows_out):
-                    if not isinstance(item, dict):
-                        continue
-                    rel = str(item.get("saved_relative") or item.get("relative_path") or item.get("path") or f"summary-row-{idx+1}").strip()
-                    content_text = str(item.get("matched_text") or item.get("snippet") or item.get("text") or "").strip()
-                    out.append({
-                        "captured_at_utc": updated_at,
-                        "updated_at_utc": updated_at,
-                        "discovered_at_utc": updated_at,
-                        "root_domain": root_domain,
-                        "saved_relative": rel,
-                        "content_size_bytes": len(content_text.encode("utf-8")),
-                        "file_size": len(content_text.encode("utf-8")),
-                        "source_url": str(item.get("url") or item.get("source_url") or "").strip(),
-                        "artifact_type": artifact_type,
-                        "matched_text": content_text[:4000],
-                        "rule_name": str(item.get("rule_name") or item.get("rule") or "").strip(),
-                    })
+            try:
+                with zipfile.ZipFile(io.BytesIO(data), mode="r") as zf:
+                    for name in zf.namelist():
+                        if name.endswith("/") or name.lower().endswith(".json"):
+                            continue
+                        info = zf.getinfo(name)
+                        content_size = int(info.file_size or 0)
+                        out.append({
+                            "captured_at_utc": updated_at,
+                            "updated_at_utc": updated_at,
+                            "discovered_at_utc": updated_at,
+                            "root_domain": root_domain,
+                            "saved_relative": name,
+                            "content_size_bytes": content_size,
+                            "file_size": content_size,
+                            "source_url": "",
+                        })
+            except Exception:
+                continue
         return out
+
 
     @staticmethod
     def _normalize_worker_state(state: str) -> str:
@@ -2689,142 +2693,6 @@ WHERE workflow_id = %s
         )
         return bool(result.get("scheduled"))
 
-
-    def list_claimable_stage_candidates(
-        self,
-        *,
-        workflow_id: str = "",
-        plugin_allowlist: Optional[list[str]] = None,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        widf = str(workflow_id or "").strip().lower()
-        safe_limit = max(1, min(1000, int(limit or 200)))
-        allowlist = [
-            str(item or "").strip().lower()
-            for item in (plugin_allowlist or [])
-            if str(item or "").strip()
-        ]
-        allowlist_param: Optional[list[str]] = allowlist if allowlist else None
-        sql = """
-    SELECT workflow_id, root_domain, stage, status, worker_id, attempt_count,
-           lease_expires_at, checkpoint_json, progress_json, progress_artifact_type, resume_mode
-    FROM coordinator_stage_tasks
-    WHERE (
-        status = 'pending'
-        OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
-    )
-      AND (%s = '' OR workflow_id = %s)
-      AND (%s::text[] IS NULL OR stage = ANY(%s))
-    ORDER BY
-      CASE WHEN status = 'running' THEN 0 ELSE 1 END ASC,
-      updated_at_utc ASC NULLS FIRST,
-      created_at_utc ASC NULLS FIRST,
-      root_domain ASC,
-      stage ASC
-    LIMIT %s;
-    """
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (widf, widf, allowlist_param, allowlist_param, safe_limit))
-                rows = cur.fetchall()
-            conn.commit()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            out.append(
-                {
-                    "workflow_id": str(row[0] or "default"),
-                    "root_domain": str(row[1] or "").strip().lower(),
-                    "stage": str(row[2] or "").strip().lower(),
-                    "plugin_name": str(row[2] or "").strip().lower(),
-                    "status": str(row[3] or "").strip().lower(),
-                    "worker_id": str(row[4] or ""),
-                    "attempt_count": int(row[5] or 0),
-                    "lease_expires_at": row[6].isoformat() if row[6] else None,
-                    "checkpoint": row[7] if isinstance(row[7], dict) else {},
-                    "progress": row[8] if isinstance(row[8], dict) else {},
-                    "progress_artifact_type": str(row[9] or ""),
-                    "resume_mode": str(row[10] or "exact"),
-                }
-            )
-        return out
-
-    def claim_stage_candidate(
-        self,
-        *,
-        workflow_id: str,
-        root_domain: str,
-        stage: str,
-        worker_id: str,
-        lease_seconds: int,
-    ) -> Optional[dict[str, Any]]:
-        wid = str(worker_id or "").strip()
-        widf = str(workflow_id or "").strip().lower() or "default"
-        rd = str(root_domain or "").strip().lower()
-        stg = str(stage or "").strip().lower()
-        if not wid or not rd or not stg:
-            raise ValueError("worker_id, workflow_id, root_domain, and stage are required")
-        lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
-        sql = """
-    UPDATE coordinator_stage_tasks
-    SET status = 'running',
-        worker_id = %s,
-        lease_expires_at = NOW() + ((%s)::text || ' seconds')::interval,
-        started_at_utc = COALESCE(started_at_utc, NOW()),
-        completed_at_utc = NULL,
-        heartbeat_at_utc = NOW(),
-        attempt_count = attempt_count + 1,
-        updated_at_utc = NOW(),
-        error = NULL
-    WHERE workflow_id = %s
-      AND root_domain = %s
-      AND stage = %s
-      AND (
-          status = 'pending'
-          OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
-      )
-    RETURNING
-        workflow_id, root_domain, stage, status, worker_id, attempt_count, lease_expires_at,
-        checkpoint_json, progress_json, progress_artifact_type, resume_mode;
-    """
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                self._touch_worker_presence(cur, wid, "claim_stage")
-                cur.execute(sql, (wid, lease, widf, rd, stg))
-                row = cur.fetchone()
-            conn.commit()
-        if row is None:
-            return None
-        self.record_system_event(
-            "workflow.task.claimed",
-            f"workflow_task:{row[0]}:{row[1]}:{row[2]}",
-            {
-                "source": "coordinator_store.claim_stage_candidate",
-                "workflow_id": row[0],
-                "root_domain": row[1],
-                "stage": row[2],
-                "plugin_name": row[2],
-                "status": row[3],
-                "worker_id": row[4],
-                "attempt_count": int(row[5] or 0),
-                "lease_expires_at": row[6].isoformat() if row[6] else None,
-                "resume_mode": str(row[10] or "exact"),
-            },
-        )
-        return {
-            "workflow_id": str(row[0] or "default"),
-            "root_domain": str(row[1] or "").strip().lower(),
-            "stage": str(row[2] or "").strip().lower(),
-            "plugin_name": str(row[2] or "").strip().lower(),
-            "status": str(row[3] or "").strip().lower(),
-            "worker_id": str(row[4] or ""),
-            "attempt_count": int(row[5] or 0),
-            "lease_expires_at": row[6].isoformat() if row[6] else None,
-            "checkpoint": row[7] if isinstance(row[7], dict) else {},
-            "progress": row[8] if isinstance(row[8], dict) else {},
-            "progress_artifact_type": str(row[9] or ""),
-            "resume_mode": str(row[10] or "exact"),
-        }
-
     def claim_next_stage(
         self,
         *,
@@ -2854,6 +2722,23 @@ WITH candidate AS (
     )
       AND (%s = '' OR workflow_id = %s)
       AND (%s::text[] IS NULL OR stage = ANY(%s))
+      AND NOT EXISTS (
+          SELECT 1
+          FROM coordinator_stage_tasks r
+          WHERE r.root_domain = t.root_domain
+            AND r.status = 'running'
+            AND r.lease_expires_at IS NOT NULL
+            AND r.lease_expires_at >= NOW()
+            AND NOT (r.workflow_id = t.workflow_id AND r.stage = t.stage)
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM coordinator_targets q
+          WHERE q.root_domain = t.root_domain
+            AND q.status = 'running'
+            AND q.lease_expires_at IS NOT NULL
+            AND q.lease_expires_at >= NOW()
+      )
     ORDER BY created_at_utc ASC
     FOR UPDATE SKIP LOCKED
     LIMIT 1
