@@ -345,6 +345,13 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Runtime plugin dispatch should use `plugins/registry.py` (`resolve_plugin`) instead of hardcoded `if/elif` plugin-name branching.
   - Each major workflow plugin should have its own class file under `plugins/`.
   - Recon spider plugin variants should remain split into one file per spider class under `plugins/recon/spider/`.
+- Recon spider throttle convention:
+  - Use workflow parameter `spider_throttle_seconds` as the canonical per-spider throttle setting.
+  - Backward compatibility: `crawl_delay` is still accepted.
+  - Default throttle for spider plugins is `0.5` seconds when no value is configured.
+- Cross-lane domain lock convention:
+  - Target-queue claims (`coordinator_targets`) and workflow-stage claims (`coordinator_stage_tasks`) must not both hold active leases for the same `root_domain` at once.
+  - Claim queries enforce this via SQL `NOT EXISTS` guards against active leases in the other lane.
 
 - Recon plugin artifact convention:
   - Progress artifact type: `<plugin_name>_progress_json`

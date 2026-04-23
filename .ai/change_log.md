@@ -1328,3 +1328,21 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile coordinator.py plugins/...`
   - `pytest -q tests/test_module_decomposition.py tests/test_refactor_modules.py tests/test_recon_workflow_config.py`
+
+## 2026-04-22
+
+- Recon spider throttle and domain-concurrency hardening:
+  - Updated recon spider runtime (`coordinator.py`) to use `spider_throttle_seconds` with fallback to `crawl_delay`, defaulting to `0.5` seconds.
+  - Persisted effective spider throttle in recon spider progress payload (`spider_throttle_seconds`).
+  - Updated `workflows/run-recon.workflow.json` so all recon spider plugins default to `spider_throttle_seconds: 0.5`.
+- Added cross-lane domain locking in `CoordinatorStore` claim paths:
+  - `claim_target(...)` now skips domains with active running stage-task leases.
+  - `claim_next_stage(...)` now skips domains with active running target leases.
+  - Result: no simultaneous target-worker and plugin-worker processing for the same domain.
+- Added regression tests:
+  - `tests/test_recon_workflow_config.py` checks spider throttle default for all recon spider steps.
+  - `tests/test_reporting_and_store_helpers.py` checks source-level domain-lock guards in both claim methods.
+- Validation:
+  - `python -m py_compile coordinator.py server_app/store.py`
+  - `pytest -q tests/test_recon_workflow_config.py tests/test_reporting_and_store_helpers.py -k "recon or claim_target_respects_running_stage_domain_lock or claim_next_stage_respects_running_target_domain_lock or ensure_schema_bootstrap_stage_index_is_legacy_safe"`
+  - `pytest -q tests/test_module_decomposition.py tests/test_runtime_unit.py`

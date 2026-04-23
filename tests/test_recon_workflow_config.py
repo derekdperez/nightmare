@@ -43,3 +43,16 @@ def test_run_recon_extractor_depends_on_spider_completion_flags() -> None:
         "recon_spider_wordlist_complete_flag",
         "recon_spider_ai_complete_flag",
     ]
+
+
+def test_run_recon_spider_throttle_defaults_to_half_second() -> None:
+    payload = json.loads(Path("workflows/run-recon.workflow.json").read_text(encoding="utf-8"))
+    plugins = payload.get("plugins") if isinstance(payload.get("plugins"), list) else []
+    spider_plugins = [
+        p for p in plugins if isinstance(p, dict) and str(p.get("plugin_name", "")).startswith("recon_spider_")
+    ]
+    assert spider_plugins
+    for plugin in spider_plugins:
+        params = plugin.get("parameters")
+        assert isinstance(params, dict)
+        assert float(params.get("spider_throttle_seconds", 0.0)) == 0.5

@@ -681,10 +681,20 @@ SET line_number = EXCLUDED.line_number,
         sql = """
 WITH candidate AS (
     SELECT entry_id
-    FROM coordinator_targets
-    WHERE status = 'pending'
-       OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
-    ORDER BY line_number ASC, created_at_utc ASC
+    FROM coordinator_targets ct
+    WHERE (
+        ct.status = 'pending'
+        OR (ct.status = 'running' AND ct.lease_expires_at IS NOT NULL AND ct.lease_expires_at < NOW())
+    )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM coordinator_stage_tasks s
+          WHERE s.root_domain = ct.root_domain
+            AND s.status = 'running'
+            AND s.lease_expires_at IS NOT NULL
+            AND s.lease_expires_at >= NOW()
+      )
+    ORDER BY ct.line_number ASC, ct.created_at_utc ASC
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
@@ -2644,6 +2654,14 @@ WITH candidate AS (
             AND r.lease_expires_at IS NOT NULL
             AND r.lease_expires_at >= NOW()
             AND NOT (r.workflow_id = t.workflow_id AND r.stage = t.stage)
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM coordinator_targets q
+          WHERE q.root_domain = t.root_domain
+            AND q.status = 'running'
+            AND q.lease_expires_at IS NOT NULL
+            AND q.lease_expires_at >= NOW()
       )
     ORDER BY created_at_utc ASC
     FOR UPDATE SKIP LOCKED

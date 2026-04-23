@@ -116,6 +116,20 @@ def test_ensure_schema_bootstrap_stage_index_is_legacy_safe():
     assert "CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(stage, status);" in source
 
 
+def test_claim_target_respects_running_stage_domain_lock():
+    source = inspect.getsource(CoordinatorStore.claim_target)
+    assert "FROM coordinator_stage_tasks s" in source
+    assert "s.root_domain = ct.root_domain" in source
+    assert "s.status = 'running'" in source
+
+
+def test_claim_next_stage_respects_running_target_domain_lock():
+    source = inspect.getsource(CoordinatorStore.claim_next_stage)
+    assert "FROM coordinator_targets q" in source
+    assert "q.root_domain = t.root_domain" in source
+    assert "q.status = 'running'" in source
+
+
 def test_extractor_report_html_escapes_script_content():
     html = build_javascript_extractor_matches_report_html(
         "example.com",

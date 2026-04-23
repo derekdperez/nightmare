@@ -71,6 +71,7 @@
       "parameters": {
         "no_ai": true,
         "force_wordlist": false,
+        "spider_throttle_seconds": 0.5,
         "verify_urls": true,
         "max_pages": 5000,
         "require_empty_frontier": true
@@ -112,6 +113,7 @@
       "parameters": {
         "no_ai": true,
         "force_wordlist": false,
+        "spider_throttle_seconds": 0.5,
         "verify_urls": true,
         "max_pages": 5000,
         "require_empty_frontier": true
@@ -153,6 +155,7 @@
       "parameters": {
         "no_ai": true,
         "force_wordlist": true,
+        "spider_throttle_seconds": 0.5,
         "crawl_wordlist": "resources/wordlists/file_path_list.txt",
         "verify_urls": true,
         "max_pages": 5000,
@@ -196,6 +199,7 @@
       "parameters": {
         "no_ai": false,
         "force_wordlist": true,
+        "spider_throttle_seconds": 0.5,
         "crawl_wordlist": "resources/wordlists/file_path_list.txt",
         "verify_urls": true,
         "max_pages": 5000,

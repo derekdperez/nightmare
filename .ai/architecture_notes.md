@@ -213,3 +213,10 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - Coordinator workflow plugins are now represented as concrete classes in `plugins/` (`plugins/recon/spider/*` for spider variants).
   - `coordinator.py` plugin execution now resolves handlers through `plugins/registry.py` and executes through a shared `PluginExecutionContext`.
   - Plugin selection logic is centralized in registry mapping/prefix rules instead of duplicated switch branches in coordinator runtime flow.
+- Request concurrency boundary refinement (2026-04-22):
+  - Store claim logic now prevents cross-lane concurrent work on the same `root_domain`:
+    - target claims skip domains with active running stage-task leases.
+    - stage claims skip domains with active running target leases.
+  - This ensures only one worker lane can issue requests for a domain at a time.
+- Recon spider runtime default:
+  - Spider throttle defaults to `0.5s` (`spider_throttle_seconds`, with `crawl_delay` backward-compatible alias).

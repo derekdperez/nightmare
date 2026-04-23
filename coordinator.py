@@ -1594,7 +1594,12 @@ class DistributedCoordinator:
         force_wordlist = bool(params.get("force_wordlist", plugin_name == "recon_spider_wordlist"))
         verify_urls = bool(params.get("verify_urls", False))
         max_pages = _safe_int(params.get("max_pages", 0), 0)
-        crawl_delay = _safe_float(params.get("crawl_delay", 0.0), 0.0)
+        crawl_delay = _safe_float(
+            params.get("spider_throttle_seconds", params.get("crawl_delay", 0.5)),
+            0.5,
+        )
+        if crawl_delay < 0:
+            crawl_delay = 0.0
         openai_timeout = _safe_float(params.get("openai_timeout", 0.0), 0.0)
         ai_probe_max_requests = _safe_int(params.get("ai_probe_max_requests", 0), 0)
         ai_probe_per_host_max = _safe_int(params.get("ai_probe_per_host_max", 0), 0)
@@ -1630,6 +1635,7 @@ class DistributedCoordinator:
                 }
         progress_state["subdomains"] = [state_by_url[url] for url in start_urls]
         progress_state["status"] = "running"
+        progress_state["spider_throttle_seconds"] = crawl_delay
         self._persist_recon_progress(
             worker_id=worker_id,
             root_domain=root_domain,
