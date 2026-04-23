@@ -3925,6 +3925,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_text(render_auth0r_html(), content_type="text/html; charset=utf-8")
             return
 
+        if path == "/api/coord/http-requests":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = max(1, min(5000, _safe_int((query.get("limit") or [500])[0], 500)))
+            offset = max(0, _safe_int((query.get("offset") or [0])[0], 0))
+            search_text = str((query.get("q") or [""])[0] or "").strip()
+            root_domain = str((query.get("root_domain") or [""])[0] or "").strip().lower()
+            cache_mode = str((query.get("cache_mode") or ["prefer"])[0] or "prefer").strip().lower()
+            cache_key_parts = {
+                "limit": limit,
+                "offset": offset,
+                "q": search_text,
+                "root_domain": root_domain,
+            }
+            try:
+                payload = self._resolve_cached_page_payload(
+                    page_name="http_requests",
+                    key_parts=cache_key_parts,
+                    ttl_seconds=HTTP_REQUESTS_PAGE_CACHE_TTL_SECONDS,
+                    cache_mode=cache_mode,
+                    loader=lambda: _build_http_requests_payload(
+                        self.coordinator_store,  # type: ignore[arg-type]
+                        limit=limit,
+                        offset=offset,
+                        search_text=search_text,
+                        root_domain=root_domain,
+                    ),
+                )
+            except Exception as exc:
+                self.log_message("list_http_requests failed: %r", exc)
+                self._write_json({"error": "http requests query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json(payload)
+            return
         if path == "/api/coord/discovered-targets":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
