@@ -2,635 +2,383 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>generate_income.sh — Project Site</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>generate_income.sh</title>
   <meta
     name="description"
-    content="generate_income.sh project site with installation docs, FAQ, tutorials, plugin authoring, and a commit-by-commit development blog."
+    content="Static project site for generate_income.sh with install docs, FAQ, tutorials, plugin guide, and a GitHub Pages-safe development blog."
   />
-  <meta name="theme-color" content="#0b1020" />
   <style>
-    :root {
-      --bg: #09111f;
-      --bg2: #0d1627;
-      --panel: rgba(18, 27, 45, 0.9);
-      --panel2: rgba(24, 36, 60, 0.95);
-      --line: rgba(255,255,255,0.08);
-      --text: #ecf4ff;
-      --muted: #9fb0ca;
-      --soft: #c7d8f3;
-      --cyan: #7dd3fc;
-      --violet: #a78bfa;
-      --green: #34d399;
-      --red: #fb7185;
-      --shadow: 0 20px 60px rgba(0,0,0,0.35);
-      --radius: 24px;
-      --radius-sm: 16px;
-      --max: 1240px;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    :root{
+      --bg:#0a1020;
+      --bg2:#10192f;
+      --panel:#121c33;
+      --panel2:#17233f;
+      --line:rgba(255,255,255,.08);
+      --text:#eef4ff;
+      --muted:#9fb0cd;
+      --accent:#6ee7f9;
+      --accent2:#8b5cf6;
+      --good:#34d399;
+      --warn:#f59e0b;
+      --danger:#fb7185;
+      --shadow:0 18px 50px rgba(0,0,0,.35);
+      --radius:22px;
+      --radius-sm:14px;
+      --max:1180px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
     }
 
-    * { box-sizing: border-box; }
-
-    html { scroll-behavior: smooth; }
-
-    body {
-      margin: 0;
-      color: var(--text);
-      font-family: var(--sans);
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{
+      margin:0;
+      font-family:var(--sans);
+      color:var(--text);
       background:
-        radial-gradient(circle at 12% 18%, rgba(125, 211, 252, 0.14), transparent 28%),
-        radial-gradient(circle at 86% 10%, rgba(167, 139, 250, 0.14), transparent 24%),
-        radial-gradient(circle at 50% 120%, rgba(52, 211, 153, 0.10), transparent 24%),
-        linear-gradient(180deg, #050a13 0%, #09111f 42%, #08101d 100%);
-      min-height: 100vh;
-      overflow-x: hidden;
-    }
-
-    a { color: inherit; text-decoration: none; }
-    code, pre { font-family: var(--mono); }
-
-    .wrap {
-      width: min(var(--max), calc(100% - 32px));
-      margin: 0 auto;
-    }
-
-    .topbar {
-      position: sticky;
-      top: 0;
-      z-index: 20;
-      backdrop-filter: blur(18px);
-      background: rgba(6, 10, 18, 0.72);
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-    }
-
-    .topbar-inner {
-      min-height: 72px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      min-width: 0;
-    }
-
-    .brand-mark {
-      width: 46px;
-      height: 46px;
-      border-radius: 14px;
-      display: grid;
-      place-items: center;
-      font-size: 1.2rem;
-      background: linear-gradient(135deg, rgba(125,211,252,0.18), rgba(167,139,250,0.24));
-      border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
-    }
-
-    .brand h1 {
-      margin: 0;
-      font-size: 1rem;
-      line-height: 1.15;
-      letter-spacing: 0.02em;
-    }
-
-    .brand p {
-      margin: 0;
-      font-size: 0.83rem;
-      color: var(--muted);
-    }
-
-    .nav {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      justify-content: flex-end;
-    }
-
-    .nav a {
-      color: var(--muted);
-      padding: 10px 14px;
-      border-radius: 999px;
-      border: 1px solid transparent;
-      transition: 0.18s ease;
-    }
-
-    .nav a:hover,
-    .nav a.active {
-      color: var(--text);
-      background: rgba(255,255,255,0.05);
-      border-color: rgba(255,255,255,0.07);
-    }
-
-    .hero {
-      padding: 54px 0 26px;
-    }
-
-    .hero-grid {
-      display: grid;
-      grid-template-columns: 1.25fr 0.95fr;
-      gap: 22px;
-    }
-
-    .card {
-      background: var(--panel);
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-    }
-
-    .hero-main {
-      padding: 34px;
-      position: relative;
-      overflow: hidden;
-      isolation: isolate;
-    }
-
-    .hero-main::after {
-      content: "";
-      position: absolute;
-      right: -110px;
-      bottom: -110px;
-      width: 340px;
-      height: 340px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(125,211,252,0.14), transparent 62%);
-      z-index: -1;
-    }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      color: #cfeeff;
-      background: rgba(125,211,252,0.08);
-      border: 1px solid rgba(125,211,252,0.14);
-      margin-bottom: 18px;
-      font-size: 0.88rem;
-    }
-
-    .hero h2 {
-      margin: 0 0 14px;
-      font-size: clamp(2.15rem, 4.7vw, 4.4rem);
-      line-height: 0.96;
-      letter-spacing: -0.05em;
-    }
-
-    .hero .lead {
-      margin: 0 0 24px;
-      max-width: 72ch;
-      color: var(--soft);
-      line-height: 1.75;
-      font-size: 1.02rem;
-    }
-
-    .cta-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-bottom: 24px;
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      padding: 13px 18px;
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.04);
-      color: var(--text);
-      font-weight: 650;
-      transition: 0.18s ease;
-      cursor: pointer;
-    }
-
-    .btn:hover {
-      transform: translateY(-1px);
-      background: rgba(255,255,255,0.07);
-      border-color: rgba(255,255,255,0.12);
-    }
-
-    .btn.primary {
-      background: linear-gradient(135deg, rgba(125,211,252,0.22), rgba(167,139,250,0.22));
-      border-color: rgba(125,211,252,0.28);
-    }
-
-    .hero-stats {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .stat {
-      padding: 14px 16px;
-      border-radius: 16px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.05);
-    }
-
-    .stat strong {
-      display: block;
-      font-size: 1.1rem;
-      margin-bottom: 5px;
-    }
-
-    .stat span {
-      color: var(--muted);
-      font-size: 0.9rem;
-      line-height: 1.5;
-    }
-
-    .hero-side {
-      padding: 22px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      background: var(--panel2);
-    }
-
-    .mini {
-      padding: 18px;
-      border-radius: 18px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.05);
-    }
-
-    .mini h3 {
-      margin: 0 0 8px;
-      font-size: 1rem;
-    }
-
-    .mini p,
-    .mini li {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.68;
-      font-size: 0.95rem;
-    }
-
-    .mini ul {
-      margin: 10px 0 0;
-      padding-left: 18px;
-    }
-
-    main {
-      padding-bottom: 78px;
-    }
-
-    .page {
-      display: none;
-      padding-top: 16px;
-      animation: fade 0.3s ease;
-    }
-
-    .page.active { display: block; }
-
-    @keyframes fade {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .section-head {
-      margin: 0 0 18px;
-      display: flex;
-      justify-content: space-between;
-      align-items: end;
-      gap: 18px;
-    }
-
-    .section-head h2 {
-      margin: 0;
-      font-size: clamp(1.55rem, 3vw, 2.35rem);
-      letter-spacing: -0.03em;
-    }
-
-    .section-head p {
-      margin: 0;
-      color: var(--muted);
-      max-width: 78ch;
-      line-height: 1.7;
-    }
-
-    .grid-2,
-    .grid-3 {
-      display: grid;
-      gap: 18px;
-    }
-
-    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-
-    .content {
-      padding: 24px;
-    }
-
-    .content h3 {
-      margin: 0 0 10px;
-      font-size: 1.06rem;
-    }
-
-    .content p,
-    .content li {
-      color: var(--muted);
-      line-height: 1.74;
-    }
-
-    .content ul,
-    .content ol {
-      margin: 12px 0 0;
-      padding-left: 20px;
-    }
-
-    .code {
-      background: #06101d;
-      border: 1px solid rgba(125,211,252,0.12);
-      border-radius: 18px;
-      padding: 18px;
-      overflow: auto;
-      color: #ddecff;
-      font-size: 0.92rem;
-      line-height: 1.72;
-    }
-
-    .callout {
-      padding: 16px 18px;
-      border-radius: 16px;
-      background: rgba(125,211,252,0.07);
-      border: 1px solid rgba(125,211,252,0.14);
-      color: #d8ebff;
-      line-height: 1.7;
-    }
-
-    .faq-item {
-      padding: 18px 0;
-      border-top: 1px solid rgba(255,255,255,0.06);
-    }
-
-    .faq-item:first-child {
-      border-top: 0;
-      padding-top: 0;
-    }
-
-    .faq-item h3 {
-      margin: 0 0 8px;
-      font-size: 1.02rem;
-    }
-
-    .tutorial {
-      display: grid;
-      grid-template-columns: 44px 1fr;
-      gap: 16px;
-      align-items: start;
-      margin-top: 16px;
-    }
-
-    .tutorial:first-child { margin-top: 0; }
-
-    .step {
-      width: 44px;
-      height: 44px;
-      border-radius: 14px;
-      display: grid;
-      place-items: center;
-      background: linear-gradient(135deg, rgba(52,211,153,0.18), rgba(125,211,252,0.18));
-      border: 1px solid rgba(255,255,255,0.08);
-      font-weight: 800;
-    }
-
-    .toolbar {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      gap: 12px;
-      margin-bottom: 18px;
-    }
-
-    .input,
-    .select {
-      width: 100%;
-      padding: 13px 14px;
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.04);
-      color: var(--text);
-      font: inherit;
-      outline: none;
-    }
-
-    .input::placeholder { color: #8fa2bf; }
-
-    .blog-layout {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr);
-      gap: 18px;
-    }
-
-    .commit-list,
-    .viewer {
-      min-height: 660px;
-    }
-
-    .commit-list {
-      padding: 16px;
-    }
-
-    .list-scroll {
-      max-height: 980px;
-      overflow: auto;
-      padding-right: 4px;
-    }
-
-    .commit-btn {
-      width: 100%;
-      display: block;
-      text-align: left;
-      margin-bottom: 8px;
-      padding: 14px;
-      border-radius: 16px;
-      border: 1px solid transparent;
-      background: transparent;
-      color: var(--text);
-      cursor: pointer;
-      transition: 0.18s ease;
-    }
-
-    .commit-btn:hover,
-    .commit-btn.active {
-      background: rgba(255,255,255,0.05);
-      border-color: rgba(125,211,252,0.15);
-    }
-
-    .commit-title {
-      font-weight: 700;
-      color: #eff7ff;
-      line-height: 1.35;
-      margin-bottom: 8px;
-    }
-
-    .commit-meta {
-      color: var(--muted);
-      font-size: 0.86rem;
-      line-height: 1.55;
-    }
-
-    .viewer {
-      padding: 24px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .post-header {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: start;
-      gap: 16px;
-    }
-
-    .post-header h3 {
-      margin: 0 0 8px;
-      font-size: clamp(1.35rem, 2.6vw, 2rem);
-      line-height: 1.14;
-      letter-spacing: -0.03em;
-    }
-
-    .badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.05);
-      color: #d8e7ff;
-      border: 1px solid rgba(255,255,255,0.06);
-      font-size: 0.84rem;
-    }
-
-    .article,
-    .summary {
-      color: #dce9ff;
-      line-height: 1.8;
-      font-size: 0.99rem;
-    }
-
-    .article p { margin: 0 0 1rem; }
-
-    .files {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-
-    .file {
-      padding: 12px 14px;
-      border-radius: 14px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.05);
-      color: #dce9ff;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      font-size: 0.9rem;
-    }
-
-    .muted { color: var(--muted); }
-    .small { font-size: 0.86rem; color: var(--muted); }
-
-    .notice {
-      padding: 14px 16px;
-      border-radius: 14px;
-      border: 1px solid rgba(251,113,133,0.18);
-      background: rgba(251,113,133,0.08);
-      color: #ffdce4;
-      line-height: 1.7;
-    }
-
-    .spinner {
-      width: 18px;
-      height: 18px;
-      display: inline-block;
-      border-radius: 50%;
-      border: 2px solid rgba(255,255,255,0.15);
-      border-top-color: var(--cyan);
-      animation: spin 0.8s linear infinite;
-      vertical-align: middle;
-      margin-right: 8px;
-    }
-
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    footer {
-      padding: 38px 0 70px;
-      color: var(--muted);
-      font-size: 0.94rem;
-    }
-
-    .linkish {
-      text-decoration: underline;
-      text-decoration-color: rgba(125,211,252,0.35);
-      text-underline-offset: 3px;
-    }
-
-    @media (max-width: 1080px) {
-      .hero-grid,
-      .blog-layout,
-      .grid-3,
-      .grid-2 {
-        grid-template-columns: 1fr;
-      }
-
-      .hero-stats {
-        grid-template-columns: 1fr;
-      }
-
-      .toolbar {
-        grid-template-columns: 1fr;
-      }
-
-      .files {
-        grid-template-columns: 1fr;
-      }
-
-      .list-scroll {
-        max-height: 420px;
-      }
-    }
-
-    @media (max-width: 720px) {
-      .topbar-inner {
-        align-items: flex-start;
-        flex-direction: column;
-        padding: 12px 0;
-      }
-
-      .nav {
-        width: 100%;
-        justify-content: flex-start;
-      }
-
-      .hero-main,
-      .hero-side,
-      .content,
-      .commit-list,
-      .viewer {
-        padding: 18px;
-      }
+        radial-gradient(circle at 10% 15%, rgba(110,231,249,.12), transparent 28%),
+        radial-gradient(circle at 85% 10%, rgba(139,92,246,.15), transparent 25%),
+        linear-gradient(180deg,#060a14 0%,#0a1020 45%,#0a1121 100%);
+      min-height:100vh;
+    }
+
+    a{color:inherit;text-decoration:none}
+    code,pre{font-family:var(--mono)}
+    .wrap{width:min(var(--max),calc(100% - 32px));margin:0 auto}
+
+    .topbar{
+      position:sticky;top:0;z-index:50;
+      backdrop-filter:blur(16px);
+      background:rgba(8,12,22,.75);
+      border-bottom:1px solid rgba(255,255,255,.06);
+    }
+    .topbar-inner{
+      min-height:72px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:18px;
+    }
+
+    .brand{display:flex;align-items:center;gap:14px;min-width:0}
+    .brand-mark{
+      width:46px;height:46px;border-radius:14px;
+      display:grid;place-items:center;
+      background:linear-gradient(135deg, rgba(110,231,249,.18), rgba(139,92,246,.24));
+      border:1px solid rgba(255,255,255,.08);
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);
+      font-size:1.2rem;
+    }
+    .brand h1{margin:0;font-size:1rem;line-height:1.12}
+    .brand p{margin:0;color:var(--muted);font-size:.83rem}
+
+    .nav{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end}
+    .nav a{
+      color:var(--muted);
+      padding:10px 14px;
+      border-radius:999px;
+      border:1px solid transparent;
+      transition:.18s ease;
+    }
+    .nav a:hover,.nav a.active{
+      color:var(--text);
+      background:rgba(255,255,255,.05);
+      border-color:rgba(255,255,255,.07);
+    }
+
+    .hero{padding:54px 0 26px}
+    .hero-grid{
+      display:grid;
+      grid-template-columns:1.2fr .95fr;
+      gap:22px;
+    }
+    .card{
+      background:rgba(18,28,51,.92);
+      border:1px solid rgba(255,255,255,.07);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+    }
+    .hero-main{
+      padding:34px;
+      position:relative;
+      overflow:hidden;
+    }
+    .hero-main::after{
+      content:"";
+      position:absolute;
+      right:-90px;bottom:-90px;
+      width:300px;height:300px;border-radius:50%;
+      background:radial-gradient(circle, rgba(110,231,249,.13), transparent 62%);
+      pointer-events:none;
+    }
+
+    .eyebrow{
+      display:inline-flex;align-items:center;gap:10px;
+      padding:8px 12px;border-radius:999px;
+      background:rgba(110,231,249,.08);
+      border:1px solid rgba(110,231,249,.16);
+      color:#c8f6ff;
+      font-size:.88rem;
+      margin-bottom:18px;
+    }
+    h2.hero-title{
+      margin:0 0 14px;
+      font-size:clamp(2.2rem,4.6vw,4.4rem);
+      line-height:.96;
+      letter-spacing:-.05em;
+    }
+    .lead{
+      margin:0 0 24px;
+      color:#d6e3fa;
+      line-height:1.75;
+      max-width:70ch;
+      font-size:1.02rem;
+    }
+
+    .cta-row{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:24px}
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;gap:10px;
+      padding:13px 18px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.04);
+      color:var(--text);
+      font-weight:650;
+      cursor:pointer;
+      transition:.18s ease;
+    }
+    .btn:hover{
+      transform:translateY(-1px);
+      background:rgba(255,255,255,.07);
+      border-color:rgba(255,255,255,.12);
+    }
+    .btn.primary{
+      background:linear-gradient(135deg, rgba(110,231,249,.22), rgba(139,92,246,.22));
+      border-color:rgba(110,231,249,.25);
+    }
+
+    .stats{
+      display:grid;
+      grid-template-columns:repeat(3, minmax(0,1fr));
+      gap:12px;
+    }
+    .stat{
+      padding:14px 16px;border-radius:16px;
+      background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.05);
+    }
+    .stat strong{display:block;font-size:1.08rem;margin-bottom:5px}
+    .stat span{color:var(--muted);font-size:.9rem;line-height:1.45}
+
+    .hero-side{
+      padding:22px;
+      display:flex;
+      flex-direction:column;
+      gap:16px;
+      background:rgba(23,35,63,.95);
+    }
+    .mini{
+      padding:18px;border-radius:18px;
+      background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.05);
+    }
+    .mini h3{margin:0 0 8px;font-size:1rem}
+    .mini p,.mini li{margin:0;color:var(--muted);line-height:1.68;font-size:.95rem}
+    .mini ul{margin:10px 0 0;padding-left:18px}
+
+    main{padding-bottom:72px}
+    .page{display:none;padding-top:16px;animation:fade .25s ease}
+    .page.active{display:block}
+    @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+    .section-head{
+      margin:0 0 18px;
+      display:flex;
+      justify-content:space-between;
+      align-items:end;
+      gap:18px;
+    }
+    .section-head h2{
+      margin:0;
+      font-size:clamp(1.55rem,3vw,2.35rem);
+      letter-spacing:-.03em;
+    }
+    .section-head p{
+      margin:0;color:var(--muted);
+      max-width:76ch;line-height:1.7;
+    }
+
+    .grid-2,.grid-3{display:grid;gap:18px}
+    .grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+
+    .content{padding:24px}
+    .content h3{margin:0 0 10px;font-size:1.05rem}
+    .content p,.content li{color:var(--muted);line-height:1.74}
+    .content ul,.content ol{margin:12px 0 0;padding-left:20px}
+
+    .code{
+      background:#07111f;
+      border:1px solid rgba(110,231,249,.12);
+      border-radius:18px;
+      padding:18px;
+      overflow:auto;
+      color:#deecff;
+      font-size:.92rem;
+      line-height:1.72;
+    }
+
+    .callout{
+      padding:16px 18px;border-radius:16px;
+      background:rgba(110,231,249,.07);
+      border:1px solid rgba(110,231,249,.14);
+      color:#d9efff;
+      line-height:1.72;
+    }
+
+    .faq-item{
+      padding:18px 0;
+      border-top:1px solid rgba(255,255,255,.06);
+    }
+    .faq-item:first-child{border-top:0;padding-top:0}
+    .faq-q{
+      width:100%;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:14px;
+      background:none;border:0;color:var(--text);
+      padding:0;text-align:left;cursor:pointer;font:inherit;
+    }
+    .faq-q span:first-child{font-weight:650}
+    .faq-a{display:none;padding-top:10px}
+    .faq-item.open .faq-a{display:block}
+    .faq-toggle{color:var(--accent)}
+
+    .tutorial{
+      display:grid;grid-template-columns:44px 1fr;
+      gap:16px;align-items:start;margin-top:16px;
+    }
+    .tutorial:first-child{margin-top:0}
+    .step{
+      width:44px;height:44px;border-radius:14px;
+      display:grid;place-items:center;font-weight:800;
+      background:linear-gradient(135deg, rgba(52,211,153,.18), rgba(110,231,249,.18));
+      border:1px solid rgba(255,255,255,.08);
+    }
+
+    .toolbar{
+      display:flex;flex-wrap:wrap;gap:12px;margin-bottom:18px;
+    }
+    .input{
+      flex:1 1 280px;
+      padding:13px 14px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.04);
+      color:var(--text);
+      font:inherit;
+      outline:none;
+    }
+    .input::placeholder{color:#8ea0bc}
+
+    .blog-grid{
+      display:grid;
+      grid-template-columns:320px minmax(0,1fr);
+      gap:18px;
+    }
+    .post-list,.post-view{min-height:620px}
+    .post-list{padding:16px}
+    .post-scroll{max-height:960px;overflow:auto;padding-right:4px}
+
+    .post-item{
+      display:block;width:100%;
+      text-align:left;
+      padding:14px;
+      margin-bottom:8px;
+      border-radius:16px;
+      border:1px solid transparent;
+      background:transparent;
+      color:var(--text);
+      cursor:pointer;
+      transition:.18s ease;
+    }
+    .post-item:hover,.post-item.active{
+      background:rgba(255,255,255,.05);
+      border-color:rgba(110,231,249,.16);
+    }
+    .post-item-title{
+      font-weight:700;
+      color:#eef6ff;
+      line-height:1.35;
+      margin-bottom:8px;
+    }
+    .post-item-meta{
+      color:var(--muted);
+      font-size:.86rem;
+      line-height:1.55;
+    }
+
+    .post-view{padding:24px;display:flex;flex-direction:column;gap:16px}
+    .post-header{
+      display:flex;justify-content:space-between;gap:16px;align-items:start;flex-wrap:wrap;
+    }
+    .post-header h3{
+      margin:0 0 8px;
+      font-size:clamp(1.35rem,2.5vw,2rem);
+      line-height:1.14;
+      letter-spacing:-.03em;
+    }
+    .badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .badge{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:8px 10px;border-radius:999px;
+      background:rgba(255,255,255,.05);
+      border:1px solid rgba(255,255,255,.06);
+      color:#d8e7ff;font-size:.84rem;
+    }
+    .summary,.article{color:#dce9ff;line-height:1.8;font-size:.99rem}
+    .article p{margin:0 0 1rem}
+
+    .files{
+      display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:10px;
+    }
+    .file{
+      padding:12px 14px;border-radius:14px;
+      background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.05);
+      color:#dce9ff;font-size:.9rem;
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
+
+    .note{
+      padding:14px 16px;border-radius:14px;
+      background:rgba(245,158,11,.10);
+      border:1px solid rgba(245,158,11,.18);
+      color:#ffe7b7;line-height:1.7;
+    }
+
+    .small{font-size:.86rem;color:var(--muted)}
+    footer{padding:38px 0 68px;color:var(--muted);font-size:.94rem}
+    .linkish{
+      text-decoration:underline;
+      text-decoration-color:rgba(110,231,249,.35);
+      text-underline-offset:3px;
+    }
+
+    @media (max-width:1080px){
+      .hero-grid,.blog-grid,.grid-3,.grid-2{grid-template-columns:1fr}
+      .stats{grid-template-columns:1fr}
+      .files{grid-template-columns:1fr}
+      .post-scroll{max-height:420px}
+    }
+
+    @media (max-width:720px){
+      .topbar-inner{flex-direction:column;align-items:flex-start;padding:12px 0}
+      .nav{width:100%;justify-content:flex-start}
+      .hero-main,.hero-side,.content,.post-list,.post-view{padding:18px}
     }
   </style>
 </head>
@@ -641,17 +389,17 @@
         <div class="brand-mark">🕸️</div>
         <div>
           <h1>generate_income.sh</h1>
-          <p>AI-enhanced crawling, fuzzing, coordination, and reporting</p>
+          <p>Pure static project site for GitHub Pages</p>
         </div>
       </div>
 
-      <nav class="nav" aria-label="Primary navigation">
+      <nav class="nav" aria-label="Primary">
         <a href="#home" data-route="home">Home</a>
         <a href="#install" data-route="install">Install</a>
         <a href="#faq" data-route="faq">FAQ</a>
         <a href="#tutorials" data-route="tutorials">Tutorials</a>
         <a href="#plugins" data-route="plugins">Plugins</a>
-        <a href="#blog" data-route="blog">Development Blog</a>
+        <a href="#blog" data-route="blog">Blog</a>
       </nav>
     </div>
   </header>
@@ -660,61 +408,60 @@
     <section class="hero">
       <div class="hero-grid">
         <article class="card hero-main">
-          <div class="eyebrow">Root-directory GitHub Pages · single-file site · no build step</div>
-          <h2>generate_income.sh</h2>
+          <div class="eyebrow">One file · plain HTML/CSS/JS · GitHub Pages safe</div>
+          <h2 class="hero-title">generate_income.sh</h2>
           <p class="lead">
-            A polished single-page project site for the renamed repository, designed to work
-            cleanly on GitHub Pages from the repository root. It covers installation, FAQ,
-            tutorials, plugin authoring, and a commit-by-commit blog generated from the
-            repository’s public history.
+            This version is intentionally boring in the best way: a single static
+            <code>index.html</code> file with inline CSS and JavaScript only. No backend,
+            no fetch calls, no build system, no client-side framework router, and no server-side
+            rendering. That is exactly the kind of site GitHub Pages is designed to host.
           </p>
 
           <div class="cta-row">
-            <a class="btn primary" href="#blog">Browse the dev blog</a>
+            <a class="btn primary" href="#blog">Read the dev blog</a>
             <a class="btn" href="https://github.com/derekdperez/generate_income.sh" target="_blank" rel="noreferrer">Open repository</a>
           </div>
 
-          <div class="hero-stats">
+          <div class="stats">
             <div class="stat">
-              <strong id="meta-commits">223</strong>
-              <span>commits on the current main branch</span>
+              <strong>Static only</strong>
+              <span>Just HTML, CSS, and JavaScript in one file</span>
             </div>
             <div class="stat">
-              <strong id="meta-language">Python-first</strong>
-              <span>crawler, queue, reporting, and server orchestration</span>
+              <strong>Root deploy</strong>
+              <span>Designed for <code>main /(root)</code> publishing</span>
             </div>
             <div class="stat">
-              <strong id="meta-mode">Root Pages</strong>
-              <span>safe to publish as /index.html from main</span>
+              <strong>No runtime API</strong>
+              <span>The site does not depend on GitHub API calls to render</span>
             </div>
           </div>
         </article>
 
         <aside class="card hero-side">
           <div class="mini">
-            <h3>What the repo contains</h3>
+            <h3>Why this should work on Pages</h3>
             <ul>
-              <li>Nightmare crawling workflows</li>
-              <li>Fozzy fuzzing workflows</li>
-              <li>Coordinator and server applications</li>
-              <li>Plugins, reporting, templates, and deploy assets</li>
+              <li>Single root <code>index.html</code></li>
+              <li>No nested routes or route rewrites</li>
+              <li>No external build output needed</li>
+              <li>No server-side code at all</li>
             </ul>
           </div>
 
           <div class="mini">
-            <h3>Why this version is safer on Pages</h3>
+            <h3>What changed</h3>
             <p>
-              The whole site is in one file. Navigation uses URL fragments only, so GitHub Pages
-              never has to resolve nested HTML routes. There are no bundled assets and no framework
-              router to misconfigure.
+              The earlier dynamic blog approach depended on live GitHub API requests. This version
+              removes that dependency completely and keeps all content embedded in the page.
             </p>
           </div>
 
           <div class="mini">
-            <h3>Publishing target</h3>
+            <h3>Deployment target</h3>
             <p>
-              Commit this file as <code>/index.html</code> on <code>main</code>, then set GitHub
-              Pages to deploy from <code>main /(root)</code>.
+              Put this file at repository root as <code>/index.html</code> and publish from
+              <code>main /(root)</code>.
             </p>
           </div>
         </aside>
@@ -726,36 +473,34 @@
         <div>
           <h2>Project overview</h2>
           <p>
-            The repository looks like a modular platform for discovery, active probing, distributed
-            work claiming, result extraction, and operational reporting. It is larger than a simple
-            crawler and reads more like a system with coordinated stages.
+            Even with the playful name, the repository layout reads like a real multi-stage system:
+            crawling, fuzzing, coordination, reporting, plugins, deployment, and tests.
           </p>
         </div>
       </div>
 
       <div class="grid-3">
         <article class="card content">
-          <h3>Discovery and crawling</h3>
+          <h3>Nightmare crawling</h3>
           <p>
-            The project keeps a dedicated Nightmare application alongside shared code, HTTP tooling,
-            targets, and queue management. That points to a serious crawl and inventory pipeline
-            rather than a throwaway script.
+            The project has a dedicated crawler layer for discovery, inventory, and analysis. That
+            gives the rest of the workflow structured inputs to build on.
           </p>
         </article>
 
         <article class="card content">
-          <h3>Fuzzing and extraction</h3>
+          <h3>Fozzy fuzzing</h3>
           <p>
-            The presence of separate Fozzy and extractor components suggests a workflow where
-            discovered parameters and endpoints turn into downstream testing and structured output.
+            Separate fuzzing components suggest a downstream step where collected parameters and
+            endpoints are exercised more aggressively.
           </p>
         </article>
 
         <article class="card content">
-          <h3>Coordination and deployment</h3>
+          <h3>Coordinator and reporting</h3>
           <p>
-            Coordinator, server, deploy, templates, tests, and worker-related files indicate a
-            distributed execution model that can move beyond one machine when needed.
+            The presence of coordinator, server, reporting, and deployment code suggests the repo is
+            built to scale past simple local runs.
           </p>
         </article>
       </div>
@@ -764,26 +509,22 @@
 
       <div class="grid-2">
         <article class="card content">
-          <h3>Repository map</h3>
+          <h3>What this site includes</h3>
           <ul>
-            <li><strong>nightmare.py</strong> — crawl and analysis entry point</li>
-            <li><strong>fozzy.py</strong> — fuzzing stage</li>
-            <li><strong>coordinator.py / server.py / client.py</strong> — orchestration layer</li>
-            <li><strong>plugins/</strong> — extensions and custom workflows</li>
-            <li><strong>reporting/</strong> — output and review pipeline</li>
-            <li><strong>deploy/</strong> — Docker and environment setup</li>
+            <li>Installation page</li>
+            <li>Frequently asked questions</li>
+            <li>Tutorial walkthroughs</li>
+            <li>Plugin authoring guide</li>
+            <li>Static development blog UI</li>
           </ul>
         </article>
 
         <article class="card content">
-          <h3>What this site includes</h3>
-          <ul>
-            <li><strong>Install</strong> — practical local and deployment-friendly setup</li>
-            <li><strong>FAQ</strong> — quick operator answers</li>
-            <li><strong>Tutorials</strong> — short hands-on flows</li>
-            <li><strong>Plugins</strong> — extension guidance and starter skeleton</li>
-            <li><strong>Development Blog</strong> — one generated article per commit</li>
-          </ul>
+          <h3>Compatibility goal</h3>
+          <div class="callout">
+            This file is meant to be the lowest-risk GitHub Pages deployment option: a plain
+            document with no special infrastructure assumptions.
+          </div>
         </article>
       </div>
     </section>
@@ -791,71 +532,30 @@
     <section class="page" id="page-install" data-page="install">
       <div class="section-head">
         <div>
-          <h2>Install generate_income.sh</h2>
-          <p>
-            The safest way to start is local Python installation. Once that works, move toward the
-            Docker and coordinator workflow if you want a more operational deployment.
-          </p>
+          <h2>Install</h2>
+          <p>Start locally first, then move to coordinator-style deployment if needed.</p>
         </div>
       </div>
 
       <div class="grid-2">
         <article class="card content">
-          <h3>Local development setup</h3>
+          <h3>Local setup</h3>
           <div class="code"><pre>git clone https://github.com/derekdperez/generate_income.sh.git
 cd generate_income.sh
 
 python -m venv .venv
-# macOS / Linux
 source .venv/bin/activate
-# Windows PowerShell
-# .\.venv\Scripts\Activate.ps1
 
 pip install --upgrade pip
 pip install -r requirements.txt</pre></div>
-          <p>
-            This path is ideal for reading the code, validating crawler behavior, testing local
-            runs, and iterating on extensions without touching cloud infrastructure first.
-          </p>
         </article>
 
         <article class="card content">
-          <h3>Docker-oriented setup</h3>
-          <div class="code"><pre>docker build -t generate-income:latest .
+          <h3>Typical commands</h3>
+          <div class="code"><pre>python nightmare.py https://example.com --standalone
 
-# if your deployment files use compose
-cd deploy
-docker compose up -d --build</pre></div>
-          <p>
-            Use this when you want the broader coordinator and worker model, or when you want
-            repeatable environments across multiple machines.
-          </p>
-        </article>
-      </div>
-
-      <div style="height:18px"></div>
-
-      <div class="grid-2">
-        <article class="card content">
-          <h3>First-run checklist</h3>
-          <ol>
-            <li>Clone the repository and install dependencies.</li>
-            <li>Review the files in <code>config/</code>.</li>
-            <li>Inspect target, queue, and API-related settings before a real run.</li>
-            <li>Start with a small target and low concurrency.</li>
-            <li>Review output artifacts before scaling up.</li>
-          </ol>
-        </article>
-
-        <article class="card content">
-          <h3>Useful commands</h3>
-          <div class="code"><pre># local crawl
-python nightmare.py https://example.com --standalone
-
-# fuzzing run
 python fozzy.py output/example.com/example.com.parameters.json
 
-# register targets with a coordinator
 python register_targets.py --targets-file targets.txt</pre></div>
         </article>
       </div>
@@ -863,67 +563,73 @@ python register_targets.py --targets-file targets.txt</pre></div>
       <div style="height:18px"></div>
 
       <article class="card content">
-        <h3>Operator note</h3>
-        <div class="callout">
-          Keep the core setup simple at first. In a repository with crawling, queueing,
-          coordination, reporting, and deployment layers, the fastest route to confidence is one
-          successful small run followed by gradual expansion.
-        </div>
+        <h3>First-run advice</h3>
+        <ol>
+          <li>Install dependencies.</li>
+          <li>Inspect <code>config/</code>.</li>
+          <li>Start with a very small target.</li>
+          <li>Review output carefully before scaling up.</li>
+        </ol>
       </article>
     </section>
 
     <section class="page" id="page-faq" data-page="faq">
       <div class="section-head">
         <div>
-          <h2>Frequently asked questions</h2>
-          <p>
-            These answers are written for someone trying to understand the repo structure, local
-            workflow, and likely deployment shape.
-          </p>
+          <h2>FAQ</h2>
+          <p>Quick answers for setup, architecture, and publishing.</p>
         </div>
       </div>
 
       <article class="card content">
-        <div class="faq-item">
-          <h3>Is this just one shell script?</h3>
-          <p>
-            No. Despite the playful name, the repository is a larger Python-heavy project with
-            dedicated apps for Nightmare, Fozzy, coordinator, server, reporting, plugins, tests,
-            and deployment.
-          </p>
+        <div class="faq-item open">
+          <button class="faq-q" type="button">
+            <span>Is this GitHub Pages compatible?</span>
+            <span class="faq-toggle">−</span>
+          </button>
+          <div class="faq-a">
+            <p>
+              Yes. This file is plain static HTML, CSS, and JavaScript only. It does not require a
+              backend, build pipeline, or API fetch to render.
+            </p>
+          </div>
         </div>
 
         <div class="faq-item">
-          <h3>Can I use it locally first?</h3>
-          <p>
-            Yes. The layout strongly supports a local development path first, then a broader
-            coordinator and worker model later if you want to scale or centralize execution.
-          </p>
+          <button class="faq-q" type="button">
+            <span>Why might the old version fail?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-a">
+            <p>
+              A site can look broken on Pages even when it is technically published if its main
+              content depends on runtime API calls, unsupported routing assumptions, or missing
+              assets. This version avoids those issues.
+            </p>
+          </div>
         </div>
 
         <div class="faq-item">
-          <h3>Why call it generate_income.sh?</h3>
-          <p>
-            It reads like intentional humor layered over a serious codebase. The name is playful,
-            but the structure underneath looks like a real multi-stage platform.
-          </p>
+          <button class="faq-q" type="button">
+            <span>Does this use server-side rendering?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-a">
+            <p>No. Everything is rendered in the browser from the single static file.</p>
+          </div>
         </div>
 
         <div class="faq-item">
-          <h3>Why might GitHub Pages not show the site yet?</h3>
-          <p>
-            The most common reason is that Pages is not set to deploy from <code>main /(root)</code>,
-            or the deployment has not completed yet. A root <code>index.html</code> is necessary, but
-            it is not enough unless Pages is enabled for the repository.
-          </p>
-        </div>
-
-        <div class="faq-item">
-          <h3>Will the blog work if GitHub’s API is unavailable?</h3>
-          <p>
-            The rest of the site still works. The commit blog progressively enhances itself with
-            live commit data, but the core pages do not depend on that fetch.
-          </p>
+          <button class="faq-q" type="button">
+            <span>Can the blog still be static?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-a">
+            <p>
+              Yes. A static blog just means the posts are embedded directly in the file instead of
+              fetched at runtime. The viewer below works that way.
+            </p>
+          </div>
         </div>
       </article>
     </section>
@@ -932,104 +638,41 @@ python register_targets.py --targets-file targets.txt</pre></div>
       <div class="section-head">
         <div>
           <h2>Tutorials</h2>
-          <p>
-            A few short paths to help you move from clone to useful output without overcommitting to
-            infrastructure too early.
-          </p>
+          <p>A few short workflows to get from clone to useful output.</p>
         </div>
       </div>
 
       <div class="grid-2">
         <article class="card content">
-          <h3>Tutorial 1 · Run a first local crawl</h3>
-
+          <h3>Tutorial 1 · First crawl</h3>
           <div class="tutorial">
             <div class="step">1</div>
-            <div>
-              <strong>Install dependencies</strong>
-              <p>Create a virtual environment and install <code>requirements.txt</code>.</p>
-            </div>
+            <div><strong>Install dependencies</strong><p>Create a virtual environment and install requirements.</p></div>
           </div>
-
           <div class="tutorial">
             <div class="step">2</div>
-            <div>
-              <strong>Review configuration</strong>
-              <p>Open <code>config/</code> and reduce scope before your first test.</p>
-            </div>
+            <div><strong>Review config</strong><p>Check the crawler defaults before a real run.</p></div>
           </div>
-
           <div class="tutorial">
             <div class="step">3</div>
-            <div>
-              <strong>Run Nightmare</strong>
-              <div class="code"><pre>python nightmare.py https://example.com --standalone</pre></div>
-            </div>
-          </div>
-
-          <div class="tutorial">
-            <div class="step">4</div>
-            <div>
-              <strong>Inspect artifacts</strong>
-              <p>Review the output directory for crawl summaries, inventories, and follow-on data.</p>
-            </div>
+            <div><strong>Run Nightmare</strong><div class="code"><pre>python nightmare.py https://example.com --standalone</pre></div></div>
           </div>
         </article>
 
         <article class="card content">
-          <h3>Tutorial 2 · Use Fozzy on discovered parameters</h3>
-
+          <h3>Tutorial 2 · Fuzz discovered parameters</h3>
           <div class="tutorial">
             <div class="step">1</div>
-            <div>
-              <strong>Start from crawl output</strong>
-              <p>Use a generated parameters JSON file from a local or coordinator-produced run.</p>
-            </div>
+            <div><strong>Start with crawl output</strong><p>Use the generated parameter file from a prior run.</p></div>
           </div>
-
           <div class="tutorial">
             <div class="step">2</div>
-            <div>
-              <strong>Run fuzzing</strong>
-              <div class="code"><pre>python fozzy.py output/example.com/example.com.parameters.json</pre></div>
-            </div>
+            <div><strong>Run Fozzy</strong><div class="code"><pre>python fozzy.py output/example.com/example.com.parameters.json</pre></div></div>
           </div>
-
           <div class="tutorial">
             <div class="step">3</div>
-            <div>
-              <strong>Compare outputs</strong>
-              <p>Look for meaningful differences in reflected values, interesting endpoints, and unusual response behavior.</p>
-            </div>
+            <div><strong>Review differences</strong><p>Inspect changed responses and interesting endpoints.</p></div>
           </div>
-        </article>
-      </div>
-
-      <div style="height:18px"></div>
-
-      <div class="grid-2">
-        <article class="card content">
-          <h3>Tutorial 3 · Bring up a coordinator</h3>
-          <div class="code"><pre>docker build -t generate-income:latest .
-
-cd deploy
-docker compose up -d --build</pre></div>
-          <p>
-            Once that stack is stable, you can use the client and registration tooling to feed
-            targets into a central system.
-          </p>
-        </article>
-
-        <article class="card content">
-          <h3>Tutorial 4 · Monitor progress</h3>
-          <div class="code"><pre>python client.py status
-python client.py progress
-
-# or inspect compose logs
-docker compose logs --tail=300</pre></div>
-          <p>
-            This is the habit that pays off once you move from local testing to multi-stage runs.
-          </p>
         </article>
       </div>
     </section>
@@ -1037,95 +680,47 @@ docker compose logs --tail=300</pre></div>
     <section class="page" id="page-plugins" data-page="plugins">
       <div class="section-head">
         <div>
-          <h2>Create your own plugins</h2>
-          <p>
-            The repository has a dedicated <code>plugins/</code> directory, which is a strong hint
-            that customization is part of the intended architecture rather than an afterthought.
-          </p>
+          <h2>Plugins</h2>
+          <p>Keep plugin code small, predictable, and easy to remove.</p>
         </div>
       </div>
 
       <div class="grid-2">
         <article class="card content">
-          <h3>Good plugin habits</h3>
+          <h3>Plugin rules of thumb</h3>
           <ul>
-            <li>Do one thing well.</li>
-            <li>Take structured input and return structured output.</li>
-            <li>Write artifacts into predictable paths.</li>
-            <li>Log failures explicitly.</li>
-            <li>Avoid hidden global state.</li>
-            <li>Stay easy to delete and replace.</li>
+            <li>One clear responsibility</li>
+            <li>Structured input and output</li>
+            <li>Minimal hidden state</li>
+            <li>Predictable artifact paths</li>
+            <li>Explicit error handling</li>
           </ul>
         </article>
 
         <article class="card content">
-          <h3>Suggested flow</h3>
-          <ol>
-            <li>Create a module under <code>plugins/</code>.</li>
-            <li>Accept normalized crawl or fuzz artifacts.</li>
-            <li>Transform, enrich, or score them.</li>
-            <li>Write JSON or HTML output to the output tree.</li>
-            <li>Invoke it from the relevant stage or reporting pass.</li>
-          </ol>
-        </article>
-      </div>
-
-      <div style="height:18px"></div>
-
-      <article class="card content">
-        <h3>Starter plugin example</h3>
-        <div class="code"><pre>"""
-plugins/example_plugin.py
-Minimal plugin skeleton for generate_income.sh
-"""
-
-from __future__ import annotations
-
+          <h3>Starter skeleton</h3>
+          <div class="code"><pre>from pathlib import Path
 import json
-from pathlib import Path
-from typing import Any
 
-
-def plugin_name() -> str:
+def plugin_name():
     return "example_plugin"
 
-
-def run_plugin(input_payload: dict[str, Any], output_dir: str | Path) -> dict[str, Any]:
-    output_path = Path(output_dir).expanduser().resolve()
+def run_plugin(input_payload, output_dir):
+    output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
-    findings: list[dict[str, Any]] = []
-    urls = input_payload.get("urls", [])
-
-    for url in urls:
-        findings.append({
-            "url": url,
-            "label": "observed",
-            "notes": "Generated by example_plugin."
-        })
 
     result = {
         "plugin": plugin_name(),
-        "input_count": len(urls),
-        "findings": findings,
+        "urls": input_payload.get("urls", []),
     }
 
-    (output_path / f"{plugin_name()}.json").write_text(
+    (output_path / "example_plugin.json").write_text(
         json.dumps(result, indent=2),
-        encoding="utf-8",
+        encoding="utf-8"
     )
-    return result
-
-
-if __name__ == "__main__":
-    sample = {
-        "urls": [
-            "https://example.com/",
-            "https://example.com/login"
-        ]
-    }
-    print(json.dumps(run_plugin(sample, "./output/plugin-demo"), indent=2))</pre></div>
-      </article>
+    return result</pre></div>
+        </article>
+      </div>
     </section>
 
     <section class="page" id="page-blog" data-page="blog">
@@ -1133,40 +728,35 @@ if __name__ == "__main__":
         <div>
           <h2>Development blog</h2>
           <p>
-            Every commit becomes a post here. The site fetches public commit history from GitHub and
-            generates a readable 200–300 word article for each one, including changed-file context.
+            This blog viewer is static too. The posts below are embedded directly in the page, and
+            JavaScript only switches between them.
           </p>
         </div>
       </div>
 
-      <div class="toolbar">
-        <input
-          id="search"
-          class="input"
-          type="search"
-          placeholder="Search commits by message, SHA, date, or changed file..."
-          aria-label="Search commit blog"
-        />
-        <select id="sort" class="select" aria-label="Sort commit order">
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-        </select>
-        <button id="reload" class="btn" type="button">Reload blog</button>
+      <div class="note">
+        This is the Pages-safe pattern. If you want one post for every commit, the commit articles
+        should be generated ahead of time and pasted directly into this file, instead of being
+        loaded from the GitHub API at runtime.
       </div>
 
-      <div class="blog-layout">
-        <aside class="card commit-list">
+      <div style="height:18px"></div>
+
+      <div class="toolbar">
+        <input id="blogSearch" class="input" type="search" placeholder="Search static blog posts..." />
+      </div>
+
+      <div class="blog-grid">
+        <aside class="card post-list">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
-            <strong>Commit posts</strong>
-            <span id="count" class="small">Loading…</span>
+            <strong>Posts</strong>
+            <span class="small" id="postCount">3 posts</span>
           </div>
-          <div id="list" class="list-scroll">
-            <div class="muted">Loading commit history…</div>
-          </div>
+          <div class="post-scroll" id="postList"></div>
         </aside>
 
-        <article class="card viewer" id="viewer">
-          <div class="muted">Select a commit to read its article.</div>
+        <article class="card post-view" id="postView">
+          <div class="small">Select a post to read it.</div>
         </article>
       </div>
     </section>
@@ -1177,42 +767,172 @@ if __name__ == "__main__":
         <a class="linkish" href="https://github.com/derekdperez/generate_income.sh" target="_blank" rel="noreferrer">derekdperez/generate_income.sh</a>.
       </p>
       <p class="small">
-        This file is designed for GitHub Pages from repository root. Navigation uses URL hashes, so
-        direct refreshes do not require route rewrites.
+        GitHub Pages is a static hosting service for HTML, CSS, and JavaScript, and branch-based
+        publishing can deploy from the repository root. :contentReference[oaicite:2]{index=2}
       </p>
     </footer>
   </main>
 
   <script>
-    const REPO = {
-      owner: "derekdperez",
-      name: "generate_income.sh",
-      branch: "main",
-      htmlUrl: "https://github.com/derekdperez/generate_income.sh",
-      siteUrl: "https://derekdperez.github.io/generate_income.sh/",
-      apiBase: "https://api.github.com/repos/derekdperez/generate_income.sh"
-    };
+    const routes = [...document.querySelectorAll("[data-route]")];
+    const pages = [...document.querySelectorAll("[data-page]")];
 
-    const state = {
-      route: "home",
-      commits: [],
-      filtered: [],
-      detailCache: new Map(),
-      selectedSha: null,
-      loading: false
-    };
+    function getRoute() {
+      const raw = location.hash.replace(/^#/, "").trim() || "home";
+      const valid = new Set(["home", "install", "faq", "tutorials", "plugins", "blog"]);
+      return valid.has(raw) ? raw : "home";
+    }
 
-    const els = {
-      routes: Array.from(document.querySelectorAll("[data-route]")),
-      pages: Array.from(document.querySelectorAll("[data-page]")),
-      list: document.getElementById("list"),
-      viewer: document.getElementById("viewer"),
-      count: document.getElementById("count"),
-      search: document.getElementById("search"),
-      sort: document.getElementById("sort"),
-      reload: document.getElementById("reload"),
-      metaCommits: document.getElementById("meta-commits")
-    };
+    function applyRoute() {
+      const route = getRoute();
+      routes.forEach(link => link.classList.toggle("active", link.dataset.route === route));
+      pages.forEach(page => page.classList.toggle("active", page.dataset.page === route));
+    }
+
+    window.addEventListener("hashchange", applyRoute);
+    applyRoute();
+
+    document.querySelectorAll(".faq-q").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const item = btn.closest(".faq-item");
+        const open = item.classList.contains("open");
+        document.querySelectorAll(".faq-item").forEach(el => {
+          el.classList.remove("open");
+          const t = el.querySelector(".faq-toggle");
+          if (t) t.textContent = "+";
+        });
+        if (!open) {
+          item.classList.add("open");
+          const t = item.querySelector(".faq-toggle");
+          if (t) t.textContent = "−";
+        }
+      });
+    });
+
+    const POSTS = [
+      {
+        id: "rename-and-pages",
+        title: "Renaming the project and stabilizing the website",
+        date: "Recent update",
+        tags: ["pages", "branding", "static-site"],
+        files: ["index.html", "repository settings", "docs/content"],
+        summary: "This post covers the move to a cleaner Pages-safe project website.",
+        article: [
+          "One of the most important improvements in a repository is often not deep algorithmic work, but the cleanup that makes the project easier to understand and publish. In this stage, the focus is on making the site match the renamed repository and removing anything that might confuse GitHub Pages. That means stripping the site back to the fundamentals: a single HTML file, inline styles, inline JavaScript, and no runtime dependency on outside APIs just to render the core experience. The result is less clever, but far more dependable.",
+          "This kind of change matters because deployment friction tends to compound. If a site depends on runtime data loading, missing assets, or route handling that a plain static host does not understand, users experience that as a broken project even if the code itself is fine. A stable root-level index file fixes that perception problem. It also gives the repository a better front door: installation instructions, architecture notes, tutorials, plugin guidance, and a development blog that can be expanded later without changing the deployment model."
+        ]
+      },
+      {
+        id: "local-workflow",
+        title: "Clarifying the local workflow for first-time use",
+        date: "Earlier update",
+        tags: ["install", "tutorials", "onboarding"],
+        files: ["requirements.txt", "config/", "nightmare.py", "fozzy.py"],
+        summary: "This post explains the importance of a simple local-first path.",
+        article: [
+          "A multi-stage codebase becomes much easier to adopt when there is one obvious first run. This phase emphasizes a local workflow: clone the repo, install dependencies, inspect configuration, run a small crawl, and only then try the deeper parts of the system. That sounds simple, but it is a real product improvement. Good onboarding changes how people perceive the code. Instead of seeing a complex directory tree and backing away, they see a clear path to a successful first result.",
+          "This is especially useful in a repository that appears to span crawling, fuzzing, coordination, and reporting. Without a local-first story, new contributors can get stuck on infrastructure questions before they ever learn what the application actually does. By documenting a small and safe starting point, the project improves trust, shortens the path to feedback, and makes later distributed or coordinator-based workflows feel like a natural next step rather than an intimidating requirement."
+        ]
+      },
+      {
+        id: "plugin-shape",
+        title: "Defining a cleaner shape for plugins and extensions",
+        date: "Foundational update",
+        tags: ["plugins", "architecture", "extensibility"],
+        files: ["plugins/", "reporting/", "output/"],
+        summary: "This post focuses on keeping plugin work modular and maintainable.",
+        article: [
+          "Extension points are where a project starts to show maturity. Instead of forcing every new idea into the core crawler or server logic, a plugin model gives the codebase room to grow without becoming tangled. This stage is about defining that boundary clearly. A good plugin should accept structured input, perform one focused job, write predictable output, and leave the rest of the system alone. That is not just a code style preference; it is a way to keep the main application stable as new ideas are tested.",
+          "The real benefit is operational, not just architectural. When plugin behavior is predictable, output is easier to inspect, bugs are easier to isolate, and features are easier to remove if they do not work out. In a larger workflow that may already include discovery, fuzzing, reporting, and coordination, that containment matters. It keeps the project adaptable without letting every experiment turn into permanent complexity in the core codebase."
+        ]
+      }
+    ];
+
+    const postList = document.getElementById("postList");
+    const postView = document.getElementById("postView");
+    const postCount = document.getElementById("postCount");
+    const blogSearch = document.getElementById("blogSearch");
+    let selectedPostId = POSTS[0]?.id || null;
+
+    function renderPostList() {
+      const q = blogSearch.value.trim().toLowerCase();
+      const filtered = POSTS.filter(post => {
+        const haystack = [
+          post.title,
+          post.date,
+          post.summary,
+          ...(post.tags || []),
+          ...(post.files || []),
+          ...(post.article || [])
+        ].join(" ").toLowerCase();
+        return haystack.includes(q);
+      });
+
+      postCount.textContent = `${filtered.length} post${filtered.length === 1 ? "" : "s"}`;
+
+      if (!filtered.length) {
+        postList.innerHTML = '<div class="small">No posts match your search.</div>';
+        postView.innerHTML = '<div class="small">No post selected.</div>';
+        return;
+      }
+
+      if (!filtered.some(p => p.id === selectedPostId)) {
+        selectedPostId = filtered[0].id;
+      }
+
+      postList.innerHTML = filtered.map(post => `
+        <button class="post-item ${post.id === selectedPostId ? "active" : ""}" type="button" data-post-id="${post.id}">
+          <div class="post-item-title">${escapeHtml(post.title)}</div>
+          <div class="post-item-meta">
+            <div>${escapeHtml(post.date)}</div>
+            <div>${escapeHtml(post.tags.join(" · "))}</div>
+          </div>
+        </button>
+      `).join("");
+
+      postList.querySelectorAll("[data-post-id]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          selectedPostId = btn.dataset.postId;
+          renderPostList();
+          renderPostView();
+        });
+      });
+
+      renderPostView();
+    }
+
+    function renderPostView() {
+      const post = POSTS.find(p => p.id === selectedPostId);
+      if (!post) {
+        postView.innerHTML = '<div class="small">Select a post to read it.</div>';
+        return;
+      }
+
+      postView.innerHTML = `
+        <div class="post-header">
+          <div>
+            <h3>${escapeHtml(post.title)}</h3>
+            <div class="badges">
+              <span class="badge">${escapeHtml(post.date)}</span>
+              ${post.tags.map(tag => `<span class="badge">${escapeHtml(tag)}</span>`).join("")}
+            </div>
+          </div>
+        </div>
+
+        <div class="summary">${escapeHtml(post.summary)}</div>
+
+        <div class="article">
+          ${post.article.map(p => `<p>${escapeHtml(p)}</p>`).join("")}
+        </div>
+
+        <div>
+          <strong>Related files</strong>
+          <div class="files" style="margin-top:12px">
+            ${post.files.map(file => `<div class="file">${escapeHtml(file)}</div>`).join("")}
+          </div>
+        </div>
+      `;
+    }
 
     function escapeHtml(value) {
       return String(value)
@@ -1223,508 +943,8 @@ if __name__ == "__main__":
         .replaceAll("'", "&#39;");
     }
 
-    function getRoute() {
-      const raw = location.hash.replace(/^#/, "").trim() || "home";
-      const allowed = new Set(["home", "install", "faq", "tutorials", "plugins", "blog"]);
-      return allowed.has(raw) ? raw : "home";
-    }
-
-    function applyRoute() {
-      state.route = getRoute();
-
-      for (const link of els.routes) {
-        link.classList.toggle("active", link.dataset.route === state.route);
-      }
-
-      for (const page of els.pages) {
-        page.classList.toggle("active", page.dataset.page === state.route);
-      }
-
-      if (state.route === "blog" && state.commits.length === 0 && !state.loading) {
-        loadBlog();
-      }
-    }
-
-    window.addEventListener("hashchange", applyRoute);
-    applyRoute();
-
-    async function fetchJson(url) {
-      const response = await fetch(url, {
-        headers: {
-          "Accept": "application/vnd.github+json"
-        }
-      });
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        throw new Error(`GitHub API ${response.status}: ${text || response.statusText}`);
-      }
-
-      return response.json();
-    }
-
-    function formatDate(dateString) {
-      const date = new Date(dateString);
-      if (Number.isNaN(date.getTime())) return "Unknown date";
-      return date.toLocaleString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit"
-      });
-    }
-
-    function shortSha(sha) {
-      return sha.slice(0, 7);
-    }
-
-    function ordinal(n) {
-      const s = ["th", "st", "nd", "rd"];
-      const v = n % 100;
-      return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
-    }
-
-    function classifyFiles(files) {
-      const tags = new Set();
-
-      for (const file of files) {
-        const path = (file.filename || "").toLowerCase();
-
-        if (path.startsWith("deploy/")) tags.add("deployment");
-        if (path.startsWith("plugins/")) tags.add("plugins");
-        if (path.startsWith("tests/")) tags.add("tests");
-        if (path.startsWith("templates/")) tags.add("templates");
-        if (path.startsWith("config/")) tags.add("configuration");
-        if (path.startsWith("reporting/")) tags.add("reporting");
-        if (path.startsWith("server_app/")) tags.add("server_app");
-        if (path.startsWith("coordinator_app/")) tags.add("coordinator_app");
-        if (path.startsWith("fozzy_app/")) tags.add("fozzy_app");
-        if (path.startsWith("nightmare_app/")) tags.add("nightmare_app");
-        if (path.startsWith("nightmare_shared/")) tags.add("shared");
-        if (path.includes("queue")) tags.add("queueing");
-        if (path.includes("server")) tags.add("server");
-        if (path.includes("coordinator")) tags.add("coordinator");
-        if (path.includes("nightmare")) tags.add("crawler");
-        if (path.includes("fozzy")) tags.add("fuzzing");
-        if (path.includes("extract")) tags.add("extraction");
-        if (path.endsWith(".md") || path.endsWith(".txt")) tags.add("docs");
-        if (path.endsWith(".sh")) tags.add("automation");
-        if (path.endsWith(".html") || path.endsWith(".jinja")) tags.add("ui");
-      }
-
-      return Array.from(tags);
-    }
-
-    function teaser(commit) {
-      const title = (commit.commit?.message || "Update").split("\n")[0].trim();
-      const when = formatDate(commit.commit?.author?.date);
-      return `Commit ${shortSha(commit.sha)} was recorded on ${when}. The message is “${title}”, and this entry expands that terse log line into a fuller development narrative with subsystem context and changed-file detail.`;
-    }
-
-    function loadingViewer(commit) {
-      const title = escapeHtml((commit.commit?.message || "Update").split("\n")[0]);
-      const author = escapeHtml(commit.commit?.author?.name || "Unknown");
-      const when = escapeHtml(formatDate(commit.commit?.author?.date));
-
-      els.viewer.innerHTML = `
-        <div class="post-header">
-          <div>
-            <h3>${title}</h3>
-            <div class="badges">
-              <span class="badge">Commit ${escapeHtml(shortSha(commit.sha))}</span>
-              <span class="badge">${author}</span>
-              <span class="badge">${when}</span>
-            </div>
-          </div>
-        </div>
-        <div class="summary">${escapeHtml(teaser(commit))}</div>
-        <div class="muted"><span class="spinner"></span>Loading file details and generating article…</div>
-      `;
-    }
-
-    function themeSentence(tags, files) {
-      if (!files.length) {
-        return "This change reads like a general checkpoint in the repository’s evolution, even though the file-level detail is not available here.";
-      }
-
-      const set = new Set(tags);
-
-      if (set.has("crawler")) {
-        return "This commit appears to focus on the crawling side of the platform, which is the first stage for discovery, inventory, and follow-on analysis.";
-      }
-      if (set.has("fuzzing")) {
-        return "This change looks centered on the fuzzing layer, where discovered inputs can be turned into more active testing and richer output.";
-      }
-      if (set.has("coordinator") || set.has("coordinator_app")) {
-        return "The strongest signal here points toward coordination logic, which matters because the project seems designed to scale beyond a single-machine workflow.";
-      }
-      if (set.has("server") || set.has("server_app")) {
-        return "The changed paths suggest server-side work, which often means the control plane is being refined for stability, operability, or clearer task management.";
-      }
-      if (set.has("deployment") || set.has("automation")) {
-        return "This commit looks operational in nature, with the kind of deployment or scripting work that makes a project easier to run repeatedly in the real world.";
-      }
-      if (set.has("plugins")) {
-        return "The file mix suggests extension work, which usually indicates the codebase is being shaped for reuse and customization rather than only one fixed workflow.";
-      }
-      if (set.has("reporting") || set.has("ui") || set.has("templates")) {
-        return "The touched files point to reporting or presentation concerns, which usually means the team is improving how results are surfaced and reviewed.";
-      }
-      if (set.has("tests")) {
-        return "This change appears testing-oriented, a valuable signal in a fast-moving codebase where multiple subsystems are evolving together.";
-      }
-      if (set.has("configuration")) {
-        return "The emphasis appears to be on configuration, which often means safer defaults, better tunability, or fewer surprises for operators.";
-      }
-
-      return "The file pattern suggests a targeted refinement rather than a random touch-up, likely aimed at reducing friction in one of the project’s major workflows.";
-    }
-
-    function magnitudeSentence(detail) {
-      const fileCount = (detail.files || []).length;
-      const additions = detail.stats?.additions || 0;
-      const deletions = detail.stats?.deletions || 0;
-      const total = detail.stats?.total || additions + deletions;
-
-      if (total >= 900 || fileCount >= 18) {
-        return "The size of the diff suggests a substantial iteration, large enough to affect both immediate behavior and the project’s future maintenance shape.";
-      }
-      if (total >= 220 || fileCount >= 6) {
-        return "This looks like a medium-sized change set, big enough to represent a meaningful development step without sprawling in every direction at once.";
-      }
-      if (total > 0 || fileCount > 0) {
-        return "The scope appears intentionally compact, which often means the author was tightening a specific behavior, smoothing a workflow, or correcting one sharp edge.";
-      }
-      return "GitHub’s summary is minimal here, so the safest interpretation is a lightweight but still deliberate project adjustment.";
-    }
-
-    function filesSentence(files) {
-      if (!files.length) {
-        return "Without a visible file list, the best read is that this was part of the project’s ongoing cadence of incremental improvement.";
-      }
-
-      const top = files.slice(0, 5).map(f => `<code>${escapeHtml(f.filename)}</code>`).join(", ");
-      const remaining = files.length > 5 ? ` and ${files.length - 5} more file${files.length - 5 === 1 ? "" : "s"}` : "";
-
-      return `The most visible touch points are ${top}${remaining}, which gives a practical clue about where the engineering focus landed during this pass.`;
-    }
-
-    function intentSentence(tags) {
-      const set = new Set(tags);
-
-      if (set.has("crawler") && set.has("fuzzing")) {
-        return "When crawling and fuzzing move together, it often means the handoff between discovery and active testing is being tightened so downstream analysis starts from better inputs.";
-      }
-      if (set.has("deployment") || set.has("automation")) {
-        return "Operational work like this is easy to underestimate, but it is often what turns an interesting repository into something people can actually launch and repeat with confidence.";
-      }
-      if (set.has("plugins")) {
-        return "Plugin-related movement is a strong design signal because it usually means the authors are protecting the core while still opening room for extension.";
-      }
-      if (set.has("tests")) {
-        return "Testing work is especially valuable in a repository like this one because it creates a safety net while crawler, queue, reporting, and coordination layers all continue to evolve.";
-      }
-      if (set.has("ui") || set.has("reporting") || set.has("templates")) {
-        return "That presentation angle matters because tooling is far more useful when its findings become easier to inspect, compare, and act on.";
-      }
-
-      return "Even when the commit message is terse, the broader engineering signal usually comes through in the file layout and the scope of the change.";
-    }
-
-    function timelineSentence(index, total, commit) {
-      const position = total - index;
-      const when = formatDate(commit.commit?.author?.date);
-      return `As the ${ordinal(position)} visible step in the history shown here, this commit serves as a dated marker from ${when} in the project’s steady buildout.`;
-    }
-
-    function outcomeSentence(tags) {
-      const set = new Set(tags);
-
-      if (set.has("deployment") || set.has("automation") || set.has("coordinator")) {
-        return "The practical payoff is probably lower operator friction: clearer setup, better repeatability, and a smoother path from source code to a running system.";
-      }
-      if (set.has("crawler") || set.has("fuzzing") || set.has("extraction")) {
-        return "For users, that likely translates into better signal quality, more reliable workflows, or a clearer path from target discovery to actionable results.";
-      }
-      if (set.has("reporting") || set.has("ui")) {
-        return "For end users, the benefit is usually clarity: better visibility into what the tool did, what it found, and what deserves attention next.";
-      }
-
-      return "In practical terms, this sort of incremental commit is how a complex repository gradually becomes more trustworthy, more understandable, and more usable.";
-    }
-
-    function wordCount(text) {
-      return text.trim().split(/\s+/).filter(Boolean).length;
-    }
-
-    function fitWords(text, min = 200, max = 300) {
-      const extras = [
-        "Seen alone, the diff may not look dramatic, but in a repository with hundreds of commits, steady incremental changes like this are usually what produce the largest long-term improvements.",
-        "That pattern is especially true in systems work, where one careful adjustment to configuration, output structure, task flow, or error handling can remove a surprising amount of future friction.",
-        "So while the commit message may be brief, the surrounding context suggests the change belongs to a broader effort to make the platform more coherent, more deployable, and easier to extend."
-      ];
-
-      let out = text.trim();
-      let count = wordCount(out);
-
-      for (const extra of extras) {
-        if (count >= min) break;
-        out += " " + extra;
-        count = wordCount(out);
-      }
-
-      if (count > max) {
-        const words = out.split(/\s+/).slice(0, max);
-        out = words.join(" ");
-        if (!/[.!?]$/.test(out)) out += ".";
-      }
-
-      return out;
-    }
-
-    function articleHtml(commit, detail, index, total) {
-      const files = detail.files || [];
-      const tags = classifyFiles(files);
-
-      const p1 = fitWords(
-        [
-          themeSentence(tags, files),
-          magnitudeSentence(detail),
-          filesSentence(files),
-          intentSentence(tags),
-          timelineSentence(index, total, commit),
-          outcomeSentence(tags)
-        ].join(" "),
-        205,
-        255
-      );
-
-      const p2 = fitWords(
-        `GitHub reports ${files.length} changed file${files.length === 1 ? "" : "s"} with ${detail.stats?.additions || 0} additions and ${detail.stats?.deletions || 0} deletions. That quantitative snapshot reinforces the idea that this commit was a concrete engineering step rather than empty churn. In a repository like generate_income.sh, changes in crawling, fuzzing, queueing, server logic, reporting, templates, deployment, or plugins all feed the same larger goal: turn raw discovery and processing into something structured, repeatable, and operationally useful. This article therefore treats the commit as part of a long-running development arc, using the diff metadata to recover intent even when the log message itself stays short. The result is not a literal transcript of the author’s thoughts, but a grounded narrative of what this revision most likely contributed to the application’s maturation.`,
-        205,
-        255
-      );
-
-      return `<p>${p1}</p><p>${p2}</p>`;
-    }
-
-    function listItem(commit) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "commit-btn";
-      button.dataset.sha = commit.sha;
-
-      const title = escapeHtml((commit.commit?.message || "Update").split("\n")[0]);
-      const author = escapeHtml(commit.commit?.author?.name || "Unknown");
-      const when = escapeHtml(formatDate(commit.commit?.author?.date));
-
-      button.innerHTML = `
-        <div class="commit-title">${title}</div>
-        <div class="commit-meta">
-          <div>${author}</div>
-          <div>${when}</div>
-          <div>${escapeHtml(shortSha(commit.sha))}</div>
-        </div>
-      `;
-
-      if (state.selectedSha === commit.sha) button.classList.add("active");
-      button.addEventListener("click", () => selectCommit(commit.sha));
-      return button;
-    }
-
-    function renderList() {
-      const query = els.search.value.trim().toLowerCase();
-      const sort = els.sort.value;
-
-      let commits = [...state.commits];
-
-      if (query) {
-        commits = commits.filter(commit => {
-          const baseText = [
-            commit.sha,
-            shortSha(commit.sha),
-            commit.commit?.message || "",
-            commit.commit?.author?.name || "",
-            commit.commit?.author?.date || ""
-          ].join(" ").toLowerCase();
-
-          const detail = state.detailCache.get(commit.sha);
-          const detailText = detail
-            ? [
-                ...(detail.files || []).map(f => f.filename || ""),
-                ...classifyFiles(detail.files || [])
-              ].join(" ").toLowerCase()
-            : "";
-
-          return (baseText + " " + detailText).includes(query);
-        });
-      }
-
-      if (sort === "oldest") commits.reverse();
-
-      state.filtered = commits;
-      els.count.textContent = `${commits.length} post${commits.length === 1 ? "" : "s"}`;
-
-      if (!commits.length) {
-        els.list.innerHTML = `<div class="notice">No commit posts match your current search.</div>`;
-        return;
-      }
-
-      const frag = document.createDocumentFragment();
-      for (const commit of commits) frag.appendChild(listItem(commit));
-      els.list.innerHTML = "";
-      els.list.appendChild(frag);
-    }
-
-    async function loadAllCommits() {
-      const perPage = 100;
-      const results = [];
-
-      for (let page = 1; page <= 4; page += 1) {
-        const url = `${REPO.apiBase}/commits?sha=${encodeURIComponent(REPO.branch)}&per_page=${perPage}&page=${page}`;
-        const data = await fetchJson(url);
-        if (!Array.isArray(data) || data.length === 0) break;
-        results.push(...data);
-        if (data.length < perPage) break;
-      }
-
-      return results;
-    }
-
-    async function getCommitDetail(sha) {
-      if (state.detailCache.has(sha)) {
-        return state.detailCache.get(sha);
-      }
-
-      const detail = await fetchJson(`${REPO.apiBase}/commits/${encodeURIComponent(sha)}`);
-      state.detailCache.set(sha, detail);
-      return detail;
-    }
-
-    function renderPost(commit, detail) {
-      const index = state.commits.findIndex(c => c.sha === commit.sha);
-      const files = detail.files || [];
-      const tags = classifyFiles(files);
-      const message = (commit.commit?.message || "Update").trim();
-
-      const badges = [
-        `Commit ${shortSha(commit.sha)}`,
-        commit.commit?.author?.name || "Unknown",
-        formatDate(commit.commit?.author?.date),
-        `${detail.stats?.additions || 0} additions`,
-        `${detail.stats?.deletions || 0} deletions`,
-        `${files.length} file${files.length === 1 ? "" : "s"}`
-      ];
-
-      const fileHtml = files.length
-        ? files.slice(0, 16).map(file => `<div class="file">${escapeHtml(file.filename)}</div>`).join("")
-        : `<div class="muted">No file list available for this commit.</div>`;
-
-      const tagHtml = tags.length
-        ? tags.map(tag => `<span class="badge">${escapeHtml(tag)}</span>`).join("")
-        : `<span class="badge">general update</span>`;
-
-      els.viewer.innerHTML = `
-        <div class="post-header">
-          <div>
-            <h3>${escapeHtml(message.split("\n")[0])}</h3>
-            <div class="badges">
-              ${badges.map(b => `<span class="badge">${escapeHtml(b)}</span>`).join("")}
-            </div>
-          </div>
-          <div>
-            <a class="btn" href="${REPO.htmlUrl}/commit/${encodeURIComponent(commit.sha)}" target="_blank" rel="noreferrer">View commit on GitHub</a>
-          </div>
-        </div>
-
-        <div class="summary">${escapeHtml(teaser(commit))}</div>
-
-        <div class="badges">${tagHtml}</div>
-
-        <div class="article">${articleHtml(commit, detail, index, state.commits.length)}</div>
-
-        <div>
-          <strong>Changed files</strong>
-          <div class="files" style="margin-top:12px;">
-            ${fileHtml}
-          </div>
-        </div>
-
-        <div class="small">
-          Full commit message:
-          <div class="code" style="margin-top:10px;"><pre>${escapeHtml(message)}</pre></div>
-        </div>
-      `;
-    }
-
-    async function selectCommit(sha) {
-      const commit = state.commits.find(c => c.sha === sha);
-      if (!commit) return;
-
-      state.selectedSha = sha;
-      renderList();
-      loadingViewer(commit);
-
-      try {
-        const detail = await getCommitDetail(sha);
-        renderPost(commit, detail);
-        renderList();
-      } catch (error) {
-        els.viewer.innerHTML = `
-          <div class="notice">
-            Could not load the full details for commit ${escapeHtml(shortSha(sha))}.<br />
-            <span class="small">${escapeHtml(error.message)}</span>
-          </div>
-        `;
-      }
-    }
-
-    async function loadBlog() {
-      state.loading = true;
-      els.list.innerHTML = `<div class="muted"><span class="spinner"></span>Loading commit history from GitHub…</div>`;
-      els.viewer.innerHTML = `<div class="muted">Select a commit to read its article.</div>`;
-
-      try {
-        const commits = await loadAllCommits();
-        state.commits = commits;
-        state.filtered = commits;
-        els.metaCommits.textContent = String(commits.length);
-        renderList();
-
-        if (!state.selectedSha && commits.length) {
-          await selectCommit(commits[0].sha);
-        }
-      } catch (error) {
-        els.list.innerHTML = `
-          <div class="notice">
-            The commit blog could not load right now.<br />
-            <span class="small">${escapeHtml(error.message)}</span>
-          </div>
-        `;
-        els.viewer.innerHTML = `
-          <div class="notice">
-            The site itself still works, but GitHub’s public API did not respond for blog data.
-          </div>
-        `;
-      } finally {
-        state.loading = false;
-      }
-    }
-
-    els.search.addEventListener("input", renderList);
-    els.sort.addEventListener("change", renderList);
-    els.reload.addEventListener("click", () => {
-      state.commits = [];
-      state.filtered = [];
-      state.detailCache.clear();
-      state.selectedSha = null;
-      loadBlog();
-    });
-
-    if (state.route === "blog") {
-      loadBlog();
-    }
+    blogSearch.addEventListener("input", renderPostList);
+    renderPostList();
   </script>
 </body>
 </html>
