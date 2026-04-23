@@ -3877,7 +3877,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_text(render_workers_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/dashboard":
-            self._write_text(render_workers_html(), content_type="text/html; charset=utf-8")
+            self._write_text("Dashboard page removed. Use /workers.", status=404)
             return
         if path == "/workers":
             self._write_text(render_workers_html(), content_type="text/html; charset=utf-8")

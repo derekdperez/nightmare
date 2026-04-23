@@ -1425,3 +1425,13 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile server_app/store.py server.py`
   - `pytest tests/test_reporting_and_store_helpers.py -k "list_discovered_target_domains_uses_session_inventory_counts or get_discovered_target_sitemap_uses_inventory_when_discovered_urls_missing or get_discovered_target_response_and_row_enrichment_include_download_links"`
+
+## 2026-04-23
+
+- Removed legacy dashboard page route behavior in `server.py`:
+  - `GET /dashboard` now returns `404` with guidance to use `/workers` instead of rendering a page alias.
+- Why:
+  - Keep UI navigation and routes aligned with current page model (Workers + Workflows + HTTP Requests) and avoid exposing deprecated pages.
+- Validation:
+  - `python -m py_compile server.py`
+  - `pytest -q tests/test_refactor_modules.py -k "workflows_template_renders or http_requests_template_renders or server_template_renders or worker_template_renders"`
