@@ -23,3 +23,4 @@
 - Add API-level tests for new workflow control endpoints (`workflow-config`, `workflow/run`, `workflow/mode`, `workflow/reload`) including malformed parameter JSON and workflow-not-found cases.
 - Add optimistic concurrency/versioning for workflow file saves to prevent accidental overwrite when multiple operators edit `/workflows#recon` simultaneously.
 - Continue plugin extraction by moving heavy plugin runtime bodies (`_run_recon_*`, `_run_fozzy_plugin_task`, `_run_auth0r_plugin_task`, `_run_extractor_plugin_task`) from `coordinator.py` into plugin module implementations while preserving the new registry-based dispatch boundary.
+- Remove dead legacy worker-loop methods from `coordinator.py` (`_nightmare_worker_loop`, `_fozzy_worker_loop`, `_auth0r_worker_loop`, `_extractor_worker_loop`) now that runtime startup is plugin-worker-only.

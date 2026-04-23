@@ -1346,3 +1346,23 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
   - `python -m py_compile coordinator.py server_app/store.py`
   - `pytest -q tests/test_recon_workflow_config.py tests/test_reporting_and_store_helpers.py -k "recon or claim_target_respects_running_stage_domain_lock or claim_next_stage_respects_running_target_domain_lock or ensure_schema_bootstrap_stage_index_is_legacy_safe"`
   - `pytest -q tests/test_module_decomposition.py tests/test_runtime_unit.py`
+
+## 2026-04-22
+
+- Switched coordinator runtime to plugin-worker-only execution:
+  - `coordinator.py::run()` now starts only workflow scheduler thread and generic plugin worker threads.
+  - Removed startup paths/fallback behavior that launched legacy dedicated workers (`nightmare`, `fozzy`, `auth0r`, `extractor`).
+  - Stage scheduling runtime gate now ignores legacy per-tool enable flags and treats all plugin stages as runtime-eligible.
+- Updated startup/logging semantics:
+  - Coordinator startup logs now report plugin-worker-only topology and mark legacy worker settings as ignored.
+  - CLI description updated to reflect workflow plugin runtime.
+- Updated config/loading semantics:
+  - `CoordinatorSettings.plugin_workers` default changed to `1`.
+  - `load_config(...)` no longer derives plugin worker count from legacy per-tool worker counts; it enforces minimum `1`.
+  - Cleaned `config/coordinator.json` and `config/coordinator.run-recon.json` to remove legacy worker knobs.
+- Added regression test:
+  - `tests/test_runtime_unit.py::test_load_config_uses_plugin_workers_only` ensures plugin worker count is standalone and not legacy-derived.
+- Validation:
+  - `python -m py_compile coordinator.py coordinator_app/runtime.py nightmare_shared/config.py`
+  - `pytest -q tests/test_runtime_unit.py tests/test_config_utils.py tests/test_module_decomposition.py`
+  - `pytest -q tests/test_refactor_modules.py tests/test_recon_workflow_config.py`

@@ -352,6 +352,11 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
 - Cross-lane domain lock convention:
   - Target-queue claims (`coordinator_targets`) and workflow-stage claims (`coordinator_stage_tasks`) must not both hold active leases for the same `root_domain` at once.
   - Claim queries enforce this via SQL `NOT EXISTS` guards against active leases in the other lane.
+- Worker model convention:
+  - Runtime execution is plugin-worker-only.
+  - Coordinator startup should only launch generic plugin workers (`-plugin-`) plus optional workflow scheduler (`-scheduler-`).
+  - Legacy per-tool worker loops (`nightmare/fozzy/extractor/auth0r`) are deprecated and must not be started.
+  - `plugin_workers` is authoritative and defaults to at least `1`; do not derive plugin worker count from legacy per-tool worker settings.
 
 - Recon plugin artifact convention:
   - Progress artifact type: `<plugin_name>_progress_json`

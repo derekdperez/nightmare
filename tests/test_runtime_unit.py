@@ -225,6 +225,31 @@ def test_load_config_uses_env_for_insecure_tls_and_applies_minimums(tmp_path: Pa
     assert cfg.extractor_workers >= 1
 
 
+def test_load_config_uses_plugin_workers_only(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "coordinator.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "output_root": str((tmp_path / "out").resolve()),
+                "plugin_workers": 0,
+                "fozzy_workers": 9,
+                "extractor_workers": 7,
+                "auth0r_workers": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "load_env_file_into_os", lambda *args, **kwargs: {})
+    monkeypatch.setenv("COORDINATOR_BASE_URL", "server.internal")
+    monkeypatch.setenv("COORDINATOR_API_TOKEN", "abc")
+
+    args = argparse.Namespace(config=str(config_path), server_base_url=None, api_token=None, output_root=None)
+    cfg = runtime.load_config(args)
+
+    # Plugin worker pool is now standalone and no longer derived from legacy per-tool workers.
+    assert cfg.plugin_workers == 1
+
+
 def test_event_stream_reads_recent_rows_in_reverse_order(tmp_path: Path):
     stream = EventStream(tmp_path / "events.ndjson")
     stream.append(EventRecord(event_type="worker.started", aggregate_key="worker:a", payload={"source": "test", "message": "first"}))

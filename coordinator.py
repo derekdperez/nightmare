@@ -540,16 +540,9 @@ class DistributedCoordinator:
             self._write_local_fleet_generation(remote)
 
     def _is_stage_runtime_enabled(self, stage: str) -> bool:
-        stg = str(stage or "").strip().lower()
-        if stg.startswith("nightmare_"):
-            # These are workflow gate/milestone plugins, not direct crawler workers.
-            return True
-        if stg == "fozzy":
-            return bool(self.cfg.enable_fozzy)
-        if stg == "extractor":
-            return bool(self.cfg.enable_extractor)
-        if stg == "auth0r":
-            return bool(self.cfg.enable_auth0r)
+        _ = str(stage or "").strip().lower()
+        # Unified workflow runtime: all plugin execution is handled by generic plugin workers.
+        # Per-tool enable flags are legacy/deprecated and intentionally ignored.
         return True
 
     def _workflow_stage_parameters(self, stage: str) -> dict[str, Any]:
@@ -2974,29 +2967,10 @@ class DistributedCoordinator:
         threads: list[threading.Thread] = []
         if self.cfg.workflow_scheduler_enabled:
             threads.append(threading.Thread(target=self._workflow_scheduler_loop, daemon=True))
-        if self.cfg.enable_nightmare:
-            for idx in range(1, max(1, self.cfg.nightmare_workers) + 1):
-                t = threading.Thread(target=self._nightmare_worker_loop, args=(idx,), daemon=True)
-                threads.append(t)
-        # Unified plugin worker pool replaces per-tool stage loops.
-        if self.cfg.plugin_workers > 0:
-            for idx in range(1, max(1, int(self.cfg.plugin_workers)) + 1):
-                t = threading.Thread(target=self._plugin_worker_loop, args=(idx,), daemon=True)
-                threads.append(t)
-        else:
-            # Backward-compatible fallback for one release.
-            if self.cfg.enable_fozzy:
-                for idx in range(1, max(1, self.cfg.fozzy_workers) + 1):
-                    t = threading.Thread(target=self._fozzy_worker_loop, args=(idx,), daemon=True)
-                    threads.append(t)
-            if self.cfg.enable_auth0r:
-                for idx in range(1, max(1, self.cfg.auth0r_workers) + 1):
-                    t = threading.Thread(target=self._auth0r_worker_loop, args=(idx,), daemon=True)
-                    threads.append(t)
-            if self.cfg.enable_extractor:
-                for idx in range(1, max(1, self.cfg.extractor_workers) + 1):
-                    t = threading.Thread(target=self._extractor_worker_loop, args=(idx,), daemon=True)
-                    threads.append(t)
+        plugin_worker_count = max(1, int(self.cfg.plugin_workers or 1))
+        for idx in range(1, plugin_worker_count + 1):
+            t = threading.Thread(target=self._plugin_worker_loop, args=(idx,), daemon=True)
+            threads.append(t)
 
         for t in threads:
             t.start()
@@ -3006,13 +2980,19 @@ class DistributedCoordinator:
             workflow_scheduler_enabled=bool(self.cfg.workflow_scheduler_enabled),
             workflow_scheduler_interval_seconds=float(self.cfg.workflow_scheduler_interval_seconds),
             workflow_id=self._workflow_id,
-            nightmare_workers=(self.cfg.nightmare_workers if self.cfg.enable_nightmare else 0),
-            plugin_workers=int(self.cfg.plugin_workers or 0),
+            plugin_workers=plugin_worker_count,
             plugin_allowlist=self.cfg.plugin_allowlist,
-            legacy_stage_workers_enabled=bool(int(self.cfg.plugin_workers or 0) <= 0),
-            fozzy_workers=(self.cfg.fozzy_workers if self.cfg.enable_fozzy else 0),
-            auth0r_workers=(self.cfg.auth0r_workers if self.cfg.enable_auth0r else 0),
-            extractor_workers=(self.cfg.extractor_workers if self.cfg.enable_extractor else 0),
+            legacy_workers_disabled=True,
+            ignored_legacy_settings={
+                "enable_nightmare": bool(self.cfg.enable_nightmare),
+                "enable_fozzy": bool(self.cfg.enable_fozzy),
+                "enable_extractor": bool(self.cfg.enable_extractor),
+                "enable_auth0r": bool(self.cfg.enable_auth0r),
+                "nightmare_workers": int(self.cfg.nightmare_workers or 0),
+                "fozzy_workers": int(self.cfg.fozzy_workers or 0),
+                "extractor_workers": int(self.cfg.extractor_workers or 0),
+                "auth0r_workers": int(self.cfg.auth0r_workers or 0),
+            },
         )
         try:
             while True:
@@ -3024,7 +3004,7 @@ class DistributedCoordinator:
 
 
 def parse_args(argv: Optional[list[str] ] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Distributed coordinator worker for Nightmare/Fozzy/Auth0r/Extractor")
+    p = argparse.ArgumentParser(description="Distributed coordinator worker for workflow plugins")
     p.add_argument("--config", default=str(CONFIG_PATH_DEFAULT), help="Path to coordinator config JSON")
     p.add_argument("--server-base-url", default=None, help="Coordinator server base URL (e.g. https://coord.example.com)")
     p.add_argument("--api-token", default=None, help="Coordinator API bearer token")
@@ -3046,12 +3026,9 @@ def main(argv: Optional[list[str] ] = None) -> int:
         workflow_config=str(cfg.workflow_config),
         workflow_scheduler_enabled=bool(cfg.workflow_scheduler_enabled),
         workflow_scheduler_interval_seconds=float(cfg.workflow_scheduler_interval_seconds),
-        plugin_workers=int(cfg.plugin_workers or 0),
+        plugin_workers=max(1, int(cfg.plugin_workers or 1)),
         plugin_allowlist=cfg.plugin_allowlist,
-        nightmare_workers=cfg.nightmare_workers,
-        fozzy_workers=cfg.fozzy_workers,
-        auth0r_workers=cfg.auth0r_workers,
-        extractor_workers=cfg.extractor_workers,
+        legacy_workers_disabled=True,
     )
     runner = DistributedCoordinator(cfg, logger=logger)
     return runner.run()

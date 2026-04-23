@@ -220,3 +220,7 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
   - This ensures only one worker lane can issue requests for a domain at a time.
 - Recon spider runtime default:
   - Spider throttle defaults to `0.5s` (`spider_throttle_seconds`, with `crawl_delay` backward-compatible alias).
+- Worker topology refinement (2026-04-22):
+  - Coordinator runtime now uses a single execution pool type: generic plugin workers.
+  - Legacy dedicated worker loops are no longer started even when legacy enable/worker knobs are set.
+  - Scheduler + plugin-worker lanes remain the control-plane/data-plane split for workflow orchestration.

@@ -157,7 +157,7 @@ class CoordinatorSettings(BaseModel):
     workflow_config: Path = Path("workflows/coordinator.workflow.json")
     workflow_scheduler_enabled: bool = True
     workflow_scheduler_interval_seconds: float = 15.0
-    plugin_workers: int = 0
+    plugin_workers: int = 1
     plugin_allowlist: list[str] = Field(default_factory=list)
 
     @field_validator("server_base_url", mode="before")

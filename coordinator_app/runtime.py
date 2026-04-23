@@ -727,16 +727,7 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
         if isinstance(settings.plugin_allowlist, list)
         else []
     )
-    plugin_workers_value = safe_int(settings.plugin_workers, 0)
-    if plugin_workers_value <= 0:
-        # Compatibility default: if unified plugin workers are not configured,
-        # derive a reasonable pool size from prior per-tool worker knobs.
-        plugin_workers_value = max(
-            1,
-            safe_int(settings.fozzy_workers, 0)
-            + safe_int(settings.extractor_workers, 0)
-            + safe_int(settings.auth0r_workers, 0),
-        )
+    plugin_workers_value = max(1, safe_int(settings.plugin_workers, 1))
     output_root = Path(settings.output_root).expanduser()
     if not output_root.is_absolute():
         output_root = (BASE_DIR / output_root).resolve()
@@ -767,6 +758,6 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
         workflow_config=Path(settings.workflow_config).resolve(),
         workflow_scheduler_enabled=bool(settings.workflow_scheduler_enabled),
         workflow_scheduler_interval_seconds=float(settings.workflow_scheduler_interval_seconds),
-        plugin_workers=max(1, plugin_workers_value),
+        plugin_workers=plugin_workers_value,
         plugin_allowlist=plugin_allowlist,
     )
