@@ -715,7 +715,7 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
             "enable_auth0r": bool(cfg.get("enable_auth0r", True)),
             "fozzy_process_workers": cfg.get("fozzy_process_workers", 1),
             "extractor_process_workers": cfg.get("extractor_process_workers", 1),
-            "workflow_config": BASE_DIR / str(cfg.get("workflow_config", "workflows/coordinator.workflow.json")),
+            "workflow_config": BASE_DIR / str(cfg.get("workflow_config", "workflows")),
             "workflow_scheduler_enabled": cfg.get("workflow_scheduler_enabled", True),
             "workflow_scheduler_interval_seconds": cfg.get("workflow_scheduler_interval_seconds", 15.0),
             "plugin_workers": cfg.get("plugin_workers", 0),
@@ -727,7 +727,7 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
         if isinstance(settings.plugin_allowlist, list)
         else []
     )
-    plugin_workers_value = max(1, safe_int(settings.plugin_workers, 1))
+    plugin_workers_value = max(0, safe_int(settings.plugin_workers, 0))
     output_root = Path(settings.output_root).expanduser()
     if not output_root.is_absolute():
         output_root = (BASE_DIR / output_root).resolve()

@@ -30,7 +30,11 @@
         ]
       },
       "parameters": {
-        "sublist3r_command": "sublist3r",
+        "sublist3r_command": [
+          "python3",
+          "-m",
+          "sublist3r"
+        ],
         "sublist3r_extra_args": [],
         "allow_passive_fallback": true,
         "probe_timeout_seconds": 8.0,

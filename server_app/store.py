@@ -2430,7 +2430,7 @@ RETURNING command;
         root_domain: str,
         stage: str,
         *,
-        workflow_id: str = "default",
+        workflow_id: str = "",
         worker_id: str = "",
         reason: str = "",
         allow_retry_failed: bool = False,
@@ -2592,7 +2592,7 @@ WHERE workflow_id = %s
         root_domain: str,
         stage: str,
         *,
-        workflow_id: str = "default",
+        workflow_id: str = "",
         worker_id: str = "",
         reason: str = "",
         allow_retry_failed: bool = False,
@@ -2644,7 +2644,6 @@ WITH candidate AS (
         status = 'pending'
         OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
     )
-      AND (%s = '' OR workflow_id = %s)
       AND (%s::text[] IS NULL OR stage = ANY(%s))
       AND NOT EXISTS (
           SELECT 1
@@ -2697,7 +2696,7 @@ RETURNING
         with self._connect() as conn:
             with conn.cursor() as cur:
                 self._touch_worker_presence(cur, wid, "claim_stage")
-                cur.execute(sql, (widf, widf, allowlist_param, allowlist_param, wid, lease))
+                cur.execute(sql, (allowlist_param, allowlist_param, wid, lease))
                 row = cur.fetchone()
             conn.commit()
         if row is None:
@@ -2739,7 +2738,7 @@ RETURNING
         worker_id: str,
         lease_seconds: int,
         *,
-        workflow_id: str = "default",
+        workflow_id: str = "",
     ) -> Optional[dict[str, Any]]:
         stg = str(stage or "").strip().lower()
         if not stg:
@@ -2932,7 +2931,7 @@ WHERE workflow_id = %s
         stage: str,
         worker_id: str,
         *,
-        workflow_id: str = "default",
+        workflow_id: str = "",
         exit_code: int,
         error: str = "",
         checkpoint: Optional[dict[str, Any]] = None,

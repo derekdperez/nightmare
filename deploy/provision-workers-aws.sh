@@ -43,7 +43,7 @@ This script launches worker EC2 instances and bootstraps each VM with cloud-init
   - install docker + git,
   - clone the repo,
   - write deploy/.env with coordinator URL/token,
-  - run docker compose worker stack.
+  - run docker compose worker stack with generic workers that can claim any workflow task.
 
 Most required values can be provided either as CLI flags or in deploy/.env
 (for example AWS_AMI_ID, AWS_SUBNET_ID, AWS_SECURITY_GROUP_IDS, REPO_URL,
@@ -297,8 +297,7 @@ runcmd:
   - [bash, -lc, "if [ ! -d /opt/nightmare/.git ]; then git clone --depth 1 --branch '${REPO_BRANCH}' '${REPO_URL}' /opt/nightmare; fi"]
   - [bash, -lc, "cd /opt/nightmare && git fetch --all --prune && git checkout '${REPO_BRANCH}' && git pull --ff-only || true"]
   - [bash, -lc, "cat > /opt/nightmare/deploy/.env <<'ENVEOF'\nCOORDINATOR_BASE_URL=${COORDINATOR_BASE_URL}\nCOORDINATOR_API_TOKEN=${API_TOKEN}\nCOORDINATOR_INSECURE_TLS=${COORDINATOR_INSECURE_TLS}\nENVEOF"]
-  - [bash, -lc, "if docker compose version >/dev/null 2>&1; then COMPOSE_CMD='docker compose'; else COMPOSE_CMD='docker-compose'; fi; cd /opt/nightmare && \$COMPOSE_CMD -f deploy/docker-compose.worker.yml --env-file deploy/.env up -d --build"]
-  - [bash, -lc, "if docker compose version >/dev/null 2>&1; then COMPOSE_CMD='docker compose'; else COMPOSE_CMD='docker-compose'; fi; cd /opt/nightmare && WORKER_CONTAINER_ID=\$(\$COMPOSE_CMD -f deploy/docker-compose.worker.yml --env-file deploy/.env ps -q worker) && test -n \"\$WORKER_CONTAINER_ID\" && docker exec \"\$WORKER_CONTAINER_ID\" python3 -m sublist3r -h >/dev/null"]
+  - [bash, -lc, "if docker compose version >/dev/null 2>&1; then COMPOSE_CMD='docker compose'; else COMPOSE_CMD='docker-compose'; fi; cd /opt/nightmare && \$COMPOSE_CMD -f deploy/docker-compose.worker.yml --env-file deploy/.env up -d --build && container_id=\$(\$COMPOSE_CMD -f deploy/docker-compose.worker.yml --env-file deploy/.env ps -q worker | tail -n 1) && docker exec \"\$container_id\" python3 -m sublist3r -h >/dev/null && docker exec \"\$container_id\" sh -lc 'mkdir -p /app/output && test -w /app/output'"]
 EOF
 
 IFS=',' read -r -a sg_ids <<< "$SECURITY_GROUP_IDS"

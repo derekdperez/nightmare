@@ -154,7 +154,7 @@ class CoordinatorSettings(BaseModel):
     enable_auth0r: bool = True
     fozzy_process_workers: int = 1
     extractor_process_workers: int = 1
-    workflow_config: Path = Path("workflows/coordinator.workflow.json")
+    workflow_config: Path = Path("workflows")
     workflow_scheduler_enabled: bool = True
     workflow_scheduler_interval_seconds: float = 15.0
     plugin_workers: int = 1

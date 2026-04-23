@@ -61,5 +61,29 @@ services:
       - --key-file
       - /run/tls/server.key
 
+  coordinator:
+    image: nightmare:latest
+    container_name: nightmare-central-coordinator
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_started
+    environment:
+      APP_ROLE: coordinator
+      COORDINATOR_BASE_URL: https://server
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN}
+      COORDINATOR_INSECURE_TLS: ${COORDINATOR_INSECURE_TLS:-true}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nightmare}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nightmare}
+    volumes:
+      - ../output:/app/output
+      - ../config:/app/config
+    command:
+      - coordinator
+      - --config
+      - config/coordinator.central.json
+
+
 volumes:
   postgres_data:

@@ -47,11 +47,12 @@ fi
 
 cd "${DEPLOY_DIR}"
 docker compose -f docker-compose.worker.yml --env-file .env up -d --build
-WORKER_CONTAINER_ID="$(docker compose -f docker-compose.worker.yml --env-file .env ps -q worker)"
-if [[ -z "${WORKER_CONTAINER_ID}" ]]; then
-  echo "Worker container was not created." >&2
+container_id="$(docker compose -f docker-compose.worker.yml --env-file .env ps -q worker | tail -n 1)"
+if [[ -z "${container_id}" ]]; then
+  echo "Worker failed to start." >&2
   exit 1
 fi
-docker exec "${WORKER_CONTAINER_ID}" python3 -m sublist3r -h >/dev/null
-echo "Worker started with sublist3r available."
+docker exec "${container_id}" python3 -m sublist3r -h >/dev/null
+docker exec "${container_id}" sh -lc 'mkdir -p /app/output && test -w /app/output'
+echo "Worker started and validated."
 

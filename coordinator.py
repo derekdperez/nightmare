@@ -314,40 +314,71 @@ def _normalize_workflow_entry(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _load_workflow_entries(path: Path, logger: Any) -> tuple[str, list[dict[str, Any]]]:
-    payload = _read_json_dict(path)
-    workflow_id = str(payload.get("workflow_id") or payload.get("id") or "default").strip().lower() or "default"
-    candidates: list[Any] = []
-    if isinstance(payload.get("plugins"), list):
-        candidates = list(payload.get("plugins") or [])
-    elif isinstance(payload.get("stages"), list):
-        candidates = list(payload.get("stages") or [])
-    elif isinstance(payload.get("steps"), list):
-        candidates = list(payload.get("steps") or [])
-    if not candidates:
+
+def _discover_workflow_paths(path: Path) -> list[Path]:
+    if path.is_dir():
+        return sorted(candidate.resolve() for candidate in path.glob(WORKFLOW_FILE_GLOB) if candidate.is_file())
+    if path.is_file():
+        return [path.resolve()]
+    raw = str(path or "")
+    if any(token in raw for token in ("*", "?", "[")):
+        parent = path.parent if str(path.parent) not in {"", "."} else BASE_DIR
+        try:
+            return sorted(candidate.resolve() for candidate in parent.glob(path.name) if candidate.is_file())
+        except Exception:
+            return []
+    return []
+
+
+def _load_workflow_catalog(path: Path, logger: Any) -> tuple[str, dict[str, list[dict[str, Any]]]]:
+    workflow_paths = _discover_workflow_paths(path)
+    if not workflow_paths:
         logger.warning(
             "workflow_config_missing_or_empty_using_defaults",
             workflow_config=str(path),
         )
-        return workflow_id, _default_workflow_entries()
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw in candidates:
-        normalized = _normalize_workflow_entry(raw)
-        if not normalized:
+        return "default", {"default": _default_workflow_entries()}
+
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    primary_workflow_id = "default"
+    for idx, workflow_path in enumerate(workflow_paths):
+        payload = _read_json_dict(workflow_path)
+        workflow_id = str(payload.get("workflow_id") or payload.get("id") or workflow_path.stem).strip().lower() or workflow_path.stem.lower()
+        candidates: list[Any] = []
+        if isinstance(payload.get("plugins"), list):
+            candidates = list(payload.get("plugins") or [])
+        elif isinstance(payload.get("stages"), list):
+            candidates = list(payload.get("stages") or [])
+        elif isinstance(payload.get("steps"), list):
+            candidates = list(payload.get("steps") or [])
+        if not candidates:
+            logger.warning(
+                "workflow_config_missing_or_empty_using_defaults",
+                workflow_config=str(workflow_path),
+            )
+            catalog.setdefault(workflow_id, _default_workflow_entries())
             continue
-        plugin_name = str(normalized.get("plugin_name") or normalized.get("stage") or "").strip().lower()
-        if not plugin_name or plugin_name in seen:
-            continue
-        seen.add(plugin_name)
-        out.append(normalized)
-    if not out:
-        logger.warning(
-            "workflow_config_entries_invalid_using_defaults",
-            workflow_config=str(path),
-        )
-        return workflow_id, _default_workflow_entries()
-    return workflow_id, out
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            normalized = _normalize_workflow_entry(raw)
+            if not normalized:
+                continue
+            plugin_name = str(normalized.get("plugin_name") or normalized.get("stage") or "").strip().lower()
+            if not plugin_name or plugin_name in seen:
+                continue
+            seen.add(plugin_name)
+            out.append(normalized)
+        if not out:
+            logger.warning(
+                "workflow_config_entries_invalid_using_defaults",
+                workflow_config=str(workflow_path),
+            )
+            out = _default_workflow_entries()
+        catalog[workflow_id] = out
+        if idx == 0:
+            primary_workflow_id = workflow_id
+    return primary_workflow_id, catalog
 
 
 class DistributedCoordinator:
@@ -368,25 +399,35 @@ class DistributedCoordinator:
         self._worker_states: dict[str, str] = {}
         self._workflow_lock = threading.Lock()
         self._workflow_id = "default"
+        self._workflow_catalog: dict[str, list[dict[str, Any]]] = {}
         self._workflow_entries: list[dict[str, Any]] = []
-        self._workflow_stage_map: dict[str, dict[str, Any]] = {}
+        self._workflow_stage_map: dict[str, dict[str, dict[str, Any]]] = {}
         self._reload_workflow_config(reason="startup")
 
     def _reload_workflow_config(self, *, worker_id: str = "", reason: str = "") -> bool:
         try:
-            workflow_id, workflow_entries = _load_workflow_entries(self.cfg.workflow_config, self.logger)
-            workflow_stage_map: dict[str, dict[str, Any]] = {
-                str(item.get("plugin_name") or item.get("stage") or "").strip().lower(): item
-                for item in workflow_entries
-            }
+            workflow_id, workflow_catalog = _load_workflow_catalog(self.cfg.workflow_config, self.logger)
+            workflow_stage_map: dict[str, dict[str, dict[str, Any]]] = {}
+            flattened_entries: list[dict[str, Any]] = []
+            workflow_ids: list[str] = []
+            for catalog_workflow_id, workflow_entries in workflow_catalog.items():
+                workflow_ids.append(catalog_workflow_id)
+                stage_map = {
+                    str(item.get("plugin_name") or item.get("stage") or "").strip().lower(): item
+                    for item in workflow_entries
+                }
+                workflow_stage_map[catalog_workflow_id] = stage_map
+                flattened_entries.extend(workflow_entries)
             with self._workflow_lock:
                 self._workflow_id = str(workflow_id or "default").strip().lower() or "default"
-                self._workflow_entries = list(workflow_entries)
+                self._workflow_catalog = {str(k): list(v) for k, v in workflow_catalog.items()}
+                self._workflow_entries = list(flattened_entries)
                 self._workflow_stage_map = workflow_stage_map
             self.logger.info(
                 "workflow_scheduler_config_loaded",
                 workflow_config=str(self.cfg.workflow_config),
                 workflow_id=self._workflow_id,
+                workflow_ids=workflow_ids,
                 workflow_scheduler_enabled=bool(self.cfg.workflow_scheduler_enabled),
                 workflow_scheduler_interval_seconds=float(self.cfg.workflow_scheduler_interval_seconds),
                 workflow_stage_count=len(self._workflow_entries),
@@ -545,8 +586,16 @@ class DistributedCoordinator:
         # Per-tool enable flags are legacy/deprecated and intentionally ignored.
         return True
 
-    def _workflow_stage_parameters(self, stage: str) -> dict[str, Any]:
-        entry = self._workflow_stage_map.get(str(stage or "").strip().lower(), {})
+    def _workflow_stage_parameters(self, workflow_id: str, stage: str) -> dict[str, Any]:
+        wid = str(workflow_id or "").strip().lower()
+        stage_name = str(stage or "").strip().lower()
+        stage_map = self._workflow_stage_map.get(wid) if isinstance(self._workflow_stage_map.get(wid), dict) else {}
+        entry = stage_map.get(stage_name) if isinstance(stage_map, dict) else {}
+        if not isinstance(entry, dict):
+            for fallback_map in self._workflow_stage_map.values():
+                if isinstance(fallback_map, dict) and isinstance(fallback_map.get(stage_name), dict):
+                    entry = fallback_map.get(stage_name) or {}
+                    break
         params = entry.get("parameters") if isinstance(entry, dict) else {}
         return dict(params) if isinstance(params, dict) else {}
 
@@ -631,58 +680,59 @@ class DistributedCoordinator:
             if str(item or "").strip()
         }
         plugin_tasks_all = domain_row.get("plugin_tasks") if isinstance(domain_row.get("plugin_tasks"), dict) else {}
-        workflow_tasks = plugin_tasks_all.get(self._workflow_id) if isinstance(plugin_tasks_all.get(self._workflow_id), dict) else {}
         target_counts = domain_row.get("targets") if isinstance(domain_row.get("targets"), dict) else {}
         scheduled_count = 0
-        for entry in self._workflow_entries:
-            plugin_name = str(entry.get("plugin_name") or entry.get("stage") or "").strip().lower()
-            if not plugin_name or not bool(entry.get("enabled", True)):
-                continue
-            if not self._is_stage_runtime_enabled(plugin_name):
-                continue
-            if not self._has_stage_prerequisites(
-                artifacts,
-                entry,
-                workflow_tasks=workflow_tasks,
-                target_counts=target_counts,
-            ):
-                continue
-            task_row = workflow_tasks.get(plugin_name) if isinstance(workflow_tasks.get(plugin_name), dict) else {}
-            status = str(task_row.get("status", "") or "").strip().lower()
-            attempt_count = _safe_int(task_row.get("attempt_count", 0), 0)
-            retry_failed = bool(entry.get("retry_failed", False))
-            max_attempts = max(0, _safe_int(entry.get("max_attempts", 0), 0))
-            if status in {"pending", "running", "completed", "failed"}:
-                continue
-            allow_retry_failed = False
-            resume_mode = str(entry.get("resume_mode") or "exact").strip().lower() or "exact"
-            details = self.client.enqueue_stage_detailed(
-                root_domain,
-                plugin_name,
-                workflow_id=self._workflow_id,
-                worker_id=worker_id,
-                reason=f"workflow:{entry.get('name', plugin_name)}",
-                allow_retry_failed=allow_retry_failed,
-                max_attempts=max_attempts,
-                checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
-                progress={"status": "queued", "plugin_name": plugin_name},
-                progress_artifact_type=f"workflow_progress_{plugin_name}",
-                resume_mode=resume_mode,
-            )
-            if bool(details.get("scheduled")):
-                scheduled_count += 1
-                self.logger.info(
-                    "workflow_task_scheduled",
+        workflow_catalog = dict(self._workflow_catalog)
+        for workflow_id, workflow_entries in workflow_catalog.items():
+            workflow_tasks = plugin_tasks_all.get(workflow_id) if isinstance(plugin_tasks_all.get(workflow_id), dict) else {}
+            for entry in workflow_entries:
+                plugin_name = str(entry.get("plugin_name") or entry.get("stage") or "").strip().lower()
+                if not plugin_name or not bool(entry.get("enabled", True)):
+                    continue
+                if not self._is_stage_runtime_enabled(plugin_name):
+                    continue
+                if not self._has_stage_prerequisites(
+                    artifacts,
+                    entry,
+                    workflow_tasks=workflow_tasks,
+                    target_counts=target_counts,
+                ):
+                    continue
+                task_row = workflow_tasks.get(plugin_name) if isinstance(workflow_tasks.get(plugin_name), dict) else {}
+                status = str(task_row.get("status", "") or "").strip().lower()
+                attempt_count = _safe_int(task_row.get("attempt_count", 0), 0)
+                retry_failed = bool(entry.get("retry_failed", False))
+                max_attempts = max(0, _safe_int(entry.get("max_attempts", 0), 0))
+                if status in {"pending", "running", "completed", "failed"}:
+                    continue
+                resume_mode = str(entry.get("resume_mode") or "exact").strip().lower() or "exact"
+                details = self.client.enqueue_stage_detailed(
+                    root_domain,
+                    plugin_name,
+                    workflow_id=workflow_id,
                     worker_id=worker_id,
-                    workflow_id=self._workflow_id,
-                    root_domain=root_domain,
-                    stage=plugin_name,
-                    prior_status=status or "none",
-                    attempt_count=attempt_count,
+                    reason=f"workflow:{entry.get('name', plugin_name)}",
+                    allow_retry_failed=False,
                     max_attempts=max_attempts,
-                    retry_failed=retry_failed,
-                    artifacts_available=sorted(artifacts),
+                    checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
+                    progress={"status": "queued", "plugin_name": plugin_name},
+                    progress_artifact_type=f"workflow_progress_{plugin_name}",
+                    resume_mode=resume_mode,
                 )
+                if bool(details.get("scheduled")):
+                    scheduled_count += 1
+                    self.logger.info(
+                        "workflow_task_scheduled",
+                        worker_id=worker_id,
+                        workflow_id=workflow_id,
+                        root_domain=root_domain,
+                        stage=plugin_name,
+                        prior_status=status or "none",
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                        retry_failed=retry_failed,
+                        artifacts_available=sorted(artifacts),
+                    )
         return scheduled_count
 
     def _workflow_scheduler_loop(self) -> None:
@@ -692,6 +742,7 @@ class DistributedCoordinator:
             "workflow_scheduler_loop_started",
             worker_id=worker_id,
             workflow_id=self._workflow_id,
+            workflow_ids=sorted(self._workflow_catalog.keys()),
             workflow_config=str(self.cfg.workflow_config),
             interval_seconds=float(self.cfg.workflow_scheduler_interval_seconds),
         )
@@ -2403,6 +2454,7 @@ class DistributedCoordinator:
             worker_id=worker_id,
             worker_index=idx,
             workflow_id=self._workflow_id,
+            workflow_ids=sorted(self._workflow_catalog.keys()),
             plugin_allowlist=self.cfg.plugin_allowlist,
         )
         while not self.stop_event.is_set():
@@ -2421,7 +2473,7 @@ class DistributedCoordinator:
                 entry = self.client.claim_next_stage(
                     worker_id=worker_id,
                     lease_seconds=self.cfg.lease_seconds,
-                    workflow_id=self._workflow_id,
+                    workflow_id="",
                     plugin_allowlist=self.cfg.plugin_allowlist,
                 )
             except Exception as exc:
@@ -2516,7 +2568,7 @@ class DistributedCoordinator:
                     heartbeat_kind="fozzy_stage",
                 )
                 heartbeat.start()
-                fozzy_params = self._workflow_stage_parameters("fozzy")
+                fozzy_params = self._workflow_stage_parameters(self._workflow_id, "fozzy")
                 max_background_workers = max(
                     1,
                     _safe_int(
@@ -2870,7 +2922,7 @@ class DistributedCoordinator:
                     heartbeat_kind="extractor_stage",
                 )
                 heartbeat.start()
-                extractor_params = self._workflow_stage_parameters("extractor")
+                extractor_params = self._workflow_stage_parameters(self._workflow_id, "extractor")
                 extractor_workers = max(
                     1,
                     _safe_int(
@@ -2967,7 +3019,7 @@ class DistributedCoordinator:
         threads: list[threading.Thread] = []
         if self.cfg.workflow_scheduler_enabled:
             threads.append(threading.Thread(target=self._workflow_scheduler_loop, daemon=True))
-        plugin_worker_count = max(1, int(self.cfg.plugin_workers or 1))
+        plugin_worker_count = max(0, int(self.cfg.plugin_workers or 0))
         for idx in range(1, plugin_worker_count + 1):
             t = threading.Thread(target=self._plugin_worker_loop, args=(idx,), daemon=True)
             threads.append(t)

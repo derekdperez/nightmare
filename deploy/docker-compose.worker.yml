@@ -19,4 +19,4 @@ services:
     command:
       - coordinator
       - --config
-      - config/coordinator.json
+      - config/coordinator.worker.json

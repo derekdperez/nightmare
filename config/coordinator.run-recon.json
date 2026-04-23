@@ -9,8 +9,8 @@
   "fozzy_config": "config/fozzy.json",
   "extractor_config": "config/extractor.json",
   "auth0r_config": "config/auth0r.json",
-  "workflow_config": "workflows/run-recon.workflow.json",
-  "workflow_scheduler_enabled": true,
+  "workflow_config": "workflows",
+  "workflow_scheduler_enabled": false,
   "workflow_scheduler_interval_seconds": 15.0,
   "plugin_workers": 6,
   "plugin_allowlist": []
