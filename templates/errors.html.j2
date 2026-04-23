@@ -27,9 +27,10 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Errors</h1>
-  <div class="meta">Central error feed for application, worker, and system-level events that are forwarded into the log database.</div>
+  <div class="meta">Central error feed for application, worker, and system-level events that are forwarded into the log database. Auto-refresh every 30s.</div>
 
   <div class="toolbar">
+    <input id="token" type="password" placeholder="Coordinator token">
     <input id="search" type="text" placeholder="Search description / stacktrace">
     <input id="machine" type="text" placeholder="Machine">
     <input id="program" type="text" placeholder="Program">

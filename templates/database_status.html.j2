@@ -31,7 +31,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>Database Status</h1>
-  <div class="meta">Shows current PostgreSQL status, all non-system tables, exact row counts, and up to the 20 most recent rows per table.</div>
+  <div class="meta">Shows current PostgreSQL status, all non-system tables, exact row counts, and up to the 20 most recent rows per table. Auto-refresh every 30s.</div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <button class="primary" onclick="refresh()">Refresh</button>
@@ -233,6 +233,7 @@
     document.getElementById("token").addEventListener("change", persistTokenCookie);
     document.getElementById("token").addEventListener("blur", persistTokenCookie);
     refresh({ useCacheFirst: true });
+    setInterval(() => refresh({ forceRefresh: true }), 30000);
   </script>
 </body>
 </html>

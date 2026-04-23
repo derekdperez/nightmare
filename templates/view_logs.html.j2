@@ -42,7 +42,7 @@
 <body>
   {% include '_navbar.html.j2' %}
   <h1>View Logs</h1>
-  <div class="meta">Fleet log viewer (central server + worker VMs + AWS console output). Time shown in EST (UTC-5).</div>
+  <div class="meta">Fleet log viewer (central server + worker VMs + AWS console output). Time shown in EST (UTC-5). Auto-refresh every 30s.</div>
   <div class="toolbar">
     <input id="token" type="password" placeholder="Coordinator token">
     <select id="sourceSelect"></select>
@@ -123,6 +123,7 @@
     const EVENTS_LOAD_TIMEOUT_MS = 45000;
     const DIAG_LOAD_TIMEOUT_MS = 90000;
     let logGridCtrl = null;
+    let autoRefreshInFlight = false;
 
     function esc(v){ return String(v ?? "").replace(/[&<>\"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch])); }
     function readCookie(name) {
@@ -504,6 +505,19 @@
       await loadEvents({ useCacheFirst: true });
       await runDiagnostics(false);
     })();
+    setInterval(() => {
+      if (autoRefreshInFlight) return;
+      autoRefreshInFlight = true;
+      (async () => {
+        await refreshSources(false);
+        await loadEvents();
+        await runDiagnostics(false);
+      })()
+        .catch(() => {})
+        .finally(() => {
+          autoRefreshInFlight = false;
+        });
+    }, 30000);
   </script>
 </body>
 </html>
