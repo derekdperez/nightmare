@@ -391,3 +391,11 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Normalize `link_graph` source/target URLs before computing inbound/outbound counts.
 - Crawl-progress UI convention:
   - `spider_stats` may be returned either as an array of structured rows or as a map (`{spider_name: count}`); renderers should support both formats.
+
+- Session-state parsing convention for coordinator reporting (`server_app/store.py`):
+  - Treat session payloads as shape-variant; extract discovery state from top-level `state`, nested `payload/session/data` wrappers, and URL-inventory style `entries(_raw)` lists.
+  - When session payload is missing/incomplete, fallback to `nightmare_url_inventory_json` artifact-derived pseudo-session data before reporting zero discovered URLs.
+
+- Worker log convention:
+  - Worker-facing current-run logs are mirrored to `output/_worker_logs/<worker_id>.current.log` during subprocess execution.
+  - Worker UI should prefer event metadata `log_path` for active-run link and fall back to newest discovered worker log file.

@@ -403,11 +403,14 @@
       if (!rows.length) { document.getElementById("rows").innerHTML = "<tr><td colspan='12'>No workers discovered yet.</td></tr>"; _updateSelectAllState(); return; }
       if (!visibleWorkers.length) { document.getElementById("rows").innerHTML = "<tr><td colspan='12'>No workers match current filters.</td></tr>"; _updateSelectAllState(); return; }
       document.getElementById("rows").innerHTML = visibleWorkers.map((w) => {
+        const currentRunLog = (w.current_run_log && w.current_run_log.relative)
+          ? `<a href="/files/${encodeURIComponent(w.current_run_log.relative).replace(/%2F/g, "/")}" target="_blank" rel="noopener noreferrer">${esc(w.current_run_log.label || "Current Run Log")}</a>`
+          : "";
         const logsList = (w.logs || []).map((l) => `<a href="/files/${encodeURIComponent(l.relative).replace(/%2F/g, "/")}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>`).join("<br>") || "<span class='muted'>none</span>";
         const logDownloadBtn = (Array.isArray(w.logs) && w.logs.length)
           ? `<button onclick="downloadWorkerLogs('${escJs(w.worker_id)}')">Download Logs</button><br>`
           : "";
-        const logs = `${logDownloadBtn}${logsList}`;
+        const logs = `${logDownloadBtn}${currentRunLog ? `${currentRunLog}<br>` : ""}${logsList}`;
         const runningLike = new Set(["running", "idle"]);
         const statusClass = runningLike.has(String(w.status || "")) ? "online" : "stale";
         const targets = (w.current_targets || []).map(esc).join("<br>") || "<span class='muted'>none</span>";

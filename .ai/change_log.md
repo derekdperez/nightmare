@@ -1435,3 +1435,24 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile server.py`
   - `pytest -q tests/test_refactor_modules.py -k "workflows_template_renders or http_requests_template_renders or server_template_renders or worker_template_renders"`
+
+## 2026-04-23
+
+- Fixed discovered URL visibility regressions on crawl/discovered-target views by hardening coordinator session parsing in `server_app/store.py`.
+  - Added payload-shape tolerant extraction for session state (`state`, nested `payload/session/data`, and URL inventory entry lists).
+  - Added fallback hydration from `nightmare_url_inventory_json` artifacts when session payloads are missing/partial.
+  - Removed strict artifact-fallback cap for crawl/discovered-target domain loaders so URL counts are populated consistently for requested page scope.
+- Why:
+  - Some coordinator rows/artifacts carry equivalent URL discovery data in different JSON shapes; strict state-only parsing caused `discovered_urls_count` to collapse to zero and sitemap rows to appear empty.
+
+- Added per-worker current-run log surfacing for Worker Control.
+  - `coordinator_app/runtime.py::run_subprocess(...)` now supports `mirror_log_path` and mirrors each run segment into a worker-level file.
+  - `coordinator.py` now mirrors all stage subprocess output into `output/_worker_logs/<worker_id>.current.log`.
+  - `server.py` now infers `current_run_log` from latest structured worker event metadata (`log_path`) with file-link fallback.
+  - `templates/worker_control.html.j2` now renders a dedicated current-run log link in each worker row.
+- Why:
+  - Existing worker log discovery relied on worker-id filename patterns, but active logs were domain/stage named and often not directly linkable per worker.
+
+- Validation:
+  - `python -m py_compile server_app/store.py server.py coordinator.py coordinator_app/runtime.py`
+  - `pytest -q tests/test_refactor_modules.py -k "worker_template_renders_database_link or crawl_progress_template_renders or discovered_targets_template_renders"`

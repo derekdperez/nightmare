@@ -492,6 +492,30 @@ def _latest_worker_log_line_from_links(logs: list[dict[str, Any]]) -> dict[str, 
     return {"message": message, "event_time_utc": event_time_utc}
 
 
+def _worker_log_link_from_event_metadata(log_info: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(log_info, dict):
+        return {}
+    metadata = log_info.get("metadata_json") if isinstance(log_info.get("metadata_json"), dict) else {}
+    log_path_raw = str(metadata.get("log_path") or "").strip()
+    if not log_path_raw:
+        return {}
+    try:
+        candidate = Path(log_path_raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (BASE_DIR / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+    except Exception:
+        return {}
+    if not candidate.is_file():
+        return {}
+    relative = _to_repo_relative_path(candidate)
+    if not relative:
+        return {}
+    label = f"Current Run: {candidate.name}"
+    return {"label": label, "relative": relative}
+
+
 def _enrich_worker_snapshot_with_live_details(
     snapshot: dict[str, Any],
     *,
@@ -515,6 +539,21 @@ def _enrich_worker_snapshot_with_live_details(
             continue
         worker_id = str(worker.get("worker_id") or "").strip()
         log_info = log_map.get(worker_id, {})
+        current_run_log = _worker_log_link_from_event_metadata(log_info)
+        if current_run_log:
+            worker["current_run_log"] = current_run_log
+            existing_logs = worker.get("logs") if isinstance(worker.get("logs"), list) else []
+            existing_relatives = {str(item.get("relative") or "").strip().lower() for item in existing_logs if isinstance(item, dict)}
+            rel_text = str(current_run_log.get("relative") or "").strip().lower()
+            if rel_text and rel_text not in existing_relatives:
+                worker["logs"] = [current_run_log, *existing_logs]
+        elif isinstance(worker.get("logs"), list) and worker.get("logs"):
+            first_log = next((item for item in worker.get("logs", []) if isinstance(item, dict)), None)
+            if isinstance(first_log, dict):
+                worker["current_run_log"] = {
+                    "label": str(first_log.get("label") or "Current Run Log"),
+                    "relative": str(first_log.get("relative") or ""),
+                }
         last_log_message = str(log_info.get("description") or "").strip() or str(log_info.get("raw_line") or "").strip()
         last_log_message_at_utc = str(log_info.get("event_time_utc") or "").strip()
         if not last_log_message:
@@ -6347,7 +6386,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             str(self.output_root.resolve() / f"**/*{wid}*.log"),
             str(self.app_root / f"**/*{wid}*.log"),
         ]
-        out: list[dict[str, str]] = []
+        discovered: list[tuple[float, dict[str, str]]] = []
         seen: set[str] = set()
         for pattern in patterns:
             for raw_path in glob.iglob(pattern, recursive=True):
@@ -6361,10 +6400,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append({"label": path.name, "relative": rel})
-                if len(out) >= 8:
-                    return out
-        return out
+                mtime = 0.0
+                try:
+                    mtime = float(path.stat().st_mtime)
+                except Exception:
+                    mtime = 0.0
+                discovered.append((mtime, {"label": path.name, "relative": rel}))
+        discovered.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in discovered[:12]]
 
     def _load_extractor_matches_domain(self, root_domain: str) -> Optional[dict[str, Any]]:
         rd = str(root_domain or "").strip().lower()

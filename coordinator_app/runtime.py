@@ -620,8 +620,19 @@ def _unzip_bytes_to_directory(content: bytes, target_dir: Path) -> None:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(zf.read(member))
 
-def run_subprocess(cmd: list[str], *, cwd: Path, log_path: Path) -> int:
+def run_subprocess(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    mirror_log_path: Path | None = None,
+) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    start_offset = 0
+    try:
+        start_offset = int(log_path.stat().st_size) if log_path.is_file() else 0
+    except Exception:
+        start_offset = 0
     with log_path.open("a", encoding="utf-8") as log_handle:
         log_handle.write(f"\n=== RUN {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n$ {' '.join(cmd)}\n")
         log_handle.flush()
@@ -680,6 +691,17 @@ def run_subprocess(cmd: list[str], *, cwd: Path, log_path: Path) -> int:
                     raw_line=tail,
                     metadata={"command": run_cmd, "log_path": str(log_path), "exit_code": exit_code},
                 )
+            except Exception:
+                pass
+        if isinstance(mirror_log_path, Path):
+            try:
+                mirror_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("r", encoding="utf-8", errors="replace") as src:
+                    src.seek(max(0, int(start_offset)))
+                    chunk = src.read()
+                if chunk:
+                    with mirror_log_path.open("a", encoding="utf-8") as mirror:
+                        mirror.write(chunk)
             except Exception:
                 pass
         return exit_code

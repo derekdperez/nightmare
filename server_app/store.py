@@ -833,6 +833,66 @@ WHERE entry_id = %s
             return {}
         return self._decode_json_bytes(bytes(artifact.get("content") or b""))
 
+    def _load_url_inventory_artifact_payload(self, root_domain: str) -> dict[str, Any]:
+        artifact = self.get_artifact(str(root_domain or "").strip().lower(), "nightmare_url_inventory_json")
+        if not isinstance(artifact, dict):
+            return {}
+        return self._decode_json_bytes(bytes(artifact.get("content") or b""))
+
+    def _iter_session_payload_candidates(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        queue: list[dict[str, Any]] = [payload] if isinstance(payload, dict) else []
+        seen: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            if not isinstance(current, dict):
+                continue
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            out.append(current)
+            for key in ("state", "payload", "session", "data"):
+                child = current.get(key)
+                if isinstance(child, dict):
+                    queue.append(child)
+        return out
+
+    def _extract_url_inventory_map(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for candidate in self._iter_session_payload_candidates(payload):
+            direct = candidate.get("url_inventory")
+            if isinstance(direct, dict):
+                for raw_url, raw_record in direct.items():
+                    url_text = str(raw_url or "").strip()
+                    if not url_text:
+                        continue
+                    out[url_text] = dict(raw_record) if isinstance(raw_record, dict) else {"url": url_text}
+            for entries_key in ("entries_raw", "entries"):
+                entries = candidate.get(entries_key)
+                if not isinstance(entries, list):
+                    continue
+                for row in entries:
+                    if not isinstance(row, dict):
+                        continue
+                    url_text = str(row.get("url") or row.get("requested_url") or "").strip()
+                    if not url_text:
+                        continue
+                    out[url_text] = dict(row)
+        return out
+
+    @staticmethod
+    def _extract_visited_urls_from_inventory(url_inventory: dict[str, dict[str, Any]]) -> list[str]:
+        visited: list[str] = []
+        for url_text, record in url_inventory.items():
+            if not isinstance(record, dict):
+                continue
+            was_crawled = bool(record.get("was_crawled") or record.get("crawl_requested"))
+            has_status = record.get("crawl_status_code") is not None or record.get("existence_status_code") is not None
+            if was_crawled or has_status:
+                visited.append(str(url_text))
+        return visited
+
 
     def _bulk_load_sessions(
         self,
@@ -958,6 +1018,60 @@ WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_session_json';
             if int(artifact_metrics.get("discovered_urls_count") or 0) > int(current_metrics.get("discovered_urls_count") or 0):
                 sessions_by_domain[rd] = normalized
 
+        still_missing: list[str] = []
+        for rd in ordered_domains:
+            metrics = self._session_url_metrics(sessions_by_domain.get(rd))
+            if not bool(metrics.get("has_session_data")):
+                still_missing.append(rd)
+        if artifact_fallback_limit is not None and still_missing:
+            fallback_cap = max(0, int(artifact_fallback_limit or 0))
+            still_missing = still_missing[:fallback_cap]
+        if still_missing:
+            inventory_sql = """
+SELECT root_domain, content, content_encoding, storage_uri, compression, updated_at_utc
+FROM coordinator_artifacts
+WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_url_inventory_json';
+"""
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(inventory_sql, (still_missing,))
+                    inventory_rows = cur.fetchall()
+                conn.commit()
+            for row in inventory_rows:
+                rd = str(row[0] or "").strip().lower()
+                if not rd:
+                    continue
+                content = bytes(row[1] or b"")
+                encoding = str(row[2] or "identity")
+                storage_uri = str(row[3] or "").strip()
+                compression = str(row[4] or "identity")
+                updated_at = row[5].isoformat() if row[5] else None
+                if storage_uri and (not content):
+                    try:
+                        content = self._artifact_store.get_bytes(storage_uri, compression=compression)
+                    except Exception:
+                        content = b""
+                if encoding == "gzip":
+                    try:
+                        content = gzip.decompress(content)
+                    except Exception:
+                        content = b""
+                inventory_payload = self._decode_json_bytes(content)
+                current = sessions_by_domain.get(rd) if isinstance(sessions_by_domain.get(rd), dict) else {}
+                normalized = self._normalize_session_payload(
+                    rd,
+                    inventory_payload,
+                    fallback_start_url=str(current.get("start_url") or ""),
+                    fallback_saved_at_utc=updated_at,
+                    fallback_max_pages=current.get("max_pages"),
+                )
+                if normalized is None:
+                    continue
+                current_metrics = self._session_url_metrics(current)
+                normalized_metrics = self._session_url_metrics(normalized)
+                if not bool(current_metrics.get("has_session_data")) or int(normalized_metrics.get("discovered_urls_count") or 0) >= int(current_metrics.get("discovered_urls_count") or 0):
+                    sessions_by_domain[rd] = normalized
+
         return sessions_by_domain
 
     def _normalize_session_payload(
@@ -972,35 +1086,131 @@ WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_session_json';
         body = payload if isinstance(payload, dict) else {}
         if not body:
             return None
-        state = body.get("state") if isinstance(body.get("state"), dict) else {}
-        frontier = body.get("frontier") if isinstance(body.get("frontier"), list) else []
-        start_url = str(body.get("start_url") or fallback_start_url or "").strip()
-        saved_at_utc = body.get("saved_at_utc") or fallback_saved_at_utc
-        max_pages = body.get("max_pages")
+        candidates = self._iter_session_payload_candidates(body)
+        state: dict[str, Any] = {}
+        frontier: list[Any] = []
+        start_url = ""
+        saved_at_utc = None
+        max_pages = None
+        for candidate in candidates:
+            if not start_url:
+                start_url = str(candidate.get("start_url") or "").strip()
+            if saved_at_utc is None:
+                candidate_saved = candidate.get("saved_at_utc")
+                if candidate_saved is not None:
+                    saved_at_utc = candidate_saved
+            if max_pages is None:
+                candidate_max = candidate.get("max_pages")
+                if candidate_max is not None:
+                    max_pages = candidate_max
+            if not frontier and isinstance(candidate.get("frontier"), list):
+                frontier = list(candidate.get("frontier") or [])
+            candidate_state = candidate.get("state")
+            if not state and isinstance(candidate_state, dict):
+                state = dict(candidate_state)
+        url_inventory = self._extract_url_inventory_map(body)
+        if not state:
+            discovered_urls = []
+            visited_urls = []
+            for candidate in candidates:
+                if not discovered_urls and isinstance(candidate.get("discovered_urls"), list):
+                    discovered_urls = [str(item or "").strip() for item in candidate.get("discovered_urls", []) if str(item or "").strip()]
+                if not visited_urls and isinstance(candidate.get("visited_urls"), list):
+                    visited_urls = [str(item or "").strip() for item in candidate.get("visited_urls", []) if str(item or "").strip()]
+            if not discovered_urls and url_inventory:
+                discovered_urls = sorted(url_inventory.keys())
+            if not visited_urls and url_inventory:
+                visited_urls = self._extract_visited_urls_from_inventory(url_inventory)
+            state = {
+                "discovered_urls": discovered_urls,
+                "visited_urls": visited_urls,
+                "url_inventory": url_inventory,
+            }
+        elif url_inventory and not isinstance(state.get("url_inventory"), dict):
+            state["url_inventory"] = url_inventory
+
+        if not start_url:
+            start_url = str(fallback_start_url or "").strip()
+        if saved_at_utc is None:
+            saved_at_utc = fallback_saved_at_utc
         if max_pages is None:
             max_pages = fallback_max_pages
-        return {
+
+        normalized_payload = {
             "root_domain": str(body.get("root_domain") or root_domain or "").strip().lower(),
+            "start_url": start_url,
+            "max_pages": max_pages,
+            "saved_at_utc": saved_at_utc,
+            "frontier": frontier,
+            "state": state,
+        }
+        return {
+            "root_domain": str(normalized_payload.get("root_domain") or root_domain or "").strip().lower(),
             "start_url": start_url,
             "max_pages": max_pages,
             "saved_at_utc": saved_at_utc,
             "state": state,
             "frontier": frontier,
-            "payload": body,
+            "payload": normalized_payload,
         }
 
 
     def _session_url_metrics(self, session: Optional[dict[str, Any]]) -> dict[str, Any]:
         body = session if isinstance(session, dict) else {}
-        state = body.get("state") if isinstance(body.get("state"), dict) else {}
-        frontier = body.get("frontier") if isinstance(body.get("frontier"), list) else []
-        discovered_urls = state.get("discovered_urls") if isinstance(state.get("discovered_urls"), list) else []
-        visited_urls = state.get("visited_urls") if isinstance(state.get("visited_urls"), list) else []
-        url_inventory = state.get("url_inventory") if isinstance(state.get("url_inventory"), dict) else {}
+        candidates = self._iter_session_payload_candidates(body) if body else []
+        state: dict[str, Any] = {}
+        frontier: list[Any] = []
+        discovered_urls: list[Any] = []
+        visited_urls: list[Any] = []
+        for candidate in candidates:
+            candidate_state = candidate.get("state")
+            if not state and isinstance(candidate_state, dict):
+                state = candidate_state
+            if not frontier and isinstance(candidate.get("frontier"), list):
+                frontier = candidate.get("frontier", [])
+            if not discovered_urls and isinstance(candidate.get("discovered_urls"), list):
+                discovered_urls = candidate.get("discovered_urls", [])
+            if not visited_urls and isinstance(candidate.get("visited_urls"), list):
+                visited_urls = candidate.get("visited_urls", [])
+        if isinstance(state.get("discovered_urls"), list):
+            discovered_urls = state.get("discovered_urls", [])
+        if isinstance(state.get("visited_urls"), list):
+            visited_urls = state.get("visited_urls", [])
+        url_inventory = self._extract_url_inventory_map(body) if body else {}
+        if not url_inventory and isinstance(state.get("url_inventory"), dict):
+            raw_inventory = state.get("url_inventory")
+            url_inventory = {
+                str(raw_url or "").strip(): (dict(raw_record) if isinstance(raw_record, dict) else {"url": str(raw_url or "").strip()})
+                for raw_url, raw_record in raw_inventory.items()
+                if str(raw_url or "").strip()
+            }
 
         discovered_urls_count = len(discovered_urls)
         if discovered_urls_count <= 0 and url_inventory:
             discovered_urls_count = len([u for u in url_inventory.keys() if str(u or "").strip()])
+        if discovered_urls_count <= 0:
+            for candidate in candidates:
+                for key in ("total_urls_raw", "total_urls", "entry_count", "unique_urls_discovered"):
+                    try:
+                        candidate_count = int(candidate.get(key) or 0)
+                    except Exception:
+                        candidate_count = 0
+                    if candidate_count > discovered_urls_count:
+                        discovered_urls_count = candidate_count
+
+        visited_urls_count = len(visited_urls)
+        if visited_urls_count <= 0 and url_inventory:
+            visited_urls_count = len(self._extract_visited_urls_from_inventory(url_inventory))
+
+        frontier_count = len(frontier)
+        if frontier_count <= 0:
+            for candidate in candidates:
+                try:
+                    candidate_frontier = int(candidate.get("frontier_count") or 0)
+                except Exception:
+                    candidate_frontier = 0
+                if candidate_frontier > frontier_count:
+                    frontier_count = candidate_frontier
 
         method_counts: dict[str, int] = {}
         spider_stats: dict[str, int] = {}
@@ -1026,14 +1236,14 @@ WHERE root_domain = ANY(%s) AND artifact_type = 'nightmare_session_json';
 
         return {
             "discovered_urls_count": discovered_urls_count,
-            "visited_urls_count": len(visited_urls),
-            "frontier_count": len(frontier),
+            "visited_urls_count": visited_urls_count,
+            "frontier_count": frontier_count,
             "method_counts": method_counts,
             "spider_stats": spider_stats,
             "has_session_data": bool(body) and (
                 discovered_urls_count > 0
-                or len(visited_urls) > 0
-                or len(frontier) > 0
+                or visited_urls_count > 0
+                or frontier_count > 0
                 or bool(url_inventory)
             ),
         }
@@ -1069,10 +1279,9 @@ WHERE root_domain = %s;
         if not include_artifact_fallback:
             return db_session
         artifact_session = self._normalize_session_payload(rd, self._load_session_artifact_payload(rd))
-        if artifact_session is None:
-            return db_session
-        if db_session is None:
-            return artifact_session
+        selected_session = db_session
+        if artifact_session is not None and selected_session is None:
+            selected_session = artifact_session
         def _parse_ts(value: Any) -> Optional[datetime]:
             raw = str(value or "").strip()
             if not raw:
@@ -1081,17 +1290,35 @@ WHERE root_domain = %s;
                 return datetime.fromisoformat(raw.replace("Z", "+00:00"))
             except Exception:
                 return None
-        db_saved = _parse_ts(db_session.get("saved_at_utc"))
-        artifact_saved = _parse_ts(artifact_session.get("saved_at_utc"))
-        if artifact_saved and (db_saved is None or artifact_saved >= db_saved):
-            return artifact_session
-        db_state = db_session.get("state") if isinstance(db_session.get("state"), dict) else {}
-        artifact_state = artifact_session.get("state") if isinstance(artifact_session.get("state"), dict) else {}
-        db_urls = db_state.get("discovered_urls") if isinstance(db_state.get("discovered_urls"), list) else []
-        artifact_urls = artifact_state.get("discovered_urls") if isinstance(artifact_state.get("discovered_urls"), list) else []
-        if len(artifact_urls) > len(db_urls):
-            return artifact_session
-        return db_session
+        if artifact_session is not None and db_session is not None:
+            db_saved = _parse_ts(db_session.get("saved_at_utc"))
+            artifact_saved = _parse_ts(artifact_session.get("saved_at_utc"))
+            if artifact_saved and (db_saved is None or artifact_saved >= db_saved):
+                selected_session = artifact_session
+            else:
+                db_metrics = self._session_url_metrics(db_session)
+                artifact_metrics = self._session_url_metrics(artifact_session)
+                if int(artifact_metrics.get("discovered_urls_count") or 0) > int(db_metrics.get("discovered_urls_count") or 0):
+                    selected_session = artifact_session
+
+        selected_metrics = self._session_url_metrics(selected_session)
+        if bool(selected_metrics.get("has_session_data")):
+            return selected_session
+
+        inventory_payload = self._load_url_inventory_artifact_payload(rd)
+        inventory_session = self._normalize_session_payload(
+            rd,
+            inventory_payload,
+            fallback_start_url=str((selected_session or {}).get("start_url") or ""),
+            fallback_saved_at_utc=str((selected_session or {}).get("saved_at_utc") or "") or None,
+            fallback_max_pages=(selected_session or {}).get("max_pages"),
+        )
+        if inventory_session is None:
+            return selected_session
+        inventory_metrics = self._session_url_metrics(inventory_session)
+        if bool(inventory_metrics.get("has_session_data")):
+            return inventory_session
+        return selected_session
 
     def save_session(
         self,
@@ -1638,7 +1865,7 @@ LIMIT %s;
         sessions_by_domain = self._bulk_load_sessions(
             ordered_domains,
             include_artifact_fallback=True,
-            artifact_fallback_limit=max(25, min(250, len(ordered_domains))),
+            artifact_fallback_limit=None,
         )
 
         now_utc = datetime.now(timezone.utc)
@@ -1846,7 +2073,7 @@ LIMIT %s;
         sessions_by_domain = self._bulk_load_sessions(
             ordered_domains,
             include_artifact_fallback=True,
-            artifact_fallback_limit=max(25, min(300, len(ordered_domains))),
+            artifact_fallback_limit=None,
         )
 
         rows_out: list[dict[str, Any]] = []
