@@ -48,16 +48,9 @@
     .form-grid .full { grid-column: 1 / -1; }
     label { display: grid; gap: 4px; font-size: 12px; color: #334155; }
     .result-box { border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; padding: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
-    .step-table textarea { width: 100%; min-height: 90px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
-    .step-table input[type="text"] { width: 100%; min-width: 80px; }
-    .step-table .precond { max-width: 280px; white-space: pre-wrap; font-size: 11px; }
-    .recon-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    .recon-grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
-    .recon-grid .full { grid-column: 1 / -1; }
     @media (max-width: 1200px) {
       .layout { grid-template-columns: 1fr; }
       .table-wrap { max-height: 42vh; }
-      .recon-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -99,7 +92,6 @@
   <div class="tabbar">
     <button id="tabMonitor" class="tab-btn active" type="button">Monitor</button>
     <button id="tabTimeline" class="tab-btn" type="button">Timeline</button>
-    <button id="tabRecon" class="tab-btn" type="button">Run Recon</button>
   </div>
 
   <div id="monitorPane" class="view-pane active">
@@ -254,54 +246,9 @@
     </section>
   </div>
 
-  <div id="reconPane" class="view-pane">
-    <section class="panel">
-      <h2>Recon Workflow Control</h2>
-      <div class="meta">Configure plugin variables, run `run-recon` for all known domains, and keep only workflow workers active.</div>
-      <div class="recon-actions">
-        <label>Workflow ID
-          <input id="reconWorkflowId" type="text" value="run-recon">
-        </label>
-        <button type="button" id="reconLoadConfig">Load Config</button>
-        <button type="button" id="reconSaveConfig" class="primary">Save Config</button>
-        <button type="button" id="reconReloadWorkers">Reload Workflow Workers</button>
-        <button type="button" id="reconWorkflowOnly">Workflow-Only Mode</button>
-        <button type="button" id="reconStartAll" class="primary">Start For All Domains</button>
-      </div>
-      <div class="recon-grid">
-        <div class="full table-wrap">
-          <table class="step-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Plugin</th>
-                <th>Enabled</th>
-                <th>Retry Failed</th>
-                <th>Max Attempts</th>
-                <th>Preconditions</th>
-                <th>Parameters (JSON)</th>
-              </tr>
-            </thead>
-            <tbody id="reconStepRows">
-              <tr><td colspan="7" class="muted">Load workflow config to edit recon step variables.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <section class="panel">
-          <h2>Config Result</h2>
-          <div id="reconConfigResult" class="result-box muted">No config operation yet.</div>
-        </section>
-        <section class="panel">
-          <h2>Run Result</h2>
-          <div id="reconRunResult" class="result-box muted">No workflow run action yet.</div>
-        </section>
-      </div>
-    </section>
-  </div>
-
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
-    const state = { paused: false, timer: null, snapshot: null, events: [], selectedDomain: "", activeTab: "monitor", workflowConfig: null };
+    const state = { paused: false, timer: null, snapshot: null, events: [], selectedDomain: "", activeTab: "monitor" };
 
     function readCookie(name) {
       const needle = `${name}=`;
@@ -339,14 +286,12 @@
       label.textContent = text;
     }
     function setActiveTab(tab) {
-      const next = (tab === "timeline" || tab === "recon") ? tab : "monitor";
+      const next = tab === "timeline" ? "timeline" : "monitor";
       state.activeTab = next;
       document.getElementById("tabMonitor").classList.toggle("active", next === "monitor");
       document.getElementById("tabTimeline").classList.toggle("active", next === "timeline");
-      document.getElementById("tabRecon").classList.toggle("active", next === "recon");
       document.getElementById("monitorPane").classList.toggle("active", next === "monitor");
       document.getElementById("timelinePane").classList.toggle("active", next === "timeline");
-      document.getElementById("reconPane").classList.toggle("active", next === "recon");
     }
     function escapeHtml(value) {
       return String(value ?? "")
@@ -601,131 +546,6 @@
         </tr>
       `).join("");
     }
-    function workflowPluginName(plugin) {
-      if (!plugin || typeof plugin !== "object") return "";
-      return String(plugin.name || plugin.plugin_name || plugin.stage || "").trim().toLowerCase();
-    }
-    function prettyJson(value) {
-      try {
-        return JSON.stringify(value ?? {}, null, 2);
-      } catch (_error) {
-        return "{}";
-      }
-    }
-    function renderReconSteps() {
-      const body = document.getElementById("reconStepRows");
-      const workflow = state.workflowConfig;
-      const plugins = (workflow && Array.isArray(workflow.plugins)) ? workflow.plugins : [];
-      if (!plugins.length) {
-        body.innerHTML = '<tr><td colspan="7" class="muted">No plugin steps found in workflow config.</td></tr>';
-        return;
-      }
-      body.innerHTML = plugins.map((plugin, index) => {
-        const pluginName = workflowPluginName(plugin);
-        const preconditions = plugin.preconditions || plugin.prerequisites || {};
-        const retryFailed = Boolean(plugin.retry_failed);
-        const maxAttempts = Number(plugin.max_attempts || 0);
-        return `
-          <tr data-plugin-index="${index}">
-            <td>${index + 1}</td>
-            <td class="mono">${escapeHtml(pluginName)}</td>
-            <td><input type="checkbox" data-field="enabled" ${Boolean(plugin.enabled ?? true) ? "checked" : ""}></td>
-            <td><input type="checkbox" data-field="retry_failed" ${retryFailed ? "checked" : ""}></td>
-            <td><input type="text" data-field="max_attempts" value="${escapeHtml(String(maxAttempts))}"></td>
-            <td class="precond mono">${escapeHtml(prettyJson(preconditions))}</td>
-            <td><textarea data-field="parameters">${escapeHtml(prettyJson(plugin.parameters || {}))}</textarea></td>
-          </tr>
-        `;
-      }).join("");
-    }
-    function collectReconWorkflowFromUi() {
-      const workflow = state.workflowConfig;
-      if (!workflow || typeof workflow !== "object") throw new Error("workflow config is not loaded");
-      const plugins = Array.isArray(workflow.plugins) ? workflow.plugins : [];
-      const rows = Array.from(document.querySelectorAll("#reconStepRows tr[data-plugin-index]"));
-      if (rows.length !== plugins.length) throw new Error("workflow step editor is out of sync; reload config");
-      const updatedPlugins = plugins.map((plugin, index) => {
-        const row = rows[index];
-        const enabled = Boolean(row.querySelector('input[data-field="enabled"]')?.checked);
-        const retryFailed = Boolean(row.querySelector('input[data-field="retry_failed"]')?.checked);
-        const maxAttemptsRaw = String(row.querySelector('input[data-field="max_attempts"]')?.value || "0").trim();
-        const maxAttempts = Number(maxAttemptsRaw);
-        if (!Number.isFinite(maxAttempts) || maxAttempts < 0) {
-          throw new Error(`invalid max_attempts at step ${index + 1}`);
-        }
-        const paramsRaw = String(row.querySelector('textarea[data-field="parameters"]')?.value || "{}").trim() || "{}";
-        let parameters = {};
-        try {
-          parameters = JSON.parse(paramsRaw);
-        } catch (error) {
-          throw new Error(`invalid JSON parameters at step ${index + 1}: ${error && error.message ? error.message : error}`);
-        }
-        if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
-          throw new Error(`parameters at step ${index + 1} must be a JSON object`);
-        }
-        return {
-          ...plugin,
-          name: workflowPluginName(plugin),
-          enabled,
-          retry_failed: retryFailed,
-          max_attempts: Math.floor(maxAttempts),
-          parameters,
-        };
-      });
-      return {
-        ...workflow,
-        workflow_id: String(document.getElementById("reconWorkflowId").value || workflow.workflow_id || "run-recon").trim().toLowerCase(),
-        plugins: updatedPlugins,
-      };
-    }
-    async function loadReconWorkflowConfig() {
-      const workflowId = String(document.getElementById("reconWorkflowId").value || "run-recon").trim().toLowerCase() || "run-recon";
-      const response = await fetch(`/api/coord/workflow-config?workflow_id=${encodeURIComponent(workflowId)}`, {
-        credentials: "same-origin",
-        headers: authHeaders(),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      state.workflowConfig = (payload && typeof payload.workflow === "object") ? payload.workflow : null;
-      if (state.workflowConfig && state.workflowConfig.workflow_id) {
-        document.getElementById("reconWorkflowId").value = String(state.workflowConfig.workflow_id);
-      }
-      renderReconSteps();
-      document.getElementById("reconConfigResult").textContent = JSON.stringify(payload, null, 2);
-    }
-    async function saveReconWorkflowConfig() {
-      if (!state.workflowConfig) {
-        await loadReconWorkflowConfig();
-      }
-      const workflow = collectReconWorkflowFromUi();
-      const payload = await postJson("/api/coord/workflow-config", { workflow });
-      state.workflowConfig = (payload && typeof payload.workflow === "object") ? payload.workflow : workflow;
-      renderReconSteps();
-      document.getElementById("reconConfigResult").textContent = JSON.stringify(payload, null, 2);
-      return payload;
-    }
-    async function setWorkflowMode(mode) {
-      const payload = await postJson("/api/coord/workflow/mode", { mode });
-      document.getElementById("reconRunResult").textContent = JSON.stringify(payload, null, 2);
-      return payload;
-    }
-    async function reloadWorkflowWorkers() {
-      const payload = await postJson("/api/coord/workflow/reload", {
-        workflow_id: String(document.getElementById("reconWorkflowId").value || "run-recon").trim().toLowerCase() || "run-recon",
-      });
-      document.getElementById("reconRunResult").textContent = JSON.stringify(payload, null, 2);
-      return payload;
-    }
-    async function startReconForAllDomains() {
-      const workflowId = String(document.getElementById("reconWorkflowId").value || "run-recon").trim().toLowerCase() || "run-recon";
-      const payload = await postJson("/api/coord/workflow/run", {
-        workflow_id: workflowId,
-        reason: "manual_run_from_workflow_ui",
-      });
-      document.getElementById("reconRunResult").textContent = JSON.stringify(payload, null, 2);
-      await refreshAllData();
-      return payload;
-    }
     function updateCards(domains) {
       const payload = state.snapshot || {};
       let visibleTaskCount = 0;
@@ -884,7 +704,6 @@
     }
     document.getElementById("tabMonitor").addEventListener("click", () => setTabWithHash("monitor"));
     document.getElementById("tabTimeline").addEventListener("click", () => setTabWithHash("timeline"));
-    document.getElementById("tabRecon").addEventListener("click", () => setTabWithHash("recon"));
     document.getElementById("applySelectionToTimeline").addEventListener("click", () => {
       document.getElementById("eventDomainFilter").value = String(state.selectedDomain || "");
       document.getElementById("eventWorkflowFilter").value = document.getElementById("searchWorkflow").value.trim().toLowerCase();
@@ -892,48 +711,10 @@
       setTabWithHash("timeline");
       renderAll();
     });
-    document.getElementById("reconLoadConfig").addEventListener("click", async () => {
-      try {
-        await loadReconWorkflowConfig();
-      } catch (error) {
-        document.getElementById("reconConfigResult").textContent = String(error && error.message ? error.message : error);
-      }
-    });
-    document.getElementById("reconSaveConfig").addEventListener("click", async () => {
-      try {
-        await saveReconWorkflowConfig();
-      } catch (error) {
-        document.getElementById("reconConfigResult").textContent = String(error && error.message ? error.message : error);
-      }
-    });
-    document.getElementById("reconReloadWorkers").addEventListener("click", async () => {
-      try {
-        await reloadWorkflowWorkers();
-      } catch (error) {
-        document.getElementById("reconRunResult").textContent = String(error && error.message ? error.message : error);
-      }
-    });
-    document.getElementById("reconWorkflowOnly").addEventListener("click", async () => {
-      try {
-        await setWorkflowMode("workflow_only");
-      } catch (error) {
-        document.getElementById("reconRunResult").textContent = String(error && error.message ? error.message : error);
-      }
-    });
-    document.getElementById("reconStartAll").addEventListener("click", async () => {
-      try {
-        await saveReconWorkflowConfig();
-        await setWorkflowMode("workflow_only");
-        await reloadWorkflowWorkers();
-        await startReconForAllDomains();
-      } catch (error) {
-        document.getElementById("reconRunResult").textContent = String(error && error.message ? error.message : error);
-      }
-    });
 
     function applyTabFromHash() {
       const hash = String(window.location.hash || "").replace(/^#/, "").trim().toLowerCase();
-      if (hash === "timeline" || hash === "recon") setActiveTab(hash);
+      if (hash === "timeline") setActiveTab("timeline");
       else setActiveTab("monitor");
     }
     window.addEventListener("hashchange", applyTabFromHash);
@@ -941,9 +722,6 @@
     hydrateTokenFromCookie();
     scheduleRefresh();
     refreshAllData();
-    loadReconWorkflowConfig().catch((error) => {
-      document.getElementById("reconConfigResult").textContent = String(error && error.message ? error.message : error);
-    });
     applyTabFromHash();
   </script>
 </body>
