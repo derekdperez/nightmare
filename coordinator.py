@@ -586,12 +586,20 @@ class DistributedCoordinator:
         # Per-tool enable flags are legacy/deprecated and intentionally ignored.
         return True
 
-    def _workflow_stage_parameters(self, workflow_id: str, stage: str) -> dict[str, Any]:
-        wid = str(workflow_id or "").strip().lower()
-        stage_name = str(stage or "").strip().lower()
-        stage_map = self._workflow_stage_map.get(wid) if isinstance(self._workflow_stage_map.get(wid), dict) else {}
-        entry = stage_map.get(stage_name) if isinstance(stage_map, dict) else {}
-        if not isinstance(entry, dict):
+    def _workflow_stage_parameters(self, workflow_id: str, stage: str | None = None) -> dict[str, Any]:
+        if stage is None:
+            wid = ""
+            stage_name = str(workflow_id or "").strip().lower()
+        else:
+            wid = str(workflow_id or "").strip().lower()
+            stage_name = str(stage or "").strip().lower()
+        entry: dict[str, Any] = {}
+        stage_map = self._workflow_stage_map.get(wid) if wid and isinstance(self._workflow_stage_map.get(wid), dict) else {}
+        if isinstance(stage_map, dict):
+            maybe_entry = stage_map.get(stage_name)
+            if isinstance(maybe_entry, dict):
+                entry = maybe_entry
+        if not entry:
             for fallback_map in self._workflow_stage_map.values():
                 if isinstance(fallback_map, dict) and isinstance(fallback_map.get(stage_name), dict):
                     entry = fallback_map.get(stage_name) or {}
@@ -1274,7 +1282,12 @@ class DistributedCoordinator:
         root_domain: str,
         plugin_name: str,
     ) -> tuple[int, str]:
-        entry = self._workflow_stage_map.get(plugin_name, {})
+        entry: dict[str, Any] = {}
+        stage_name = str(plugin_name or "").strip().lower()
+        for stage_map in self._workflow_stage_map.values():
+            if isinstance(stage_map, dict) and isinstance(stage_map.get(stage_name), dict):
+                entry = stage_map.get(stage_name) or {}
+                break
         prereq = entry.get("prerequisites") if isinstance(entry, dict) else {}
         if not isinstance(prereq, dict):
             prereq = {}
