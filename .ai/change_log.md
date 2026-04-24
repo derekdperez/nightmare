@@ -1642,3 +1642,50 @@ ightmare.py and ozzy.py to delegate to these modules via compatibility wrappers
 - Validation:
   - `python -m py_compile server_app/store.py coordinator.py tests/test_stage_prerequisites_target_status.py tests/test_reporting_and_store_helpers.py`
   - `pytest -q tests/test_stage_prerequisites_target_status.py tests/test_reporting_and_store_helpers.py -k "prerequisite_check or claim_next_stage_allows_recon_subdomain_enumeration_while_target_running or claim_next_stage_respects_running_target_domain_lock"`
+
+- Added workflow interface extension for config-defined control/results pages.
+  - Workflow files can now declare `interfaces` entries (`control`/`results`) with route/template metadata.
+  - `server.py` discovers these interface configs and:
+    - auto-registers dynamic HTML routes from workflow config at startup/runtime,
+    - exposes interface catalog via `GET /api/coord/workflow-interfaces`,
+    - refreshes interface catalog after workflow-config saves.
+  - Shared navbar (`templates/_navbar.html.j2`) now hydrates workflow interface links dynamically from the interface catalog API.
+
+- Added first recon workflow control/results interfaces.
+  - New templates:
+    - `templates/workflow_interfaces/recon_control.html.j2`
+    - `templates/workflow_interfaces/recon_results.html.j2`
+  - `workflows/run-recon.workflow.json` now declares both interface pages (also mirrored in `workflows/coordinator.workflow.json` and `workflows/run-recon.workflow_1.json`).
+  - Recon control page supports:
+    - searchable/filterable multi-domain target selection + `ALL` target mode,
+    - workflow step selection with per-step configure modal (JSON parameters),
+    - generate workflow tasks action,
+    - clear generated workflow tasks action with running-task warning.
+  - Recon results page supports:
+    - per-domain recon metrics table,
+    - subdomain-count modal drilldown,
+    - actions: clear workflow data, clear tasks, open request/response data.
+
+- Added supporting APIs for interface and recon workflow controls.
+  - `GET /api/coord/workflow-interface/recon/domains`
+  - `GET /api/coord/workflow-interface/recon/results`
+  - `GET /api/coord/workflow-interface/recon/subdomains`
+  - `POST /api/coord/workflow/clear-generated-tasks`
+  - `POST /api/coord/workflow/clear-data`
+  - Extended `POST /api/coord/workflow/run` to support:
+    - plugin allowlist (`plugins`),
+    - per-plugin parameter overrides (`plugin_parameter_overrides`),
+    - optional workflow-file persistence + worker reload command queueing.
+  - Added `CoordinatorStore` helpers for data cleanup:
+    - `delete_artifacts(...)`
+    - `delete_sessions(...)`
+
+- UX/supporting updates:
+  - `templates/http_requests.html.j2` now respects query params (`root_domain`, `q`) for deep-link filtering.
+  - Added tests:
+    - `tests/test_workflow_interface_config.py`
+
+- Validation:
+  - `python -m py_compile server.py server_app/store.py server_app/fastapi_app.py tests/test_workflow_interface_config.py`
+  - `pytest -q tests/test_workflow_interface_config.py tests/test_refactor_modules.py -k "workflow or navbar or http_requests_template_renders"`
+  - `pytest -q tests/test_reporting_and_store_helpers.py -k "render_workflows_html_contains_expected_heading or claim_next_stage_respects_running_target_domain_lock"`

@@ -458,3 +458,13 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - `coordinator_targets` currently has a running lease for that domain.
   - Target aggregate status resolves to `failed`.
   - Keep the target-running domain lock for non-bootstrap stages to avoid cross-lane request contention.
+
+- Workflow interface discovery convention:
+  - Workflow config may define `interfaces` (for example `control`, `results`) with route/template metadata.
+  - UI routes for these interfaces are discovered from workflow config at server load/runtime and exposed in the shared navbar automatically.
+  - Interface templates must live under `templates/` and use safe relative paths.
+
+- Recon workflow control-plane convention:
+  - Generate-task actions should support domain subset + plugin subset scheduling and optional per-plugin parameter overrides persisted back to workflow config.
+  - Clearing generated tasks should delete non-running matching stage-task rows and explicitly report remaining running tasks/workers.
+  - Domain-scoped workflow data cleanup should remove workflow-produced artifacts and coordinator session rows for that domain.

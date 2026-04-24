@@ -31,3 +31,5 @@
 - Page-cache policy tuning:
   - Confirm preferred production TTL and warm intervals for server-side page caches (current defaults are short, hard-coded values in `server.py`).
   - Confirm whether sitemap warmer should cover only top domains (current: first 3) or be configurable by fleet size.
+- Recon takeover summary contract:
+  - Confirm canonical JSON fields for takeover-count reporting in `recon_subdomain_takeover_summary_json`; current results interface supports multiple fallback keys for compatibility.

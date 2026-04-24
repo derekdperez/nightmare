@@ -1,5 +1,15 @@
-Todo:
+- The Recon Control and Recon Results pages are both appearing twice in the navigation buttons. They should only appear once each.
 
-Remove these pages: Dashboard, Run Recon
-Add this page: HTTP requests 
-HTTP Requests will contain a list of ALL requests made by any worker, and when available, the response content for that request. Each request should create a row in a data table that shows the domain, requested url, request type (get, post, etc), request headers, request body the request size, response code, response size, response time, response headers, response body, and links to load the request or response contents. The text in the data table cells should contain the full content, but each column needs a max size of 15% of the viewport width, and it should have a maximum row height of 3x the default row size. After that, the cell will cut off any extra text, but the cell msut still contain it - double clicking a cell to select the entire text should highlight the full content even if it is not visible.
+- Remove the following pages: Operations, Plugins, Workflw Runs, Fuzzing, Events, Auth0r, and Errors
+
+- Move the Crawl Progress, Discovered Targets, Discovered Files, and Extractor Matches functionality to the Recon Results workflow output page, and then remove those pages as well.  
+
+- The remaining pages should be: Workers, Workflows, any workflow-generated pages, Workflow Builder, Database, Docker Status, and View Logs.
+
+- Generating workflow tasks on the Recon Control page says it is generating tasks, but they do not appear on the Workflow Monitor page.
+
+- Remove the Enqueue Plugin Task and Reset Plugin Task sections from the Workflows page.
+
+- Remove the Monitor and Timeline buttons from the Workflow page.
+
+- In the Plugin Tasks section on the Workflows page, add the following to the Actions column: "Delete" - this deletes the task entirely. "Pause" - this sets the task to Paused, so no workers will pick it up for processing. "Run" - this causes a worker to pick the task up and begin processing, even if all prerequisites are not met.

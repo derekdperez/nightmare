@@ -245,3 +245,16 @@ ightmare_app/spider_url_policy.py) and fuzz request/model core (ozzy_app/fuzz_c
 - Discovered-target data-shape boundary refinement (2026-04-23):
   - Coordinator session payloads may encode URL inventory and link graph with relative URLs while still representing valid crawl findings.
   - Sitemap APIs should normalize URL forms (absolute + relative) at read time to keep paging/filtering/export features stable across mixed crawler payload formats.
+
+- Workflow interface extension (2026-04-24):
+  - Added a workflow-config-driven UI interface layer in `server.py`.
+  - Workflow files can now declare interface pages (control/results) that are:
+    - discovered into route mappings,
+    - auto-linked into navbar via `GET /api/coord/workflow-interfaces`,
+    - rendered through safe template-path validation under `templates/`.
+  - Recon now has dedicated interface templates:
+    - control page for domain/step selection, per-step configuration, and task generation/clearing,
+    - results page for per-domain recon metrics + cleanup/action controls.
+  - Added API-side cleanup boundaries:
+    - generated-task clearing (`/api/coord/workflow/clear-generated-tasks`),
+    - workflow data clearing (`/api/coord/workflow/clear-data`) using new store deletion helpers.
