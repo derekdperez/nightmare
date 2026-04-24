@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ workflow_interface.title or "Recon Results" }}</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; background: #f8fafc; color: #0f172a; }
+    h1 { margin: 0 0 6px; }
+    h2 { margin: 0 0 10px; font-size: 16px; }
+    .muted { color: #64748b; font-size: 13px; }
+    .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; margin-top: 12px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    input, select { border: 1px solid #94a3b8; border-radius: 6px; padding: 6px 8px; }
+    button { border: 1px solid #94a3b8; background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: #fff; }
+    .table-wrap { overflow: auto; border: 1px solid #cbd5e1; border-radius: 8px; max-height: 64vh; }
+    .table-wrap.small { max-height: 38vh; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #cbd5e1; font-size: 12px; text-align: left; padding: 6px 8px; vertical-align: top; }
+    th { background: #f1f5f9; position: sticky; top: 0; z-index: 1; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .status { font-size: 12px; margin-top: 10px; white-space: pre-wrap; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px; min-height: 54px; }
+    .link-btn { border: 0; background: transparent; color: #1d4ed8; padding: 0; cursor: pointer; text-decoration: underline; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.45); display: none; align-items: center; justify-content: center; z-index: 100; }
+    .modal { width: min(780px, 92vw); max-height: 86vh; overflow: auto; background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 12px; }
+    .subdomain-list { columns: 2; gap: 16px; }
+    .subdomain-list li { break-inside: avoid; margin: 0 0 4px; }
+    .split { display: grid; gap: 10px; grid-template-columns: minmax(280px, 1fr) minmax(420px, 2fr); }
+    .selected { background: #ecfeff; }
+    @media (max-width: 1200px) { .subdomain-list { columns: 1; } .split { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  {% include '_navbar.html.j2' %}
+  <h1>{{ workflow_interface.title or "Recon Workflow Results" }}</h1>
+  <div class="muted">{{ workflow_interface.description or "Operational view of recon results and cleanup actions by target." }}</div>
+
+  <section class="panel">
+    <h2>Recon Summary</h2>
+    <div class="toolbar">
+      <input id="token" type="password" placeholder="Coordinator token">
+      <input id="search" type="text" placeholder="Search domain">
+      <select id="limit">
+        <option value="100">100</option>
+        <option value="250" selected>250</option>
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+      </select>
+      <button type="button" class="primary" id="refreshBtn">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Domain</th>
+            <th>Subdomains</th>
+            <th>URLs Discovered</th>
+            <th>Requests</th>
+            <th>URLs In Queue</th>
+            <th>Potential Takeovers</th>
+            <th>High Value Targets</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="8" class="muted">Loading results...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="statusBox" class="status muted">Ready.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Crawl Progress</h2>
+    <div class="toolbar">
+      <input id="crawlSearch" type="text" placeholder="Filter domain">
+      <input id="crawlLimit" type="number" min="1" max="5000" value="2500" style="max-width:120px;">
+      <button type="button" class="primary" id="crawlRefreshBtn">Refresh Crawl Progress</button>
+      <span id="crawlMeta" class="muted"></span>
+    </div>
+    <div class="table-wrap small">
+      <table>
+        <thead>
+          <tr>
+            <th>Domain</th>
+            <th>Phase</th>
+            <th>Found URLs</th>
+            <th>Visited</th>
+            <th>Frontier</th>
+            <th>Active Workers</th>
+            <th>Last Activity (UTC)</th>
+          </tr>
+        </thead>
+        <tbody id="crawlRows"><tr><td colspan="7" class="muted">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Discovered Targets</h2>
+    <div class="toolbar">
+      <input id="targetSearch" type="text" placeholder="Search domains">
+      <input id="targetLimit" type="number" min="10" max="2000" value="250" style="max-width:120px;">
+      <button type="button" class="primary" id="targetRefreshBtn">Refresh Target Domains</button>
+      <span id="targetMeta" class="muted"></span>
+    </div>
+    <div class="split">
+      <div class="table-wrap small">
+        <table>
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>URLs</th>
+              <th>Status</th>
+              <th>Saved</th>
+            </tr>
+          </thead>
+          <tbody id="targetDomainRows"><tr><td colspan="4" class="muted">Loading...</td></tr></tbody>
+        </table>
+      </div>
+      <div>
+        <div class="toolbar" style="margin-bottom:8px;">
+          <input id="targetUrlSearch" type="text" placeholder="Search URL rows">
+          <input id="targetUrlLimit" type="number" min="20" max="2000" value="300" style="max-width:120px;">
+          <button type="button" id="targetUrlRefreshBtn">Refresh URLs</button>
+          <span id="targetUrlMeta" class="muted"></span>
+        </div>
+        <div class="table-wrap small">
+          <table>
+            <thead>
+              <tr>
+                <th>URL</th>
+                <th>Subdomain</th>
+                <th>Status</th>
+                <th>Load ms</th>
+                <th>Size</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="targetSitemapRows"><tr><td colspan="6" class="muted">Select a domain.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Discovered Files</h2>
+    <div class="toolbar">
+      <input id="filesSearch" type="text" placeholder="Search files">
+      <input id="filesLimit" type="number" min="1" max="50000" value="2500" style="max-width:120px;">
+      <button type="button" class="primary" id="filesRefreshBtn">Refresh Files</button>
+      <span id="filesMeta" class="muted"></span>
+    </div>
+    <div class="split">
+      <div>
+        <div class="muted" style="margin-bottom:6px;">Stored Artifacts</div>
+        <div class="table-wrap small">
+          <table>
+            <thead>
+              <tr>
+                <th>Date/Time</th>
+                <th>Domain</th>
+                <th>URL</th>
+                <th>Artifact Type</th>
+                <th>Size</th>
+                <th>Download</th>
+              </tr>
+            </thead>
+            <tbody id="artifactRows"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:6px;">High Value Items</div>
+        <div class="table-wrap small">
+          <table>
+            <thead>
+              <tr>
+                <th>Date/Time</th>
+                <th>Domain</th>
+                <th>URL</th>
+                <th>Size</th>
+                <th>Download</th>
+              </tr>
+            </thead>
+            <tbody id="highValueRows"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Extractor Matches</h2>
+    <div class="toolbar">
+      <input id="extractorDomainSearch" type="text" placeholder="Search domains">
+      <select id="extractorDomainSelect" style="min-width: 320px;"></select>
+      <input id="extractorSearch" type="text" placeholder="Search matches">
+      <input id="extractorLimit" type="number" min="1" max="2000" value="250" style="max-width:120px;">
+      <button type="button" class="primary" id="extractorRefreshBtn">Refresh Matches</button>
+      <a id="extractorDownloadZip" href="#" target="_blank" rel="noopener noreferrer"><button type="button">Download Zip</button></a>
+      <span id="extractorMeta" class="muted"></span>
+    </div>
+    <div class="table-wrap small">
+      <table>
+        <thead>
+          <tr>
+            <th>Domain</th>
+            <th>Rule</th>
+            <th>Score</th>
+            <th>HTTP</th>
+            <th>URL</th>
+            <th>Preview</th>
+          </tr>
+        </thead>
+        <tbody id="extractorRows"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div id="subdomainBackdrop" class="modal-backdrop">
+    <div class="modal">
+      <h2 id="subdomainTitle">Subdomains</h2>
+      <ol id="subdomainList" class="subdomain-list"></ol>
+      <div class="toolbar">
+        <button type="button" id="closeSubdomainsBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const WORKFLOW_ID = "{{ workflow_id or 'run-recon' }}".trim().toLowerCase() || "run-recon";
+      const state = {
+        rows: [],
+        crawlRows: [],
+        targetDomains: [],
+        selectedTargetDomain: "",
+        targetSitemapRows: [],
+        artifactRows: [],
+        highValueRows: [],
+        extractorDomains: [],
+        extractorRows: [],
+      };
+
+      function authHeaders() {
+        if (window.NightmareAuth && typeof window.NightmareAuth.withAuthHeaders === "function") {
+          return window.NightmareAuth.withAuthHeaders({}).headers;
+        }
+        const token = String(document.getElementById("token").value || "").trim();
+        const headers = new Headers();
+        if (token) headers.set("Authorization", `Bearer ${token}`);
+        return headers;
+      }
+      async function fetchJson(url, init = {}) {
+        const rsp = await fetch(url, { ...init, headers: authHeaders(), credentials: "same-origin", cache: "no-store" });
+        const payload = await rsp.json().catch(() => ({}));
+        if (!rsp.ok) throw new Error(String(payload.error || payload.detail || `HTTP ${rsp.status}`));
+        return payload;
+      }
+      function setStatus(text, isError = false) {
+        const box = document.getElementById("statusBox");
+        box.textContent = String(text || "");
+        box.style.color = isError ? "#991b1b" : "#0f172a";
+      }
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[ch]));
+      }
+      function withAuthToken(path) {
+        const raw = String(path || "").trim();
+        if (!raw) return "";
+        const token = String(document.getElementById("token").value || "").trim();
+        if (!token) return raw;
+        const sep = raw.includes("?") ? "&" : "?";
+        return `${raw}${sep}coordinator_token=${encodeURIComponent(token)}`;
+      }
+
+      function renderReconRows() {
+        const tbody = document.getElementById("rows");
+        if (!state.rows.length) {
+          tbody.innerHTML = '<tr><td colspan="8" class="muted">No recon result rows found.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = state.rows.map((row) => {
+          const domain = String(row.root_domain || "");
+          return `
+            <tr>
+              <td class="mono">${escapeHtml(domain)}</td>
+              <td><button type="button" class="link-btn" data-subdomains="${escapeHtml(domain)}">${Number(row.subdomain_count || 0)}</button></td>
+              <td>${Number(row.discovered_url_count || 0)}</td>
+              <td>${Number(row.request_count || 0)}</td>
+              <td>${Number(row.urls_in_queue_count || 0)}</td>
+              <td>${Number(row.takeover_count || 0)}</td>
+              <td>${Number(row.high_value_count || 0)}</td>
+              <td>
+                <div class="actions">
+                  <button type="button" data-clear-data="${escapeHtml(domain)}">Clear Workflow Data</button>
+                  <button type="button" data-clear-tasks="${escapeHtml(domain)}">Clear All Tasks</button>
+                  <button type="button" data-open-rr="${escapeHtml(domain)}">Open Request/Response Data</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join("");
+        tbody.querySelectorAll("button[data-subdomains]").forEach((button) => {
+          button.addEventListener("click", () => showSubdomains(String(button.getAttribute("data-subdomains") || "")));
+        });
+        tbody.querySelectorAll("button[data-clear-data]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const domain = String(button.getAttribute("data-clear-data") || "");
+            try {
+              setStatus(`Clearing workflow data for ${domain}...`);
+              const payload = await fetchJson("/api/coord/workflow/clear-data", {
+                method: "POST",
+                body: JSON.stringify({ workflow_id: WORKFLOW_ID, root_domain: domain }),
+              });
+              setStatus(`Cleared workflow data for ${domain}. Deleted artifacts: ${payload.deleted_artifacts_total || 0}.`);
+              await loadReconRows();
+            } catch (err) {
+              setStatus(err.message || err, true);
+            }
+          });
+        });
+        tbody.querySelectorAll("button[data-clear-tasks]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const domain = String(button.getAttribute("data-clear-tasks") || "");
+            try {
+              setStatus(`Clearing workflow tasks for ${domain}...`);
+              let payload = await fetchJson("/api/coord/workflow/clear-generated-tasks", {
+                method: "POST",
+                body: JSON.stringify({
+                  workflow_id: WORKFLOW_ID,
+                  root_domains: [domain],
+                  hard_delete: true,
+                  stop_running_workers: false,
+                }),
+              });
+              const affected = Number((payload.result || {}).affected_rows || 0);
+              let running = Number(payload.running_tasks_remaining || 0);
+              if (running > 0) {
+                const workers = Array.isArray(payload.running_workers) ? payload.running_workers.join(", ") : "";
+                const shouldStop = window.confirm(
+                  `Cleared ${affected} task rows for ${domain}. ${running} tasks are still running and were not deleted.` +
+                  `${workers ? `\nRunning workers: ${workers}` : ""}\n\nQueue stop commands for those workers now?`
+                );
+                if (shouldStop) {
+                  setStatus(`Queueing stop commands for workers running ${domain} tasks...`);
+                  payload = await fetchJson("/api/coord/workflow/clear-generated-tasks", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      workflow_id: WORKFLOW_ID,
+                      root_domains: [domain],
+                      hard_delete: true,
+                      stop_running_workers: true,
+                    }),
+                  });
+                  running = Number(payload.running_tasks_remaining || 0);
+                  const stopQueued = Array.isArray(payload.stop_commands_queued) ? payload.stop_commands_queued.length : 0;
+                  if (running > 0) {
+                    setStatus(`Queued stop on ${stopQueued} workers for ${domain}. ${running} tasks still running; clear again after workers stop.`, true);
+                  } else {
+                    setStatus(`Queued stop on ${stopQueued} workers and cleared task rows for ${domain}.`);
+                  }
+                } else {
+                  setStatus(`Cleared ${affected} task rows for ${domain}. ${running} tasks are still running and were not deleted.`, true);
+                }
+              } else {
+                setStatus(`Cleared ${affected} task rows for ${domain}.`);
+              }
+              await loadReconRows();
+            } catch (err) {
+              setStatus(err.message || err, true);
+            }
+          });
+        });
+        tbody.querySelectorAll("button[data-open-rr]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const domain = String(button.getAttribute("data-open-rr") || "");
+            const url = `/http-requests?root_domain=${encodeURIComponent(domain)}`;
+            window.open(url, "_blank", "noopener");
+          });
+        });
+      }
+
+      function renderCrawlRows() {
+        const filter = String(document.getElementById("crawlSearch").value || "").trim().toLowerCase();
+        const rows = filter
+          ? state.crawlRows.filter((row) => String(row.root_domain || "").toLowerCase().includes(filter))
+          : state.crawlRows;
+        const tbody = document.getElementById("crawlRows");
+        if (!rows.length) {
+          tbody.innerHTML = '<tr><td colspan="7" class="muted">No crawl rows.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = rows.map((row) => `
+          <tr>
+            <td class="mono">${escapeHtml(row.root_domain || "")}</td>
+            <td>${escapeHtml(row.phase || "")}</td>
+            <td>${Number(row.discovered_urls_count || 0)}</td>
+            <td>${Number(row.visited_urls_count || 0)}</td>
+            <td>${Number(row.frontier_count || 0)}</td>
+            <td>${escapeHtml(Array.isArray(row.active_workers) ? row.active_workers.join(", ") : "")}</td>
+            <td class="mono">${escapeHtml(row.last_activity_at_utc || "")}</td>
+          </tr>
+        `).join("");
+      }
+
+      function renderTargetDomainRows() {
+        const tbody = document.getElementById("targetDomainRows");
+        if (!state.targetDomains.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="muted">No discovered target domains.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = state.targetDomains.map((row) => {
+          const domain = String(row.root_domain || "");
+          const selected = state.selectedTargetDomain === domain ? "selected" : "";
+          return `
+            <tr class="${selected}" data-target-domain="${escapeHtml(domain)}">
+              <td class="mono">${escapeHtml(domain)}</td>
+              <td>${Number(row.discovered_urls_count || 0)}</td>
+              <td>${escapeHtml(row.status || "")}</td>
+              <td class="mono">${escapeHtml(row.saved_at_utc || "")}</td>
+            </tr>
+          `;
+        }).join("");
+        tbody.querySelectorAll("tr[data-target-domain]").forEach((row) => {
+          row.addEventListener("click", async () => {
+            const domain = String(row.getAttribute("data-target-domain") || "");
+            if (!domain) return;
+            state.selectedTargetDomain = domain;
+            renderTargetDomainRows();
+            await loadTargetSitemap();
+          });
+        });
+      }
+
+      function renderTargetSitemapRows() {
+        const tbody = document.getElementById("targetSitemapRows");
+        if (!state.selectedTargetDomain) {
+          tbody.innerHTML = '<tr><td colspan="6" class="muted">Select a domain.</td></tr>';
+          return;
+        }
+        if (!state.targetSitemapRows.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="muted">No URL rows for selected domain.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = state.targetSitemapRows.map((row) => {
+          const links = [];
+          if (row.view_response_path) links.push(`<a href="${escapeHtml(withAuthToken(row.view_response_path))}" target="_blank" rel="noopener">View</a>`);
+          if (row.download_request_path) links.push(`<a href="${escapeHtml(withAuthToken(row.download_request_path))}" target="_blank" rel="noopener">Req</a>`);
+          if (row.download_response_path) links.push(`<a href="${escapeHtml(withAuthToken(row.download_response_path))}" target="_blank" rel="noopener">Resp</a>`);
+          if (row.download_evidence_path) links.push(`<a href="${escapeHtml(withAuthToken(row.download_evidence_path))}" target="_blank" rel="noopener">Evidence</a>`);
+          const size = Number(row.response_size_bytes || 0);
+          return `
+            <tr>
+              <td class="mono">${escapeHtml(row.url || "")}</td>
+              <td>${escapeHtml(row.subdomain || "")}</td>
+              <td>${escapeHtml(String(row.response_status_code ?? row.crawl_status_code ?? row.status_code ?? ""))}</td>
+              <td>${escapeHtml(String(row.response_elapsed_ms ?? ""))}</td>
+              <td>${size}</td>
+              <td><div class="actions">${links.join("")}</div></td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      function renderDiscoveredFilesRows() {
+        const artifactsTbody = document.getElementById("artifactRows");
+        const highValueTbody = document.getElementById("highValueRows");
+        if (!state.artifactRows.length) {
+          artifactsTbody.innerHTML = '<tr><td colspan="6" class="muted">No stored artifacts.</td></tr>';
+        } else {
+          artifactsTbody.innerHTML = state.artifactRows.map((row) => `
+            <tr>
+              <td class="mono">${escapeHtml(row.updated_at_utc || row.discovered_at_utc || "")}</td>
+              <td class="mono">${escapeHtml(row.root_domain || "")}</td>
+              <td>${escapeHtml(row.source_url || "")}</td>
+              <td>${escapeHtml(row.artifact_type || "")}</td>
+              <td>${Number(row.content_size_bytes || row.file_size || 0)}</td>
+              <td><a href="${escapeHtml(withAuthToken(`/api/coord/discovered-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&artifact_type=${encodeURIComponent(row.artifact_type || "")}`))}" target="_blank" rel="noopener">Download</a></td>
+            </tr>
+          `).join("");
+        }
+        if (!state.highValueRows.length) {
+          highValueTbody.innerHTML = '<tr><td colspan="5" class="muted">No high value items.</td></tr>';
+        } else {
+          highValueTbody.innerHTML = state.highValueRows.map((row) => `
+            <tr>
+              <td class="mono">${escapeHtml(row.captured_at_utc || row.updated_at_utc || row.discovered_at_utc || "")}</td>
+              <td class="mono">${escapeHtml(row.root_domain || "")}</td>
+              <td>${escapeHtml(row.source_url || "")}</td>
+              <td>${Number(row.content_size_bytes || row.file_size || 0)}</td>
+              <td><a href="${escapeHtml(withAuthToken(`/api/coord/high-value-files/download?root_domain=${encodeURIComponent(row.root_domain || "")}&saved_relative=${encodeURIComponent(row.saved_relative || "")}`))}" target="_blank" rel="noopener">Download</a></td>
+            </tr>
+          `).join("");
+        }
+      }
+
+      function renderExtractorDomains() {
+        const select = document.getElementById("extractorDomainSelect");
+        const before = String(select.value || "__all__");
+        const options = state.extractorDomains.map((row) => {
+          const domain = String(row.root_domain || "");
+          return `<option value="${escapeHtml(domain)}">${escapeHtml(domain)} (score ${Number(row.max_importance_score || 0)}, matches ${Number(row.match_count || 0)})</option>`;
+        });
+        select.innerHTML = `<option value="__all__">All domains</option>${options.join("")}`;
+        if ([...select.options].some((opt) => opt.value === before)) select.value = before;
+        else select.value = "__all__";
+        updateExtractorDownloadLink();
+      }
+
+      function renderExtractorRows() {
+        const tbody = document.getElementById("extractorRows");
+        if (!state.extractorRows.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="muted">No extractor matches.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = state.extractorRows.map((row) => `
+          <tr>
+            <td class="mono">${escapeHtml(row.root_domain || "")}</td>
+            <td>${escapeHtml(row.filter_name || "")}</td>
+            <td>${Number(row.importance_score || 0)}</td>
+            <td>${escapeHtml(String(row.source_http_status || ""))}</td>
+            <td><a href="${escapeHtml(row.url || "#")}" target="_blank" rel="noopener">${escapeHtml(row.url || "")}</a></td>
+            <td>${escapeHtml(row.match_preview || "")}</td>
+          </tr>
+        `).join("");
+      }
+
+      function updateExtractorDownloadLink() {
+        const link = document.getElementById("extractorDownloadZip");
+        const domain = String(document.getElementById("extractorDomainSelect").value || "__all__");
+        if (!domain || domain === "__all__") {
+          link.href = "#";
+          link.style.pointerEvents = "none";
+          link.style.opacity = "0.5";
+          return;
+        }
+        link.href = withAuthToken(`/api/coord/extractor-matches/download?root_domain=${encodeURIComponent(domain)}`);
+        link.style.pointerEvents = "auto";
+        link.style.opacity = "1";
+      }
+
+      async function loadReconRows() {
+        const q = String(document.getElementById("search").value || "").trim();
+        const limit = Number(document.getElementById("limit").value || 250);
+        const payload = await fetchJson(`/api/coord/workflow-interface/recon/results?workflow_id=${encodeURIComponent(WORKFLOW_ID)}&limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`);
+        state.rows = Array.isArray(payload.rows) ? payload.rows : [];
+        renderReconRows();
+      }
+
+      async function loadCrawlProgress() {
+        const limit = Math.max(1, Math.min(5000, Number(document.getElementById("crawlLimit").value || 2500)));
+        const payload = await fetchJson(`/api/coord/crawl-progress?limit=${encodeURIComponent(limit)}`);
+        state.crawlRows = Array.isArray(payload.domains) ? payload.domains : [];
+        document.getElementById("crawlMeta").textContent = `${state.crawlRows.length} rows`;
+        renderCrawlRows();
+      }
+
+      async function loadTargetDomains() {
+        const q = String(document.getElementById("targetSearch").value || "").trim();
+        const limit = Math.max(10, Math.min(2000, Number(document.getElementById("targetLimit").value || 250)));
+        const payload = await fetchJson(`/api/coord/discovered-targets?limit=${encodeURIComponent(limit)}&offset=0&sort_key=saved_at_utc&sort_dir=desc&q=${encodeURIComponent(q)}`);
+        state.targetDomains = Array.isArray(payload.domains) ? payload.domains : [];
+        document.getElementById("targetMeta").textContent = `${state.targetDomains.length}/${Number(payload.total_domains || state.targetDomains.length)} domains`;
+        if (!state.selectedTargetDomain || !state.targetDomains.some((row) => String(row.root_domain || "") === state.selectedTargetDomain)) {
+          state.selectedTargetDomain = String((state.targetDomains[0] || {}).root_domain || "");
+        }
+        renderTargetDomainRows();
+        await loadTargetSitemap();
+      }
+
+      async function loadTargetSitemap() {
+        if (!state.selectedTargetDomain) {
+          state.targetSitemapRows = [];
+          renderTargetSitemapRows();
+          return;
+        }
+        const q = String(document.getElementById("targetUrlSearch").value || "").trim();
+        const limit = Math.max(20, Math.min(2000, Number(document.getElementById("targetUrlLimit").value || 300)));
+        const payload = await fetchJson(`/api/coord/discovered-target-sitemap?root_domain=${encodeURIComponent(state.selectedTargetDomain)}&limit=${encodeURIComponent(limit)}&offset=0&include_details=1&sort_key=url&sort_dir=asc&q=${encodeURIComponent(q)}`);
+        state.targetSitemapRows = Array.isArray(payload.rows) ? payload.rows : [];
+        document.getElementById("targetUrlMeta").textContent = `${state.selectedTargetDomain}: ${state.targetSitemapRows.length}/${Number(payload.total_rows || state.targetSitemapRows.length)} URLs`;
+        renderTargetSitemapRows();
+      }
+
+      async function loadDiscoveredFiles() {
+        const q = String(document.getElementById("filesSearch").value || "").trim();
+        const limit = Math.max(1, Math.min(50000, Number(document.getElementById("filesLimit").value || 2500)));
+        const [artifactPayload, highValuePayload] = await Promise.all([
+          fetchJson(`/api/coord/discovered-files?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`),
+          fetchJson(`/api/coord/high-value-files?limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`),
+        ]);
+        state.artifactRows = Array.isArray(artifactPayload.rows) ? artifactPayload.rows : [];
+        state.highValueRows = Array.isArray(highValuePayload.rows) ? highValuePayload.rows : [];
+        document.getElementById("filesMeta").textContent = `${state.artifactRows.length} artifacts, ${state.highValueRows.length} high-value files`;
+        renderDiscoveredFilesRows();
+      }
+
+      async function loadExtractorDomains() {
+        const q = String(document.getElementById("extractorDomainSearch").value || "").trim();
+        const payload = await fetchJson(`/api/coord/extractor-matches/domains?limit=20000&q=${encodeURIComponent(q)}`);
+        state.extractorDomains = Array.isArray(payload.domains) ? payload.domains : [];
+        renderExtractorDomains();
+      }
+
+      async function loadExtractorMatches() {
+        const domain = String(document.getElementById("extractorDomainSelect").value || "__all__");
+        const q = String(document.getElementById("extractorSearch").value || "").trim();
+        const limit = Math.max(1, Math.min(2000, Number(document.getElementById("extractorLimit").value || 250)));
+        const params = new URLSearchParams({
+          limit: String(limit),
+          offset: "0",
+          sort_key: "importance_score",
+          sort_dir: "desc",
+          q,
+        });
+        if (domain && domain !== "__all__") params.set("root_domain", domain);
+        const payload = await fetchJson(`/api/coord/extractor-matches?${params.toString()}`);
+        state.extractorRows = Array.isArray(payload.rows) ? payload.rows : [];
+        document.getElementById("extractorMeta").textContent = `${state.extractorRows.length}/${Number(payload.total_rows || state.extractorRows.length)} rows`;
+        renderExtractorRows();
+        updateExtractorDownloadLink();
+      }
+
+      async function showSubdomains(rootDomain) {
+        const domain = String(rootDomain || "").trim().toLowerCase();
+        if (!domain) return;
+        const payload = await fetchJson(`/api/coord/workflow-interface/recon/subdomains?root_domain=${encodeURIComponent(domain)}`);
+        const rows = Array.isArray(payload.subdomains) ? payload.subdomains : [];
+        document.getElementById("subdomainTitle").textContent = `Subdomains for ${domain} (${rows.length})`;
+        document.getElementById("subdomainList").innerHTML = rows.map((item) => `<li class="mono">${escapeHtml(item)}</li>`).join("");
+        document.getElementById("subdomainBackdrop").style.display = "flex";
+      }
+
+      async function refreshAll() {
+        setStatus("Refreshing recon outputs...");
+        await loadReconRows();
+        await loadCrawlProgress();
+        await loadTargetDomains();
+        await loadDiscoveredFiles();
+        await loadExtractorDomains();
+        await loadExtractorMatches();
+        setStatus("Recon outputs refreshed.");
+      }
+
+      document.getElementById("refreshBtn").addEventListener("click", async () => {
+        try { setStatus("Refreshing recon summary..."); await loadReconRows(); setStatus(`Loaded ${state.rows.length} recon rows.`); }
+        catch (err) { setStatus(err.message || err, true); }
+      });
+      document.getElementById("search").addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        document.getElementById("refreshBtn").click();
+      });
+      document.getElementById("limit").addEventListener("change", () => document.getElementById("refreshBtn").click());
+
+      document.getElementById("crawlSearch").addEventListener("input", renderCrawlRows);
+      document.getElementById("crawlRefreshBtn").addEventListener("click", async () => {
+        try { await loadCrawlProgress(); } catch (err) { setStatus(err.message || err, true); }
+      });
+
+      document.getElementById("targetRefreshBtn").addEventListener("click", async () => {
+        try { await loadTargetDomains(); } catch (err) { setStatus(err.message || err, true); }
+      });
+      document.getElementById("targetUrlRefreshBtn").addEventListener("click", async () => {
+        try { await loadTargetSitemap(); } catch (err) { setStatus(err.message || err, true); }
+      });
+
+      document.getElementById("filesRefreshBtn").addEventListener("click", async () => {
+        try { await loadDiscoveredFiles(); } catch (err) { setStatus(err.message || err, true); }
+      });
+
+      document.getElementById("extractorRefreshBtn").addEventListener("click", async () => {
+        try {
+          await loadExtractorDomains();
+          await loadExtractorMatches();
+        } catch (err) {
+          setStatus(err.message || err, true);
+        }
+      });
+      document.getElementById("extractorDomainSelect").addEventListener("change", async () => {
+        try { await loadExtractorMatches(); } catch (err) { setStatus(err.message || err, true); }
+      });
+
+      document.getElementById("closeSubdomainsBtn").addEventListener("click", () => {
+        document.getElementById("subdomainBackdrop").style.display = "none";
+      });
+      document.getElementById("subdomainBackdrop").addEventListener("click", (event) => {
+        if (event.target === document.getElementById("subdomainBackdrop")) {
+          document.getElementById("subdomainBackdrop").style.display = "none";
+        }
+      });
+
+      const params = new URLSearchParams(window.location.search || "");
+      const initialDomain = String(params.get("root_domain") || "").trim();
+      if (initialDomain) {
+        document.getElementById("search").value = initialDomain;
+        document.getElementById("targetSearch").value = initialDomain;
+        document.getElementById("crawlSearch").value = initialDomain;
+      }
+      const cookieToken = document.cookie.split(";").map((x) => x.trim()).find((x) => x.startsWith("nightmare_coord_token="));
+      if (cookieToken) document.getElementById("token").value = decodeURIComponent(cookieToken.split("=", 2)[1] || "");
+      if (window.localStorage && !document.getElementById("token").value) {
+        const token = String(window.localStorage.getItem("nightmare_coord_token") || "").trim();
+        if (token) document.getElementById("token").value = token;
+      }
+      document.getElementById("token").addEventListener("change", () => {
+        const token = String(document.getElementById("token").value || "").trim();
+        try { window.localStorage.setItem("nightmare_coord_token", token); } catch (_) {}
+      });
+
+      (async () => {
+        try {
+          await refreshAll();
+        } catch (err) {
+          setStatus(err.message || err, true);
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>

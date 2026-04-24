@@ -5715,17 +5715,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             workflow_id = _normalize_workflow_id((query.get("workflow_id") or ["run-recon"])[0], default="run-recon")
             limit = max(1, min(10000, _safe_int((query.get("limit") or [5000])[0], 5000)))
             search_text = str((query.get("q") or [""])[0] or "").strip().lower()
-            snapshot = self.coordinator_store.workflow_scheduler_snapshot(limit=limit)
-            domains = snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else []
-            rows: list[dict[str, Any]] = []
-            for domain in domains:
+            snapshot = self.coordinator_store.workflow_scheduler_snapshot(limit=max(limit, 5000))
+            snapshot_domains = snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else []
+            snapshot_map: dict[str, dict[str, Any]] = {}
+            for domain in snapshot_domains:
                 if not isinstance(domain, dict):
                     continue
                 root_domain = str(domain.get("root_domain") or "").strip().lower()
+                if root_domain:
+                    snapshot_map[root_domain] = domain
+            discovered_domains = self.coordinator_store.list_discovered_target_domains(limit=limit, q=search_text)
+            rows: list[dict[str, Any]] = []
+            discovered_domain_set: set[str] = set()
+
+            def _append_domain_row(root_domain: str, *, discovered_domain: dict[str, Any] | None = None) -> None:
                 if not root_domain:
-                    continue
+                    return
                 if search_text and search_text not in root_domain:
-                    continue
+                    return
+                domain = snapshot_map.get(root_domain, {})
                 plugin_tasks_all = domain.get("plugin_tasks") if isinstance(domain.get("plugin_tasks"), dict) else {}
                 workflow_tasks = plugin_tasks_all.get(workflow_id) if isinstance(plugin_tasks_all.get(workflow_id), dict) else {}
                 running_count = 0
@@ -5738,18 +5746,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     status = str(item.get("status") or "").strip().lower()
                     if status == "running":
                         running_count += 1
-                    elif status in {"pending", "ready"}:
+                    elif status in {"pending", "ready", "paused"}:
                         pending_count += 1
                     elif status == "completed":
                         completed_count += 1
                     elif status == "failed":
                         failed_count += 1
+                discovered_urls_count = int(domain.get("discovered_urls_count") or 0)
+                frontier_count = int(domain.get("frontier_count") or 0)
+                status_text = str(domain.get("status") or "")
+                if isinstance(discovered_domain, dict):
+                    discovered_urls_count = max(discovered_urls_count, int(discovered_domain.get("discovered_urls_count") or 0))
+                    status_text = str(discovered_domain.get("status") or status_text)
                 rows.append(
                     {
                         "root_domain": root_domain,
-                        "status": str(domain.get("status") or ""),
-                        "discovered_urls_count": int(domain.get("discovered_urls_count") or 0),
-                        "frontier_count": int(domain.get("frontier_count") or 0),
+                        "status": status_text,
+                        "discovered_urls_count": discovered_urls_count,
+                        "frontier_count": frontier_count,
                         "pending_targets": int((domain.get("targets") or {}).get("pending", 0) if isinstance(domain.get("targets"), dict) else 0),
                         "running_targets": int((domain.get("targets") or {}).get("running", 0) if isinstance(domain.get("targets"), dict) else 0),
                         "workflow_pending_tasks": pending_count,
@@ -5758,6 +5772,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "workflow_failed_tasks": failed_count,
                     }
                 )
+
+            for discovered_domain in discovered_domains:
+                if not isinstance(discovered_domain, dict):
+                    continue
+                root_domain = str(discovered_domain.get("root_domain") or "").strip().lower()
+                if not root_domain:
+                    continue
+                discovered_domain_set.add(root_domain)
+                _append_domain_row(root_domain, discovered_domain=discovered_domain)
+
+            for root_domain in sorted(snapshot_map.keys()):
+                if root_domain in discovered_domain_set:
+                    continue
+                _append_domain_row(root_domain)
             rows.sort(key=lambda item: str(item.get("root_domain") or ""))
             self._write_json(
                 {
