@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 _KEY_RE = re.compile(r"[^a-z0-9_\-]+")
@@ -177,6 +178,140 @@ CREATE TABLE IF NOT EXISTS workflow_definition_audit (
         with conn.cursor() as cur:
             cur.execute(ddl)
         conn.commit()
+
+
+
+
+_BUILTIN_WORKFLOW_DIR = Path(__file__).resolve().parents[1] / "workflows"
+
+
+def _merge_requirement_lists(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Merge workflow-file preconditions and input artifact requirements.
+
+    The legacy workflow file separated scheduling preconditions from declared
+    inputs. The builder/runtime state machine needs both represented as
+    preconditions so a stage is not released before its input artifacts exist.
+    """
+    merged: dict[str, Any] = dict(base or {})
+    for key, value in (extra or {}).items():
+        if key.endswith("_all") or key.endswith("_any") or key in {"artifacts", "required_artifacts", "requires_plugins_all", "requires_plugins_any"}:
+            existing = merged.get(key)
+            if isinstance(value, list):
+                seen = []
+                for item in (existing if isinstance(existing, list) else []):
+                    if item not in seen:
+                        seen.append(item)
+                for item in value:
+                    if item not in seen:
+                        seen.append(item)
+                merged[key] = seen
+            elif value is not None and key not in merged:
+                merged[key] = value
+        elif key not in merged:
+            merged[key] = value
+    return merged
+
+
+def workflow_payload_from_scheduler_file(path: str | Path) -> dict[str, Any]:
+    """Convert a legacy coordinator scheduler workflow JSON file into the DB builder format."""
+    wf_path = Path(path)
+    raw = json.loads(wf_path.read_text(encoding="utf-8-sig"))
+    plugins = raw.get("plugins") if isinstance(raw.get("plugins"), list) else []
+    workflow_key = slugify_key(str(raw.get("workflow_id") or wf_path.stem.replace(".workflow", "")), fallback="workflow")
+    steps: list[dict[str, Any]] = []
+    for idx, item in enumerate(plugins, start=1):
+        if not isinstance(item, dict):
+            continue
+        plugin_key = slugify_key(str(item.get("plugin_name") or item.get("handler") or item.get("name") or ""), fallback="")
+        if not plugin_key:
+            continue
+        step_key = slugify_key(str(item.get("name") or plugin_key), fallback=f"step-{idx}")
+        inputs = _json(item.get("inputs"), {})
+        preconditions = _merge_requirement_lists(_json(item.get("preconditions", item.get("prerequisites")), {}), inputs if isinstance(inputs, dict) else {})
+        parameters = _json(item.get("parameters"), {})
+        config_json = parameters if isinstance(parameters, dict) else {}
+        # Preserve legacy execution metadata next to the editable runtime parameters.
+        for meta_key in ("handler", "resume_mode", "config_schema"):
+            if meta_key in item and item.get(meta_key) not in (None, ""):
+                config_json.setdefault(meta_key, item.get(meta_key))
+        steps.append(
+            {
+                "step_key": step_key,
+                "display_name": str(item.get("display_name") or step_key.replace("-", " ").replace("_", " ").title()),
+                "description": str(item.get("description") or ""),
+                "plugin_key": plugin_key,
+                "ordinal": int(item.get("ordinal") or idx),
+                "enabled": bool(item.get("enabled", True)),
+                "continue_on_error": bool(item.get("continue_on_error", False)),
+                "retry_failed": bool(item.get("retry_failed", False)),
+                "max_attempts": int(item.get("max_attempts") or 0),
+                "timeout_seconds": int(item.get("timeout_seconds") or 0),
+                "input_bindings": inputs if isinstance(inputs, dict) else {},
+                "config_json": config_json,
+                "preconditions_json": preconditions,
+                "outputs_json": _json(item.get("outputs"), {}),
+            }
+        )
+    return {
+        "workflow_key": workflow_key,
+        "version": 1,
+        "name": "Recon Workflow" if workflow_key in {"run-recon", "recon-workflow"} else workflow_key.replace("-", " ").replace("_", " ").title(),
+        "description": str(raw.get("description") or "Imported workflow definition."),
+        "status": "published",
+        "trigger_mode": "manual",
+        "input_schema": {
+            "type": "object",
+            "required": ["root_domain"],
+            "properties": {
+                "root_domain": {
+                    "type": "string",
+                    "title": "Root domain",
+                    "description": "The root domain to run this recon workflow against.",
+                }
+            },
+            "additionalProperties": True,
+        },
+        "ui_schema": {
+            "source_file": str(wf_path.name),
+            "legacy_schema_version": str(raw.get("schema_version") or ""),
+            "workflow_type": str(raw.get("workflow_type") or ""),
+        },
+        "tags": ["builtin", "recon", "imported-from-workflow-file"],
+        "steps": sorted(steps, key=lambda s: int(s.get("ordinal") or 0)),
+    }
+
+
+def load_builtin_workflow_definition(workflow_key: str = "run-recon") -> dict[str, Any]:
+    key = slugify_key(workflow_key, fallback="run-recon")
+    candidates = [
+        _BUILTIN_WORKFLOW_DIR / f"{key}.workflow.json",
+        _BUILTIN_WORKFLOW_DIR / f"{key}.json",
+    ]
+    if key == "recon-workflow":
+        candidates.append(_BUILTIN_WORKFLOW_DIR / "run-recon.workflow.json")
+    for candidate in candidates:
+        if candidate.exists():
+            return workflow_payload_from_scheduler_file(candidate)
+    raise FileNotFoundError(f"built-in workflow file not found for {workflow_key!r}")
+
+
+def seed_builtin_workflows(store: Any, *, overwrite: bool = False, actor: str = "system") -> list[dict[str, Any]]:
+    """Ensure shipped workflow JSON files are available in the workflow builder.
+
+    By default this is non-destructive: once a workflow exists, user edits are
+    preserved. Passing overwrite=True intentionally re-imports from disk.
+    """
+    ensure_workflow_schema(store)
+    seeded: list[dict[str, Any]] = []
+    for wf_path in sorted(_BUILTIN_WORKFLOW_DIR.glob("*.workflow.json")):
+        payload = workflow_payload_from_scheduler_file(wf_path)
+        existing = get_workflow_definition(store, str(payload.get("workflow_key") or ""))
+        if existing and not overwrite:
+            seeded.append({"workflow_key": existing["workflow_key"], "status": "exists", "id": existing["id"]})
+            continue
+        item = save_workflow_definition(store, payload, actor=actor)
+        seeded.append({"workflow_key": item["workflow_key"], "status": "imported", "id": item["id"]})
+    return seeded
 
 
 def seed_builtin_plugins(store: Any) -> None:
@@ -452,125 +587,6 @@ def publish_workflow_definition(store: Any, workflow_key: str, *, actor: str = "
         )
         conn.commit()
     return {"workflow_key": definition["workflow_key"], "version": version, "status": "published"}
-
-
-
-def set_workflow_definition_status(store: Any, workflow_key: str, status: str, *, actor: str = "") -> dict[str, Any]:
-    ensure_workflow_schema(store)
-    key = slugify_key(workflow_key, fallback="")
-    next_status = str(status or "").strip().lower()
-    allowed = {"draft", "published", "paused", "archived"}
-    if next_status not in allowed:
-        raise ValueError(f"workflow status must be one of {sorted(allowed)}")
-    with store._connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-UPDATE workflow_definitions
-SET status=%s, updated_by=%s, updated_at_utc=NOW()
-WHERE workflow_key=%s
-RETURNING id::text, workflow_key, version, name, status, updated_at_utc;
-""",
-            (next_status, actor, key),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise KeyError("workflow definition not found")
-        cur.execute(
-            "INSERT INTO workflow_definition_audit(entity_type, entity_key, entity_version, action, actor, after_json) VALUES('workflow',%s,%s,%s,%s,%s::jsonb)",
-            (row[1], int(row[2]), f"status:{next_status}", actor, json.dumps({"workflow_key": row[1], "status": next_status})),
-        )
-        conn.commit()
-    return {
-        "id": row[0],
-        "workflow_key": row[1],
-        "version": int(row[2]),
-        "name": row[3],
-        "status": row[4],
-        "updated_at_utc": row[5].isoformat() if row[5] else None,
-    }
-
-
-def set_workflow_run_status(store: Any, run_id: str, status: str, *, actor: str = "") -> dict[str, Any]:
-    ensure_workflow_schema(store)
-    next_status = str(status or "").strip().lower()
-    allowed = {"queued", "running", "paused", "cancelled", "completed", "failed"}
-    if next_status not in allowed:
-        raise ValueError(f"workflow run status must be one of {sorted(allowed)}")
-    with store._connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-UPDATE workflow_runs
-SET status=%s,
-    started_at_utc=CASE WHEN %s='running' AND started_at_utc IS NULL THEN NOW() ELSE started_at_utc END,
-    completed_at_utc=CASE WHEN %s IN ('cancelled','completed','failed') THEN NOW() ELSE completed_at_utc END,
-    updated_at_utc=NOW()
-WHERE id=%s
-RETURNING id::text, workflow_key, root_domain, status, updated_at_utc;
-""",
-            (next_status, next_status, next_status, run_id),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise KeyError("workflow run not found")
-        if next_status in {"paused", "cancelled"}:
-            # Prevent workers from claiming queued/ready work for stopped runs. Running work is not killed
-            # from here, but follow-up claims are blocked and UI reflects the operator action.
-            step_status = "pending" if next_status == "paused" else "cancelled"
-            cur.execute(
-                """
-UPDATE workflow_step_runs
-SET status=%s,
-    blocked_reason=%s,
-    lease_expires_at=NULL,
-    updated_at_utc=NOW()
-WHERE workflow_run_id=%s AND status IN ('queued','ready','pending','running');
-""",
-                (step_status, f"workflow run {next_status} by {actor or 'web'}", run_id),
-            )
-            cur.execute(
-                """
-UPDATE coordinator_stage_tasks
-SET status=%s,
-    worker_id=NULL,
-    lease_expires_at=NULL,
-    error=%s,
-    updated_at_utc=NOW()
-WHERE checkpoint_json->>'workflow_run_id' = %s AND status IN ('ready','pending','running');
-""",
-                (step_status, f"workflow run {next_status} by {actor or 'web'}", run_id),
-            )
-        elif next_status in {"queued", "running"}:
-            # Resume first non-completed step as ready; prerequisite re-evaluation still happens at claim time.
-            cur.execute(
-                """
-WITH next_step AS (
-  SELECT id FROM workflow_step_runs
-  WHERE workflow_run_id=%s AND status IN ('pending','paused','queued')
-  ORDER BY ordinal ASC
-  LIMIT 1
-)
-UPDATE workflow_step_runs s
-SET status='ready', blocked_reason='', updated_at_utc=NOW()
-FROM next_step
-WHERE s.id = next_step.id;
-""",
-                (run_id,),
-            )
-            cur.execute(
-                """
-UPDATE coordinator_stage_tasks
-SET status='ready', error=NULL, updated_at_utc=NOW()
-WHERE checkpoint_json->>'workflow_run_id' = %s AND status IN ('pending','paused','queued')
-  AND stage = (
-    SELECT plugin_key FROM workflow_step_runs
-    WHERE workflow_run_id=%s AND status='ready'
-    ORDER BY ordinal ASC LIMIT 1
-  );
-""",
-                (run_id, run_id),
-            )
-        conn.commit()
-    return {"id": row[0], "workflow_key": row[1], "root_domain": row[2], "status": row[3], "updated_at_utc": row[4].isoformat() if row[4] else None}
 
 
 def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "") -> dict[str, Any]:

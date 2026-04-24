@@ -44,11 +44,6 @@
     .view-pane { display: none; }
     .view-pane.active { display: block; }
     .actions { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); margin-top: 12px; }
-    .workflow-console { display: grid; gap: 12px; grid-template-columns: minmax(320px, 1.1fr) minmax(420px, 1.6fr); margin-bottom: 14px; }
-    .workflow-card { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px; margin-bottom: 8px; background: #fff; cursor: pointer; }
-    .workflow-card:hover, .workflow-card.selected { border-color: #0ea5e9; background: #f0f9ff; }
-    .run-row { display: grid; gap: 6px; grid-template-columns: 1.4fr 1fr auto; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; margin-bottom: 8px; }
-    .mini-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .form-grid { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
     .form-grid .full { grid-column: 1 / -1; }
     label { display: grid; gap: 4px; font-size: 12px; color: #334155; }
@@ -69,42 +64,6 @@
     <div class="card"><div class="k">Total Domains</div><div class="v" id="totalDomains">0</div></div>
     <div class="card"><div class="k">Visible Tasks</div><div class="v" id="visibleTasks">0</div></div>
     <div class="card"><div class="k">Running Tasks</div><div class="v" id="runningTasks">0</div></div>
-  </div>
-
-  <div class="workflow-console">
-    <section class="panel">
-      <h2>Workflow Actions</h2>
-      <p class="muted">Create runs, publish/pause/archive definitions, and stop active runs without leaving the monitor.</p>
-      <div id="workflowControlList" class="muted">Loading workflow definitions...</div>
-      <div class="form-grid">
-        <label>Selected workflow
-          <select id="workflowActionKey"></select>
-        </label>
-        <label>Definition status
-          <select id="workflowActionStatus">
-            <option value="draft">draft</option>
-            <option value="published">published</option>
-            <option value="paused">paused</option>
-            <option value="archived">archived</option>
-          </select>
-        </label>
-        <label class="full">Run target/root domain
-          <input id="workflowRunRootDomain" type="text" placeholder="example.com">
-        </label>
-      </div>
-      <div class="toolbar">
-        <button class="primary" type="button" id="startWorkflowButton">Start run</button>
-        <button type="button" id="publishWorkflowButton">Publish</button>
-        <button type="button" id="updateWorkflowStatusButton">Update status</button>
-        <a href="/workflow-definitions">Open builder</a>
-      </div>
-      <div id="workflowActionResult" class="result-box muted">No workflow action yet.</div>
-    </section>
-    <section class="panel">
-      <h2>Recent Workflow Runs</h2>
-      <p class="muted">Use Pause to temporarily hold queued work, Resume to re-enable the next waiting step, and Cancel to stop new claims for a run.</p>
-      <div id="workflowRunList" class="muted">Loading workflow runs...</div>
-    </section>
   </div>
 
   <div class="toolbar">
@@ -300,7 +259,7 @@
 
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
-    const state = { paused: false, timer: null, snapshot: null, events: [], workflowDefinitions: [], workflowRuns: [], selectedWorkflow: "", selectedDomain: "", activeTab: "monitor" };
+    const state = { paused: false, timer: null, snapshot: null, events: [], selectedDomain: "", activeTab: "monitor" };
 
     function readCookie(name) {
       const needle = `${name}=`;
@@ -655,146 +614,11 @@
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
       state.events = Array.isArray(payload.events) ? payload.events : [];
     }
-    async function workflowApi(path, options = {}) {
-      const response = await fetch(path, {
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", ...authHeaders(), ...(options.headers || {}) },
-        ...options,
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      return payload;
-    }
-    async function fetchWorkflowControlsData() {
-      const [defs, runs] = await Promise.all([
-        workflowApi("/api/workflow-definitions"),
-        workflowApi("/api/workflow-runs?limit=25"),
-      ]);
-      state.workflowDefinitions = Array.isArray(defs.items) ? defs.items : [];
-      state.workflowRuns = Array.isArray(runs.items) ? runs.items : [];
-      if (!state.selectedWorkflow && state.workflowDefinitions.length) state.selectedWorkflow = state.workflowDefinitions[0].workflow_key;
-      renderWorkflowControls();
-    }
-    function selectedWorkflowDefinition() {
-      return state.workflowDefinitions.find((item) => item.workflow_key === state.selectedWorkflow) || state.workflowDefinitions[0] || null;
-    }
-    function renderWorkflowControls() {
-      const select = document.getElementById("workflowActionKey");
-      const status = document.getElementById("workflowActionStatus");
-      const list = document.getElementById("workflowControlList");
-      const runs = document.getElementById("workflowRunList");
-      const defs = state.workflowDefinitions;
-      if (!defs.length) {
-        select.innerHTML = "";
-        list.innerHTML = '<div class="muted">No workflow definitions found. Open the builder to create one.</div>';
-      } else {
-        select.innerHTML = defs.map((wf) => `<option value="${escapeHtml(wf.workflow_key)}" ${wf.workflow_key === state.selectedWorkflow ? "selected" : ""}>${escapeHtml(wf.name || wf.workflow_key)} · ${escapeHtml(wf.status || "")}</option>`).join("");
-        const current = selectedWorkflowDefinition();
-        if (current) status.value = String(current.status || "draft");
-        list.innerHTML = defs.map((wf) => `
-          <div class="workflow-card ${wf.workflow_key === state.selectedWorkflow ? "selected" : ""}" data-workflow-key="${escapeHtml(wf.workflow_key)}">
-            <b>${escapeHtml(wf.name || wf.workflow_key)}</b>
-            <div class="muted">${escapeHtml(wf.workflow_key)} v${escapeHtml(wf.version)} · ${escapeHtml(wf.status)} · ${escapeHtml(wf.step_count)} steps</div>
-            <div class="muted">${escapeHtml(String(wf.description || "").slice(0, 160))}</div>
-          </div>
-        `).join("");
-        list.querySelectorAll("[data-workflow-key]").forEach((node) => {
-          node.addEventListener("click", () => {
-            state.selectedWorkflow = String(node.getAttribute("data-workflow-key") || "");
-            renderWorkflowControls();
-          });
-        });
-      }
-      if (!state.workflowRuns.length) {
-        runs.innerHTML = '<div class="muted">No recent workflow runs.</div>';
-      } else {
-        runs.innerHTML = state.workflowRuns.map((run) => `
-          <div class="run-row">
-            <div>
-              <b class="mono">${escapeHtml(run.workflow_key)}</b>
-              <div class="muted">${escapeHtml(run.root_domain || "no target")} · ${escapeHtml(formatStamp(run.created_at_utc || ""))}</div>
-            </div>
-            <div><span class="${badgeClass(run.status)}">${escapeHtml(statusLabel(run.status))}</span><div class="muted">${escapeHtml(run.completed_steps)}/${escapeHtml(run.total_steps)} steps</div></div>
-            <div class="mini-actions">
-              <button type="button" data-run-status="paused" data-run-id="${escapeHtml(run.id)}">Pause</button>
-              <button type="button" data-run-status="running" data-run-id="${escapeHtml(run.id)}">Resume</button>
-              <button type="button" data-run-status="cancelled" data-run-id="${escapeHtml(run.id)}">Cancel</button>
-            </div>
-          </div>
-        `).join("");
-        runs.querySelectorAll("[data-run-status]").forEach((button) => {
-          button.addEventListener("click", async () => {
-            await setWorkflowRunStatus(String(button.getAttribute("data-run-id") || ""), String(button.getAttribute("data-run-status") || ""));
-          });
-        });
-      }
-    }
-    async function startSelectedWorkflow() {
-      const key = String(document.getElementById("workflowActionKey").value || state.selectedWorkflow || "").trim();
-      const root = String(document.getElementById("workflowRunRootDomain").value || state.selectedDomain || "").trim().toLowerCase();
-      if (!key) {
-        document.getElementById("workflowActionResult").textContent = "Select a workflow first.";
-        return;
-      }
-      if (!root) {
-        document.getElementById("workflowActionResult").textContent = "Enter a root domain before starting a run.";
-        return;
-      }
-      try {
-        const payload = await workflowApi("/api/workflow-runs", {
-          method: "POST",
-          body: JSON.stringify({ workflow_key: key, root_domain: root, input: { root_domain: root }, trigger_source: "manual" }),
-        });
-        document.getElementById("workflowActionResult").textContent = JSON.stringify(payload, null, 2);
-        await refreshAllData();
-      } catch (error) {
-        document.getElementById("workflowActionResult").textContent = String(error && error.message ? error.message : error);
-      }
-    }
-    async function publishSelectedWorkflow() {
-      const key = String(document.getElementById("workflowActionKey").value || state.selectedWorkflow || "").trim();
-      if (!key) return;
-      try {
-        const payload = await workflowApi(`/api/workflow-definitions/${encodeURIComponent(key)}/publish`, { method: "POST", body: "{}" });
-        document.getElementById("workflowActionResult").textContent = JSON.stringify(payload, null, 2);
-        await fetchWorkflowControlsData();
-      } catch (error) {
-        document.getElementById("workflowActionResult").textContent = String(error && error.message ? error.message : error);
-      }
-    }
-    async function updateSelectedWorkflowStatus() {
-      const key = String(document.getElementById("workflowActionKey").value || state.selectedWorkflow || "").trim();
-      const nextStatus = String(document.getElementById("workflowActionStatus").value || "").trim();
-      if (!key || !nextStatus) return;
-      try {
-        const payload = await workflowApi(`/api/workflow-definitions/${encodeURIComponent(key)}/status`, {
-          method: "POST",
-          body: JSON.stringify({ status: nextStatus }),
-        });
-        document.getElementById("workflowActionResult").textContent = JSON.stringify(payload, null, 2);
-        await fetchWorkflowControlsData();
-      } catch (error) {
-        document.getElementById("workflowActionResult").textContent = String(error && error.message ? error.message : error);
-      }
-    }
-    async function setWorkflowRunStatus(runId, nextStatus) {
-      if (!runId || !nextStatus) return;
-      try {
-        const payload = await workflowApi(`/api/workflow-runs/${encodeURIComponent(runId)}/status`, {
-          method: "POST",
-          body: JSON.stringify({ status: nextStatus }),
-        });
-        document.getElementById("workflowActionResult").textContent = JSON.stringify(payload, null, 2);
-        await refreshAllData();
-      } catch (error) {
-        document.getElementById("workflowActionResult").textContent = String(error && error.message ? error.message : error);
-      }
-    }
     async function refreshAllData() {
       if (state.paused) return;
       setStatus("loading", "Refreshing...");
       try {
-        await Promise.all([fetchWorkflowSnapshotData(), fetchWorkflowEventsData(), fetchWorkflowControlsData()]);
+        await Promise.all([fetchWorkflowSnapshotData(), fetchWorkflowEventsData()]);
         renderAll();
         setStatus("success", `Live at ${new Date().toLocaleTimeString()}`);
       } catch (error) {
@@ -884,13 +708,6 @@
       state.timer = setInterval(refreshAllData, 30000);
     }
 
-    document.getElementById("workflowActionKey").addEventListener("change", (event) => {
-      state.selectedWorkflow = String(event.target.value || "");
-      renderWorkflowControls();
-    });
-    document.getElementById("startWorkflowButton").addEventListener("click", startSelectedWorkflow);
-    document.getElementById("publishWorkflowButton").addEventListener("click", publishSelectedWorkflow);
-    document.getElementById("updateWorkflowStatusButton").addEventListener("click", updateSelectedWorkflowStatus);
     document.getElementById("refreshButton").addEventListener("click", refreshAllData);
     document.getElementById("pauseButton").addEventListener("click", () => {
       state.paused = !state.paused;

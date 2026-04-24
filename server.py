@@ -87,9 +87,9 @@ from workflow_app.store import (
     list_workflow_runs,
     publish_workflow_definition,
     save_workflow_definition,
-    set_workflow_definition_status,
-    set_workflow_run_status,
     seed_builtin_plugins,
+    seed_builtin_workflows,
+    load_builtin_workflow_definition,
     upsert_plugin_definition,
 )
 
@@ -4423,11 +4423,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "unauthorized"}, status=401)
                 return
             try:
+                seed_builtin_plugins(self.coordinator_store)
+                seed_builtin_workflows(self.coordinator_store)
                 self._write_json({"items": list_workflow_definitions(self.coordinator_store)})
             except Exception as exc:
                 self._write_json({"error": "workflow definition query failed", "detail": str(exc)}, status=500)
             return
-        if path.startswith("/api/workflow-definitions/") or path.startswith("/api/workflow-runs/"):
+        if path.startswith("/api/workflow-definitions/builtin/"):
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            key = unquote(path[len("/api/workflow-definitions/builtin/"):]).strip("/") or "run-recon"
+            try:
+                self._write_json({"item": load_builtin_workflow_definition(key)})
+            except Exception as exc:
+                self._write_json({"error": "built-in workflow import preview failed", "detail": str(exc)}, status=500)
+            return
+        if path.startswith("/api/workflow-definitions/"):
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
                 return
@@ -5554,7 +5569,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._handle_regenerate_master_report()
             return
 
-        if path in {"/api/plugin-definitions", "/api/workflow-definitions", "/api/workflow-runs"} or path.startswith("/api/workflow-definitions/") or path.startswith("/api/workflow-runs/"):
+        if path in {"/api/plugin-definitions", "/api/workflow-definitions", "/api/workflow-runs"} or path.startswith("/api/workflow-definitions/"):
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
                 return
@@ -5575,22 +5590,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     item = create_workflow_run(self.coordinator_store, body, actor=actor)
                     self._write_json({"ok": True, "item": item})
                     return
-                if path.startswith("/api/workflow-runs/"):
-                    run_suffix = path[len("/api/workflow-runs/"):].strip("/")
-                    if run_suffix.endswith("/status"):
-                        run_id = unquote(run_suffix[: -len("/status")].strip("/"))
-                        item = set_workflow_run_status(self.coordinator_store, run_id, str(body.get("status") or ""), actor=actor)
-                        self._write_json({"ok": True, "item": item})
-                        return
                 suffix = path[len("/api/workflow-definitions/"):].strip("/")
+                if suffix.startswith("import-builtin/"):
+                    key = unquote(suffix[len("import-builtin/"):].strip("/") or "run-recon")
+                    payload = load_builtin_workflow_definition(key)
+                    if body.get("workflow_key"):
+                        payload["workflow_key"] = str(body.get("workflow_key") or payload["workflow_key"])
+                    if body.get("status"):
+                        payload["status"] = str(body.get("status") or payload["status"])
+                    item = save_workflow_definition(self.coordinator_store, payload, actor=actor)
+                    self._write_json({"ok": True, "item": item, "workflow": payload})
+                    return
                 if suffix.endswith("/publish"):
                     key = unquote(suffix[: -len("/publish")].strip("/"))
                     item = publish_workflow_definition(self.coordinator_store, key, actor=actor)
-                    self._write_json({"ok": True, "item": item})
-                    return
-                if suffix.endswith("/status"):
-                    key = unquote(suffix[: -len("/status")].strip("/"))
-                    item = set_workflow_definition_status(self.coordinator_store, key, str(body.get("status") or ""), actor=actor)
                     self._write_json({"ok": True, "item": item})
                     return
             except KeyError as exc:

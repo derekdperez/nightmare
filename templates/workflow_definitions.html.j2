@@ -5,49 +5,45 @@
   <title>Workflow Definitions</title>
   <style>
     body{font-family:Segoe UI,Arial,sans-serif;margin:16px;background:#f8fafc;color:#0f172a}
-    .grid{display:grid;grid-template-columns:330px 1fr;gap:14px}.panel{background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:14px}
-    input,textarea,select{width:100%;box-sizing:border-box;padding:8px;border:1px solid #94a3b8;border-radius:8px;background:#fff}textarea{min-height:90px;font-family:ui-monospace,Consolas,monospace}
-    button{border:1px solid #94a3b8;background:#fff;border-radius:8px;padding:8px 11px;cursor:pointer}button:hover{background:#f8fafc}.primary{background:#0ea5e9;color:white;border-color:#0284c7}.danger{border-color:#fca5a5;color:#991b1b}.quiet{color:#475569}
-    .item{padding:10px;border:1px solid #cbd5e1;border-radius:10px;margin-bottom:9px;cursor:pointer}.item:hover{background:#f0f9ff}.item.active{border-color:#0ea5e9;background:#f0f9ff}
-    .muted{color:#64748b;font-size:12px}.steps{display:grid;gap:12px}.step{border:1px solid #cbd5e1;border-radius:12px;padding:12px;background:#f8fafc}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    .step-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.step-title{font-weight:700}.schema-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:8px 0}.field{display:grid;gap:4px;font-size:12px;color:#334155}
-    .chip{display:inline-flex;border:1px solid #cbd5e1;border-radius:999px;padding:2px 8px;font-size:11px;background:#fff;color:#334155}.help{background:#f1f5f9;border-left:4px solid #0ea5e9;padding:10px;border-radius:8px;margin:10px 0}.json-toggle{margin-top:6px}.json-area{display:none}.json-area.open{display:block}.schema-note{font-size:12px;color:#475569;margin-top:6px}.invalid{border-color:#dc2626;background:#fef2f2}
-    @media (max-width: 1100px){.grid,.row{grid-template-columns:1fr}}
+    .grid{display:grid;grid-template-columns:320px 1fr;gap:12px}.panel{background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:12px}
+    input,textarea,select{width:100%;box-sizing:border-box;padding:7px;border:1px solid #94a3b8;border-radius:7px}textarea{min-height:90px;font-family:ui-monospace,Consolas,monospace}
+    button{border:1px solid #94a3b8;background:#fff;border-radius:7px;padding:7px 10px;cursor:pointer}.primary{background:#0ea5e9;color:white;border-color:#0284c7}
+    .item{padding:8px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px;cursor:pointer}.item:hover{background:#f0f9ff}.muted{color:#64748b;font-size:12px}
+    .steps{display:grid;gap:8px}.step{border:1px solid #cbd5e1;border-radius:8px;padding:8px;background:#f8fafc}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.mono{font-family:ui-monospace,Consolas,monospace}
   </style>
 </head>
 <body>
 {% include "_navbar.html.j2" %}
-<h1>Workflow Builder</h1>
-<p class="muted">Build DB-backed workflows with schema-guided step configuration. Pick a plugin and the builder fills in practical defaults from the plugin contract and shipped workflow examples.</p>
+<h1>Workflow Definitions</h1>
+<p class="muted">DB-backed workflow builder. Published definitions can be launched as workflow runs and bridged into the existing coordinator stage queue.</p>
+<div class="panel" style="margin-bottom:12px;background:#ecfeff;border-color:#67e8f9">
+  <b>Recon workflow is now builder-native.</b>
+  <div class="muted">The shipped <span class="mono">workflows/run-recon.workflow.json</span> is imported as an editable, published workflow definition. Use “Open Recon” to edit its steps or “Import Recon workflow” to re-import it from disk.</div>
+</div>
 <div class="grid">
   <div class="panel">
-    <div class="actions"><button class="primary" onclick="newWorkflow()">New workflow</button><button onclick="loadAll()">Refresh</button><a href="/workflows">Monitor & run</a></div>
-    <div class="help">
-      <b>Authoring flow</b>
-      <div class="muted">1. Name the workflow. 2. Add steps. 3. Pick each plugin. 4. Adjust the generated fields. 5. Save, publish, then launch.</div>
+    <div class="actions">
+      <button class="primary" onclick="newWorkflow()">New workflow</button>
+      <button onclick="importReconWorkflow()">Import Recon workflow</button>
+      <button onclick="openReconWorkflow()">Open Recon</button>
+      <button onclick="loadAll()">Refresh</button>
     </div>
     <div id="workflowList"></div>
   </div>
   <div class="panel">
     <div class="row">
-      <label>Workflow key<input id="workflow_key" placeholder="run-recon-custom"></label>
-      <label>Name<input id="name" placeholder="Run Recon Custom"></label>
+      <label>Workflow key<input id="workflow_key"></label>
+      <label>Name<input id="name"></label>
     </div>
-    <label>Description<textarea id="description" placeholder="What this workflow does and when to use it"></textarea></label>
+    <label>Description<textarea id="description"></textarea></label>
     <div class="row">
-      <label>Status<select id="status"><option>draft</option><option>published</option><option>paused</option><option>archived</option></select></label>
+      <label>Status<select id="status"><option>draft</option><option>published</option><option>archived</option></select></label>
       <label>Trigger mode<select id="trigger_mode"><option>manual</option><option>scheduled</option><option>event</option></select></label>
     </div>
     <label>Input schema JSON<textarea id="input_schema">{}</textarea></label>
     <h3>Steps</h3>
     <div id="steps" class="steps"></div>
-    <div class="actions">
-      <button onclick="addStep()">Add step</button>
-      <button onclick="addReconTemplate()">Add recon template</button>
-      <button class="primary" onclick="saveWorkflow()">Save</button>
-      <button onclick="publishWorkflow()">Publish</button>
-      <button onclick="launchWorkflow()">Launch run</button>
-    </div>
+    <div class="actions"><button onclick="addStep()">Add step</button><button class="primary" onclick="saveWorkflow()">Save</button><button onclick="publishWorkflow()">Publish</button><button onclick="launchWorkflow()">Launch run</button></div>
     <pre id="result" class="muted"></pre>
   </div>
 </div>
@@ -56,127 +52,50 @@ let plugins=[], current={steps:[]};
 const $=id=>document.getElementById(id);
 function pretty(v){return JSON.stringify(v,null,2)}
 function esc(v){return String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function slug(v, fallback='step'){const s=String(v||'').trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); return s||fallback;}
 async function api(url, opts={}){
   const headers={'content-type':'application/json',...(opts.headers||{})};
-  return window.NightmareAuth ? NightmareAuth.fetchJson(url,{...opts,headers}) : (async()=>{const r=await fetch(url,{headers,...opts}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||JSON.stringify(j)); return j})();
-}
-function clone(v){return JSON.parse(JSON.stringify(v ?? {}));}
-function pluginByKey(key){return plugins.find(p=>p.plugin_key===key)||plugins[0]||{plugin_key:'',config_schema:{type:'object',properties:{}},ui_schema:{}};}
-function defaultFromSchema(schema){
-  if(!schema || typeof schema!=='object') return {};
-  if(Object.prototype.hasOwnProperty.call(schema,'default')) return clone(schema.default);
-  const type=schema.type || (schema.properties?'object':'string');
-  if(type==='object'){
-    const out={};
-    for(const [k,v] of Object.entries(schema.properties||{})){ out[k]=defaultFromSchema(v); }
-    return out;
-  }
-  if(type==='array') return [];
-  if(type==='boolean') return false;
-  if(type==='integer' || type==='number') return 0;
-  return '';
-}
-function mergeMissing(target, defaults){
-  const out=(target && typeof target==='object' && !Array.isArray(target)) ? clone(target) : {};
-  for(const [k,v] of Object.entries(defaults||{})){
-    if(out[k] === undefined || out[k] === null || out[k] === '') out[k]=v;
-    else if(v && typeof v==='object' && !Array.isArray(v) && out[k] && typeof out[k]==='object' && !Array.isArray(out[k])) out[k]=mergeMissing(out[k], v);
-  }
-  return out;
-}
-function exampleForPlugin(plugin){
-  const ex=Array.isArray(plugin.examples_json) && plugin.examples_json.length ? plugin.examples_json[0] : {};
-  return {
-    config_json: ex.config_json || defaultFromSchema(plugin.config_schema),
-    preconditions_json: ex.preconditions_json || (plugin.ui_schema||{}).default_preconditions || {},
-    outputs_json: ex.outputs_json || (plugin.ui_schema||{}).default_outputs || {}
-  };
-}
-function syncJsonToStep(i, key, value){
-  try{ current.steps[i][key]=JSON.parse(value||'{}'); return true; }
-  catch(e){ $('result').textContent=`Step ${i+1} ${key} is invalid JSON: ${e.message}`; return false; }
+  return window.NightmareAuth ? NightmareAuth.fetchJson(url,{...opts,headers}) : (async()=>{const r=await fetch(url,{headers,...opts}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(JSON.stringify(j)); return j})();
 }
 async function loadAll(){
   plugins=(await api('/api/plugin-definitions')).items||[];
   const data=await api('/api/workflow-definitions');
-  $('workflowList').innerHTML=(data.items||[]).map(w=>`<div class="item ${current.workflow_key===w.workflow_key?'active':''}" onclick="loadWorkflow('${esc(w.workflow_key)}')"><b>${esc(w.name)}</b><div class="muted">${esc(w.workflow_key)} v${esc(w.version)} · ${esc(w.status)} · ${esc(w.step_count)} steps</div><div class="muted">${esc(w.description||'')}</div></div>`).join('');
+  const items=data.items||[];
+  $('workflowList').innerHTML=items.map(w=>`<div class="item" onclick="loadWorkflow('${esc(w.workflow_key)}')"><b>${esc(w.name)}</b><div class="muted">${esc(w.workflow_key)} v${esc(w.version)} · ${esc(w.status)} · ${esc(w.step_count)} steps</div></div>`).join('');
+  return items;
 }
-function newWorkflow(){current={workflow_key:'',name:'',description:'',status:'draft',trigger_mode:'manual',input_schema:{type:'object',properties:{root_domain:{type:'string',default:'example.com'}},additionalProperties:true},steps:[]}; render();}
-async function loadWorkflow(key){current=(await api('/api/workflow-definitions/'+encodeURIComponent(key))).item; render(); await loadAll();}
+function newWorkflow(){current={workflow_key:'',name:'',description:'',status:'draft',trigger_mode:'manual',input_schema:{type:'object',additionalProperties:true},steps:[]}; render();}
+async function loadWorkflow(key){current=(await api('/api/workflow-definitions/'+encodeURIComponent(key))).item; render();}
 function render(){['workflow_key','name','description','status','trigger_mode'].forEach(id=>$(id).value=current[id]||''); $('input_schema').value=pretty(current.input_schema||{}); renderSteps();}
-function applyPluginToStep(i, key, overwrite=false){
-  const p=pluginByKey(key); const s=current.steps[i]; if(!s) return;
-  s.plugin_key=p.plugin_key; s.display_name=s.display_name || p.display_name || p.plugin_key;
-  const ex=exampleForPlugin(p);
-  s.config_json=overwrite ? clone(ex.config_json||{}) : mergeMissing(s.config_json||{}, ex.config_json||{});
-  s.preconditions_json=overwrite ? clone(ex.preconditions_json||{}) : mergeMissing(s.preconditions_json||{}, ex.preconditions_json||{});
-  s.outputs_json=overwrite ? clone(ex.outputs_json||{}) : mergeMissing(s.outputs_json||{}, ex.outputs_json||{});
-  renderSteps();
-}
-function moveStep(i, delta){const j=i+delta; if(j<0||j>=current.steps.length)return; const [s]=current.steps.splice(i,1); current.steps.splice(j,0,s); renderSteps();}
-function renderSchemaFields(i, propName, schema, path=[]){
-  const step=current.steps[i]; const root=step.config_json||{}; const props=(schema&&schema.properties)||{};
-  const entries=Object.entries(props);
-  if(!entries.length) return '<div class="schema-note">No structured fields are defined for this plugin yet. Use the raw JSON editor below.</div>';
-  return `<div class="schema-grid">${entries.map(([key, field])=>{
-    const type=field.type || 'string'; const value=root[key];
-    const label=esc(field.title || key.replaceAll('_',' '));
-    const desc=field.description ? `<span class="muted">${esc(field.description)}</span>` : '';
-    if(type==='boolean') return `<label class="field">${label}${desc}<select onchange="current.steps[${i}].config_json=current.steps[${i}].config_json||{}; current.steps[${i}].config_json['${esc(key)}']=this.value==='true'; renderSteps()"><option value="true" ${value===true?'selected':''}>true</option><option value="false" ${value!==true?'selected':''}>false</option></select></label>`;
-    if(type==='integer' || type==='number') return `<label class="field">${label}${desc}<input type="number" step="${type==='integer'?'1':'any'}" value="${esc(value ?? field.default ?? 0)}" onchange="current.steps[${i}].config_json=current.steps[${i}].config_json||{}; current.steps[${i}].config_json['${esc(key)}']=Number(this.value); renderSteps()"></label>`;
-    if(type==='array' || type==='object') return `<label class="field">${label}${desc}<textarea onchange="try{current.steps[${i}].config_json=current.steps[${i}].config_json||{}; current.steps[${i}].config_json['${esc(key)}']=JSON.parse(this.value||'${type==='array'?'[]':'{}'}'); this.classList.remove('invalid'); renderSteps()}catch(e){this.classList.add('invalid')}">${esc(pretty(value ?? defaultFromSchema(field)))}</textarea></label>`;
-    return `<label class="field">${label}${desc}<input value="${esc(value ?? field.default ?? '')}" onchange="current.steps[${i}].config_json=current.steps[${i}].config_json||{}; current.steps[${i}].config_json['${esc(key)}']=this.value; renderSteps()"></label>`;
-  }).join('')}</div>`;
-}
-function toggleJson(id){document.getElementById(id).classList.toggle('open');}
 function renderSteps(){
-  current.steps=current.steps||[];
-  $('steps').innerHTML=current.steps.map((s,i)=>{
-    const p=pluginByKey(s.plugin_key);
-    const schema=p.config_schema||{type:'object',properties:{}};
-    const inputArts=Array.isArray(p.input_artifacts)?p.input_artifacts:[];
-    const outputArts=Array.isArray(p.output_artifacts)?p.output_artifacts:[];
-    return `<div class="step">
-      <div class="step-head"><div><span class="chip">Step ${i+1}</span> <span class="step-title">${esc(s.display_name||s.step_key||'New step')}</span><div class="muted">${esc(p.description||'')}</div></div><div class="actions"><button onclick="moveStep(${i},-1)">↑</button><button onclick="moveStep(${i},1)">↓</button><button class="danger" onclick="current.steps.splice(${i},1);renderSteps()">Remove</button></div></div>
-      <div class="row">
-        <label>Step key<input onchange="current.steps[${i}].step_key=slug(this.value,'step-${i+1}')" value="${esc(s.step_key||'')}"></label>
-        <label>Plugin<select onchange="applyPluginToStep(${i},this.value,true)">${plugins.map(p=>`<option value="${esc(p.plugin_key)}" ${p.plugin_key==s.plugin_key?'selected':''}>${esc(p.display_name||p.plugin_key)}</option>`).join('')}</select></label>
-      </div>
-      <div class="row">
-        <label>Display name<input onchange="current.steps[${i}].display_name=this.value" value="${esc(s.display_name||'')}"></label>
-        <label>Retry policy<select onchange="current.steps[${i}].retry_failed=this.value==='true'"><option value="false" ${!s.retry_failed?'selected':''}>Do not auto-retry failed step</option><option value="true" ${s.retry_failed?'selected':''}>Retry failed step</option></select></label>
-      </div>
-      <div class="row">
-        <label>Max attempts<input type="number" min="0" onchange="current.steps[${i}].max_attempts=Number(this.value||0)" value="${esc(s.max_attempts||0)}"></label>
-        <label>Timeout seconds<input type="number" min="0" onchange="current.steps[${i}].timeout_seconds=Number(this.value||0)" value="${esc(s.timeout_seconds||0)}"></label>
-      </div>
-      <div class="help"><b>Configuration</b><div class="muted">These fields are generated from the plugin schema. Raw JSON remains available for advanced keys.</div>${renderSchemaFields(i,'config_json',schema)}</div>
-      <div class="schema-note">Expected inputs: ${inputArts.map(a=>`<span class="chip">${esc(a)}</span>`).join(' ') || 'none'} · Expected outputs: ${outputArts.map(a=>`<span class="chip">${esc(a)}</span>`).join(' ') || 'none'}</div>
-      <div class="actions"><button onclick="applyPluginToStep(${i},current.steps[${i}].plugin_key,true)">Reset to schema defaults</button><button onclick="current.steps[${i}].preconditions_json={requires_plugins_all: current.steps.slice(0,${i}).map(x=>x.plugin_key).filter(Boolean)}; renderSteps()">Require all previous steps</button><button class="quiet" onclick="toggleJson('json-${i}')">Raw JSON</button></div>
-      <div id="json-${i}" class="json-area">
-        <label>Config JSON<textarea onchange="syncJsonToStep(${i},'config_json',this.value)">${esc(pretty(s.config_json||{}))}</textarea></label>
-        <label>Preconditions JSON<textarea onchange="syncJsonToStep(${i},'preconditions_json',this.value)">${esc(pretty(s.preconditions_json||{}))}</textarea></label>
-        <label>Outputs JSON<textarea onchange="syncJsonToStep(${i},'outputs_json',this.value)">${esc(pretty(s.outputs_json||{}))}</textarea></label>
-      </div>
-    </div>`;
-  }).join('');
+  $('steps').innerHTML=(current.steps||[]).map((s,i)=>`<div class="step"><div class="row"><label>Step key<input onchange="current.steps[${i}].step_key=this.value" value="${esc(s.step_key||'')}"></label><label>Plugin<select onchange="current.steps[${i}].plugin_key=this.value">${plugins.map(p=>`<option value="${esc(p.plugin_key)}" ${p.plugin_key==s.plugin_key?'selected':''}>${esc(p.display_name||p.plugin_key)}</option>`).join('')}</select></label></div><label>Config JSON<textarea onchange="current.steps[${i}].config_json=JSON.parse(this.value||'{}')">${esc(pretty(s.config_json||{}))}</textarea></label><label>Preconditions JSON<textarea onchange="current.steps[${i}].preconditions_json=JSON.parse(this.value||'{}')">${esc(pretty(s.preconditions_json||{}))}</textarea></label><button onclick="current.steps.splice(${i},1);renderSteps()">Remove</button></div>`).join('');
 }
-function addStep(){
-  current.steps=current.steps||[]; const p=plugins[0]||{plugin_key:''}; const idx=current.steps.length+1; const ex=exampleForPlugin(p);
-  current.steps.push({step_key:'step_'+idx,display_name:p.display_name||('Step '+idx),plugin_key:p.plugin_key,ordinal:idx,enabled:true,config_json:clone(ex.config_json||{}),preconditions_json:clone(ex.preconditions_json||{}),outputs_json:clone(ex.outputs_json||{}),retry_failed:false,max_attempts:0,timeout_seconds:0});
-  renderSteps();
-}
-function addReconTemplate(){
-  const keys=['recon_subdomain_enumeration','recon_subdomain_takeover','recon_spider_source_tags','recon_spider_script_links','recon_spider_wordlist','recon_spider_ai','recon_extractor_high_value'];
-  current.steps=[];
-  keys.filter(k=>pluginByKey(k).plugin_key===k).forEach((key,idx)=>{const p=pluginByKey(key); const ex=exampleForPlugin(p); current.steps.push({step_key:key,display_name:p.display_name||key,plugin_key:key,ordinal:idx+1,enabled:true,retry_failed:true,max_attempts:0,timeout_seconds:0,config_json:clone(ex.config_json||{}),preconditions_json:clone(ex.preconditions_json||{}),outputs_json:clone(ex.outputs_json||{})});});
-  renderSteps();
-}
+function addStep(){current.steps=current.steps||[]; const p=plugins[0]||{plugin_key:''}; current.steps.push({step_key:'step_'+(current.steps.length+1),display_name:'Step '+(current.steps.length+1),plugin_key:p.plugin_key,ordinal:current.steps.length+1,enabled:true,config_json:{},preconditions_json:{}}); renderSteps();}
 function collect(){return {workflow_key:$('workflow_key').value,name:$('name').value,description:$('description').value,status:$('status').value,trigger_mode:$('trigger_mode').value,input_schema:JSON.parse($('input_schema').value||'{}'),steps:(current.steps||[]).map((s,i)=>({...s,ordinal:i+1,display_name:s.display_name||s.step_key}))};}
 async function saveWorkflow(){try{current=collect(); $('result').textContent=pretty(await api('/api/workflow-definitions',{method:'POST',body:JSON.stringify(current)})); await loadAll();}catch(e){$('result').textContent=e.message}}
 async function publishWorkflow(){try{$('result').textContent=pretty(await api('/api/workflow-definitions/'+encodeURIComponent($('workflow_key').value)+'/publish',{method:'POST'})); await loadAll();}catch(e){$('result').textContent=e.message}}
-async function launchWorkflow(){const root_domain=prompt('Root domain/input target?')||''; if(!root_domain)return; try{$('result').textContent=pretty(await api('/api/workflow-runs',{method:'POST',body:JSON.stringify({workflow_key:$('workflow_key').value,root_domain,input:{root_domain}})}));}catch(e){$('result').textContent=e.message}}
-loadAll().then(newWorkflow).catch(e=>{$('result').textContent=e.message});
+
+async function importReconWorkflow(){
+  if(!confirm('Re-import the built-in recon workflow from workflows/run-recon.workflow.json? This will overwrite the DB definition for run-recon.')) return;
+  try{
+    const res=await api('/api/workflow-definitions/import-builtin/run-recon',{method:'POST',body:JSON.stringify({status:'published'})});
+    $('result').textContent=pretty(res);
+    await loadAll();
+    await loadWorkflow('run-recon');
+  }catch(e){$('result').textContent=e.message}
+}
+async function openReconWorkflow(){
+  try{
+    await loadWorkflow('run-recon');
+  }catch(e){
+    $('result').textContent='Recon workflow is not imported yet. Importing now...';
+    await importReconWorkflow();
+  }
+}
+
+async function launchWorkflow(){const root_domain=prompt('Root domain/input target?')||''; try{$('result').textContent=pretty(await api('/api/workflow-runs',{method:'POST',body:JSON.stringify({workflow_key:$('workflow_key').value,root_domain,input:{root_domain}})}));}catch(e){$('result').textContent=e.message}}
+loadAll().then(items=>{
+  if((items||[]).some(w=>w.workflow_key==='run-recon')) return loadWorkflow('run-recon');
+  newWorkflow();
+}).catch(e=>{$('result').textContent=e.message});
 </script>
 </body></html>
