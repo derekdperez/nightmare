@@ -177,7 +177,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             str(body.get("stage") or ""),
             str(body.get("worker_id") or ""),
             int(body.get("lease_seconds") or 0),
-            workflow_id=str(body.get("workflow_id") or "default"),
+            workflow_id="",
         )
         return {"ok": bool(entry), "entry": entry}
 
@@ -190,7 +190,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         entry = store.claim_next_stage(
             worker_id=str(body.get("worker_id") or ""),
             lease_seconds=int(body.get("lease_seconds") or 0),
-            workflow_id=str(body.get("workflow_id") or ""),
+            workflow_id="",
             plugin_allowlist=list(body.get("plugin_allowlist") or []),
         )
         return {"ok": bool(entry), "entry": entry}

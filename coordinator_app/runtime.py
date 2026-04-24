@@ -321,7 +321,7 @@ class CoordinatorClient:
             {
                 "root_domain": root_domain,
                 "stage": stage,
-                "workflow_id": str(workflow_id or "default").strip().lower() or "default",
+                "workflow_id": "",
                 "checkpoint": (dict(checkpoint) if isinstance(checkpoint, dict) else None),
                 "progress": (dict(progress) if isinstance(progress, dict) else None),
                 "progress_artifact_type": str(progress_artifact_type or "").strip().lower(),
@@ -392,7 +392,8 @@ class CoordinatorClient:
             {
                 "worker_id": worker_id,
                 "stage": stage,
-                "workflow_id": str(workflow_id or "default").strip().lower() or "default",
+                # Workflow is task metadata only; stage acquisition is global.
+                "workflow_id": "",
                 "lease_seconds": int(lease_seconds),
             },
         )

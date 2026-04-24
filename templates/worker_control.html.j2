@@ -420,8 +420,8 @@
         const lastAction = String(w.last_action_performed || "").trim();
         const lastLog = String(w.last_log_message || "").trim();
         const lastEvent = String(w.last_event_emitted || "").trim();
-        const currentActionCell = (currentWorkflow || currentPlugin)
-          ? `<span title="${esc(String(w.current_action || ""))}">Current Workflow: ${esc(currentWorkflow || "default")}<br>Current Plugin: ${esc(currentPlugin || "unknown")}</span>`
+        const currentActionCell = (String(w.status || "") === "running" && (currentWorkflow || currentPlugin))
+          ? `<span title="${esc(String(w.current_action || ""))}">Current Workflow: ${esc(currentWorkflow)}<br>Current Plugin: ${esc(currentPlugin)}</span>`
           : "<span class='muted'>none</span>";
         const actionCell = lastAction ? `<span title="${esc(lastAction)}">${esc(clipText(lastAction, 96))}</span>` : "<span class='muted'>none</span>";
         const logCell = lastLog ? `<span title="${esc(lastLog)}">${esc(clipText(lastLog, 120))}</span>` : "<span class='muted'>none</span>";

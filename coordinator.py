@@ -476,7 +476,7 @@ class DistributedCoordinator:
 
     def _get_worker_state(self, worker_id: str) -> str:
         with self._worker_state_lock:
-            return str(self._worker_states.get(str(worker_id), "running") or "running")
+            return str(self._worker_states.get(str(worker_id), "idle") or "idle")
 
     def _record_worker_error(
         self,
@@ -591,7 +591,9 @@ class DistributedCoordinator:
             elif command == "stop":
                 state = "stopped"
             elif command == "start":
-                state = "running"
+                # "start" resumes availability. The worker is marked running only
+                # while it has a leased task.
+                state = "idle"
             elif command == "reload":
                 ok = self._reload_workflow_config(worker_id=worker_id, reason="worker_command")
                 if not ok:
@@ -924,7 +926,7 @@ class DistributedCoordinator:
 
     def _workflow_scheduler_loop(self) -> None:
         worker_id = f"{self.worker_prefix}-scheduler-1"
-        self._set_worker_state(worker_id, "running")
+        self._set_worker_state(worker_id, "idle")
         idle_rescan_interval_seconds = max(30.0, float(self.cfg.workflow_scheduler_interval_seconds))
         last_idle_rescan_at = 0.0
         self.logger.info(
@@ -1291,7 +1293,7 @@ class DistributedCoordinator:
 
     def _nightmare_worker_loop(self, idx: int) -> None:
         worker_id = f"{self.worker_prefix}-nightmare-{idx}"
-        self._set_worker_state(worker_id, "running")
+        self._set_worker_state(worker_id, "idle")
         self.logger.info("nightmare_worker_loop_started", worker_id=worker_id, worker_index=idx)
         while not self.stop_event.is_set():
             state = self._poll_worker_commands(worker_id)
@@ -1312,10 +1314,12 @@ class DistributedCoordinator:
                 self.stop_event.wait(self.cfg.poll_interval_seconds)
                 continue
             if not entry:
+                self._set_worker_state(worker_id, "idle")
                 self.logger.info("nightmare_claim_empty", worker_id=worker_id)
                 self.stop_event.wait(self.cfg.poll_interval_seconds)
                 continue
 
+            self._set_worker_state(worker_id, "running")
             entry_id = str(entry.get("entry_id", "") or "")
             start_url = str(entry.get("start_url", "") or "")
             root_domain = str(entry.get("root_domain", "") or "").strip().lower()
@@ -1495,6 +1499,8 @@ class DistributedCoordinator:
                     )
             finally:
                 self._end_job()
+                if self._get_worker_state(worker_id) == "running":
+                    self._set_worker_state(worker_id, "idle")
 
     def _update_plugin_progress(
         self,
@@ -2745,7 +2751,7 @@ class DistributedCoordinator:
 
     def _plugin_worker_loop(self, idx: int) -> None:
         worker_id = f"{self.worker_prefix}-plugin-{idx}"
-        self._set_worker_state(worker_id, "running")
+        self._set_worker_state(worker_id, "idle")
         self.logger.info(
             "workflow_plugin_worker_loop_started",
             worker_id=worker_id,
@@ -2778,13 +2784,19 @@ class DistributedCoordinator:
                 self.stop_event.wait(self.cfg.poll_interval_seconds)
                 continue
             if not entry:
+                self._set_worker_state(worker_id, "idle")
                 self.stop_event.wait(self.cfg.poll_interval_seconds)
                 continue
-            self._run_plugin_task(worker_id=worker_id, entry=entry)
+            self._set_worker_state(worker_id, "running")
+            try:
+                self._run_plugin_task(worker_id=worker_id, entry=entry)
+            finally:
+                if self._get_worker_state(worker_id) == "running":
+                    self._set_worker_state(worker_id, "idle")
 
     def _fozzy_worker_loop(self, idx: int) -> None:
         worker_id = f"{self.worker_prefix}-fozzy-{idx}"
-        self._set_worker_state(worker_id, "running")
+        self._set_worker_state(worker_id, "idle")
         self.logger.info("fozzy_worker_loop_started", worker_id=worker_id, worker_index=idx)
         while not self.stop_event.is_set():
             state = self._poll_worker_commands(worker_id)
@@ -2803,7 +2815,7 @@ class DistributedCoordinator:
                     worker_id,
                     "fozzy",
                     self.cfg.lease_seconds,
-                    workflow_id=self._workflow_id,
+                    workflow_id="",
                 )
             except Exception as exc:
                 self.logger.error("fozzy_claim_failed", worker_id=worker_id, error=str(exc))
@@ -2987,7 +2999,7 @@ class DistributedCoordinator:
 
     def _auth0r_worker_loop(self, idx: int) -> None:
         worker_id = f"{self.worker_prefix}-auth0r-{idx}"
-        self._set_worker_state(worker_id, "running")
+        self._set_worker_state(worker_id, "idle")
         self.logger.info("auth0r_worker_loop_started", worker_id=worker_id, worker_index=idx)
         while not self.stop_event.is_set():
             state = self._poll_worker_commands(worker_id)
@@ -3006,7 +3018,7 @@ class DistributedCoordinator:
                     worker_id,
                     "auth0r",
                     self.cfg.lease_seconds,
-                    workflow_id=self._workflow_id,
+                    workflow_id="",
                 )
             except Exception as exc:
                 self.logger.error("auth0r_claim_failed", worker_id=worker_id, error=str(exc))
@@ -3143,7 +3155,7 @@ class DistributedCoordinator:
                 self._end_job()
     def _extractor_worker_loop(self, idx: int) -> None:
         worker_id = f"{self.worker_prefix}-extractor-{idx}"
-        self._set_worker_state(worker_id, "running")
+        self._set_worker_state(worker_id, "idle")
         self.logger.info("extractor_worker_loop_started", worker_id=worker_id, worker_index=idx)
         while not self.stop_event.is_set():
             state = self._poll_worker_commands(worker_id)
@@ -3162,7 +3174,7 @@ class DistributedCoordinator:
                     worker_id,
                     "extractor",
                     self.cfg.lease_seconds,
-                    workflow_id=self._workflow_id,
+                    workflow_id="",
                 )
             except Exception as exc:
                 self.logger.error("extractor_claim_failed", worker_id=worker_id, error=str(exc))
@@ -3413,7 +3425,7 @@ def main(argv: Optional[list[str] ] = None) -> int:
         workflow_config=str(cfg.workflow_config),
         workflow_scheduler_enabled=bool(cfg.workflow_scheduler_enabled),
         workflow_scheduler_interval_seconds=float(cfg.workflow_scheduler_interval_seconds),
-        plugin_workers=max(1, int(cfg.plugin_workers or 1)),
+        plugin_workers=max(0, int(cfg.plugin_workers or 0)),
         plugin_allowlist=cfg.plugin_allowlist,
         legacy_workers_disabled=True,
     )

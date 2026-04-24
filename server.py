@@ -69,6 +69,7 @@ from reporting.server_pages import (
     render_view_logs_html,
     render_workflows_html,
     render_workers_html,
+    render_operations_html,
     render_workflow_definitions_html,
     render_workflow_runs_html,
     render_plugin_definitions_html,
@@ -3933,6 +3934,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/dashboard":
             self._write_text("Dashboard page removed. Use /workers.", status=404)
             return
+        if path == "/operations":
+            self._write_text(render_operations_html(), content_type="text/html; charset=utf-8")
+            return
         if path == "/workers":
             self._write_text(render_workers_html(), content_type="text/html; charset=utf-8")
             return
@@ -5782,7 +5786,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/coord/stage/claim":
             worker_id = str(body.get("worker_id", "") or "").strip()
             stage = str(body.get("stage", "") or "").strip().lower()
-            workflow_id = str(body.get("workflow_id", "default") or "default").strip().lower() or "default"
+            # Workflow is metadata only for tasks; workers claim globally.
+            workflow_id = ""
             lease_seconds = _safe_int(body.get("lease_seconds", DEFAULT_COORDINATOR_LEASE_SECONDS), DEFAULT_COORDINATOR_LEASE_SECONDS)
             plugin_allowlist_raw = body.get("plugin_allowlist")
             plugin_allowlist = (
@@ -5805,7 +5810,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if path == "/api/coord/stage/claim-next":
             worker_id = str(body.get("worker_id", "") or "").strip()
-            workflow_id = str(body.get("workflow_id", "") or "").strip().lower()
             lease_seconds = _safe_int(body.get("lease_seconds", DEFAULT_COORDINATOR_LEASE_SECONDS), DEFAULT_COORDINATOR_LEASE_SECONDS)
             plugin_allowlist_raw = body.get("plugin_allowlist")
             plugin_allowlist = (
@@ -5813,52 +5817,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if isinstance(plugin_allowlist_raw, list)
                 else None
             )
-            catalog = _workflow_catalog_payload()
-            snapshot = self.coordinator_store.workflow_scheduler_snapshot(limit=5000)
-            domains_by_root = {
-                str(item.get("root_domain") or "").strip().lower(): item
-                for item in (snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else [])
-                if isinstance(item, dict) and str(item.get("root_domain") or "").strip()
-            }
-            entry = None
-            candidates = self.coordinator_store.list_claimable_stage_candidates(
-                workflow_id=workflow_id,
+            entry = self.coordinator_store.claim_next_stage(
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                workflow_id="",
                 plugin_allowlist=plugin_allowlist,
-                limit=500,
             )
-            for candidate in candidates:
-                candidate_workflow_id = str(candidate.get("workflow_id") or "").strip().lower()
-                candidate_root_domain = str(candidate.get("root_domain") or "").strip().lower()
-                candidate_stage = str(candidate.get("stage") or "").strip().lower()
-                workflow_payload = catalog.get(candidate_workflow_id) if candidate_workflow_id else None
-                workflow_plugins = workflow_payload.get("plugins") if isinstance(workflow_payload, dict) and isinstance(workflow_payload.get("plugins"), list) else []
-                workflow_entry = None
-                for plugin in workflow_plugins:
-                    if not isinstance(plugin, dict):
-                        continue
-                    plugin_name = str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
-                    if plugin_name == candidate_stage:
-                        workflow_entry = plugin
-                        break
-                domain_row = domains_by_root.get(
-                    candidate_root_domain,
-                    {"root_domain": candidate_root_domain, "artifact_types": [], "plugin_tasks": {}, "targets": {}},
-                )
-                if workflow_entry is not None and not _workflow_stage_prerequisites_satisfied(
-                    workflow_entry,
-                    domain_row=domain_row,
-                    workflow_id=candidate_workflow_id,
-                ):
-                    continue
-                entry = self.coordinator_store.claim_stage_candidate(
-                    workflow_id=candidate_workflow_id or "default",
-                    root_domain=candidate_root_domain,
-                    stage=candidate_stage,
-                    worker_id=worker_id,
-                    lease_seconds=lease_seconds,
-                )
-                if entry is not None:
-                    break
             self._write_json({"ok": True, "entry": entry})
             return
 
@@ -6128,6 +6092,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             plugins = [item for item in (workflow.get("plugins") if isinstance(workflow.get("plugins"), list) else []) if isinstance(item, dict)]
             runnable_plugins = [plugin for plugin in plugins if bool(plugin.get("enabled", True))]
+            starter_plugins = runnable_plugins
             if not runnable_plugins:
                 self._write_json({"error": "workflow has no enabled plugins"}, status=400)
                 return

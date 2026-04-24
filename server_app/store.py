@@ -3086,8 +3086,10 @@ ORDER BY updated_at_utc DESC NULLS LAST;
         activity = str(last_activity or "").strip().lower()
         if activity.startswith("state_"):
             state = CoordinatorStore._normalize_worker_state(activity[6:])
-            if state != "idle":
+            if state in {"paused", "stopped", "errored"}:
                 return state
+            # "running" historically meant "the worker loop is alive".  A worker
+            # with no leased target/stage task is available, not actively running.
             return "idle" if is_online else "stale"
         if activity.startswith("command_") and "error" in activity:
             return "errored"
@@ -3585,11 +3587,18 @@ ORDER BY w.worker_id ASC;
             if status in status_counts:
                 status_counts[status] += 1
             current_targets = [str(item) for item in current_targets_raw if str(item or "").strip()]
-            if current_stage_root_domain and current_stage_root_domain not in current_targets:
+            is_actively_running = status == "running"
+            if is_actively_running and current_stage_root_domain and current_stage_root_domain not in current_targets:
                 current_targets.insert(0, current_stage_root_domain)
+            if not is_actively_running:
+                current_targets = []
+                current_workflow_id = ""
+                current_stage = ""
+                current_stage_status = ""
+                current_stage_activity_at_utc = ""
             current_action = ""
-            if current_workflow_id or current_stage:
-                current_action = f"Current Workflow: {current_workflow_id or 'default'}\nCurrent Plugin: {current_stage or 'unknown'}"
+            if is_actively_running and (current_workflow_id or current_stage):
+                current_action = f"Current Workflow: {current_workflow_id}\nCurrent Plugin: {current_stage}"
             workers.append(
                 {
                     "worker_id": worker_id,
@@ -3603,7 +3612,7 @@ ORDER BY w.worker_id ASC;
                     "urls_scanned_session": int(_row_value(4, 0) or 0),
                     "current_targets": current_targets,
                     "queued_commands": int(_row_value(6, 0) or 0),
-                    "current_workflow_id": current_workflow_id or "default",
+                    "current_workflow_id": current_workflow_id,
                     "current_plugin_name": current_stage,
                     "current_stage_status": current_stage_status,
                     "current_stage_activity_at_utc": current_stage_activity_at_utc,
@@ -3786,7 +3795,7 @@ RETURNING command;
                     command = str(row[0] or "").strip().lower()
                     if next_status == "completed":
                         mapped_state = {
-                            "start": "running",
+                            "start": "idle",
                             "pause": "paused",
                             "stop": "stopped",
                         }.get(command, "idle")
@@ -4146,7 +4155,9 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s AND worker_id = %s;
         plugin_allowlist: Optional[list[str]] = None,
     ) -> Optional[dict[str, Any]]:
         wid = str(worker_id or "").strip()
-        widf = str(workflow_id or "").strip().lower()
+        # Workers are global consumers.  workflow_id is retained on each task for
+        # reporting/progress, but it must never scope task acquisition.
+        widf = ""
         if not wid:
             raise ValueError("worker_id is required")
         lease = max(15, int(lease_seconds or DEFAULT_COORDINATOR_LEASE_SECONDS))
@@ -4165,8 +4176,15 @@ WHERE (
     status = 'pending'
     OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
 )
-  AND (%s = '' OR workflow_id = %s)
   AND (%s::text[] IS NULL OR stage = ANY(%s))
+  AND NOT EXISTS (
+      SELECT 1
+      FROM coordinator_targets q
+      WHERE q.root_domain = coordinator_stage_tasks.root_domain
+        AND q.status = 'running'
+        AND q.lease_expires_at IS NOT NULL
+        AND q.lease_expires_at >= NOW()
+  )
 ORDER BY created_at_utc ASC
 FOR UPDATE SKIP LOCKED
 LIMIT 50;
@@ -4194,7 +4212,7 @@ RETURNING workflow_id, root_domain, stage, status, worker_id, attempt_count, lea
             with conn.cursor() as cur:
                 self._touch_worker_presence(cur, wid, "claim_stage")
                 cur.execute("DELETE FROM coordinator_resource_leases WHERE lease_expires_at < NOW();")
-                cur.execute(candidates_sql, (widf, widf, allowlist or None, allowlist or None))
+                cur.execute(candidates_sql, (allowlist or None, allowlist or None))
                 rows = cur.fetchall()
                 for row in rows:
                     row_map = {
@@ -4298,10 +4316,12 @@ SET lease_expires_at = EXCLUDED.lease_expires_at,
         workflow_id: str = "",
         plugin_allowlist: Optional[list[str]] = None,
     ) -> Optional[dict[str, Any]]:
+        # Intentionally ignore workflow_id: workers pick the next ready task from
+        # the global ready queue.  Workflow remains task metadata only.
         return self.try_claim_stage_with_resources(
             worker_id=worker_id,
             lease_seconds=lease_seconds,
-            workflow_id=workflow_id,
+            workflow_id="",
             plugin_allowlist=plugin_allowlist,
         )
 
@@ -4320,7 +4340,7 @@ SET lease_expires_at = EXCLUDED.lease_expires_at,
         return self.claim_next_stage(
             worker_id=worker_id,
             lease_seconds=lease_seconds,
-            workflow_id=workflow_id,
+            workflow_id="",
             plugin_allowlist=[stg],
         )
 

@@ -26,6 +26,7 @@ from reporting.server_pages import (
     render_view_logs_html,
     render_workflows_html,
     render_workers_html,
+    render_operations_html,
 )
 from server import (
     _PageDataCache,
@@ -48,6 +49,15 @@ def test_render_dashboard_html_contains_expected_heading():
 def test_render_workers_html_contains_expected_heading():
     html = render_workers_html()
     assert "Worker Control Center" in html
+
+
+def test_render_operations_html_contains_expected_controls():
+    html = render_operations_html()
+    assert "Operations Cockpit" in html
+    assert "/api/coord/register-targets" in html
+    assert "/api/coord/workflow/run" in html
+    assert "/api/coord/workers/command" in html
+    assert "Recommended next actions" in html
 
 
 def test_render_crawl_progress_html_contains_expected_heading():
@@ -147,10 +157,33 @@ def test_claim_target_respects_running_stage_domain_lock():
 
 
 def test_claim_next_stage_respects_running_target_domain_lock():
-    source = inspect.getsource(CoordinatorStore.claim_next_stage)
+    source = inspect.getsource(CoordinatorStore.try_claim_stage_with_resources)
     assert "FROM coordinator_targets q" in source
-    assert "q.root_domain = t.root_domain" in source
+    assert "q.root_domain = coordinator_stage_tasks.root_domain" in source
     assert "q.status = 'running'" in source
+
+
+
+
+def test_claim_next_stage_ignores_workflow_scope_for_global_ready_queue():
+    source = inspect.getsource(CoordinatorStore.claim_next_stage)
+    assert 'workflow_id=""' in source
+    assert "global ready queue" in source
+
+
+def test_worker_status_running_presence_without_task_is_idle():
+    assert CoordinatorStore._derive_worker_status(
+        running_targets=0,
+        running_stage_tasks=0,
+        last_activity="state_running",
+        is_online=True,
+    ) == "idle"
+    assert CoordinatorStore._derive_worker_status(
+        running_targets=0,
+        running_stage_tasks=1,
+        last_activity="state_idle",
+        is_online=True,
+    ) == "running"
 
 
 def test_extractor_report_html_escapes_script_content():
@@ -501,10 +534,13 @@ def test_worker_control_snapshot_includes_presence_only_worker():
     assert data["counts"]["total_workers"] == 1
     worker = data["workers"][0]
     assert worker["worker_id"] == "presence-worker-1"
-    assert worker["status"] == "running"
+    assert worker["status"] == "idle"
     assert worker["running_targets"] == 0
     assert worker["running_stage_tasks"] == 0
     assert worker["urls_scanned_session"] == 0
+    assert worker["current_workflow_id"] == ""
+    assert worker["current_plugin_name"] == ""
+    assert worker["current_targets"] == []
 
 
 def test_worker_statuses_includes_presence_only_worker():
@@ -550,7 +586,7 @@ def test_worker_statuses_includes_presence_only_worker():
     assert data["counts"]["total_workers"] == 1
     worker = data["workers"][0]
     assert worker["worker_id"] == "presence-worker-2"
-    assert worker["status"] == "running"
+    assert worker["status"] == "idle"
     assert worker["running_targets"] == 0
     assert worker["running_stage_tasks"] == 0
 
