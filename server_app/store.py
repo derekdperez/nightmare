@@ -1618,7 +1618,7 @@ ORDER BY ordinal_position;
         }
 
     def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
-        safe_limit = max(1, min(5000, int(limit or 2000)))
+        safe_limit = max(1, min(20000, int(limit or 2000)))
         domains_sql = """
 SELECT root_domain
 FROM (
@@ -1629,7 +1629,16 @@ FROM (
     SELECT DISTINCT root_domain FROM coordinator_artifacts
 ) d
 WHERE root_domain IS NOT NULL AND root_domain <> ''
-ORDER BY root_domain ASC
+ORDER BY
+  CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM coordinator_stage_tasks s
+      WHERE s.root_domain = d.root_domain
+    ) THEN 0
+    ELSE 1
+  END ASC,
+  root_domain ASC
 LIMIT %s;
 """
         domains: list[str] = []
@@ -1864,7 +1873,47 @@ WHERE root_domain = %s;
             "artifacts": artifacts,
         }
 
-    
+    def count_stage_tasks(
+        self,
+        *,
+        workflow_id: str = "",
+        root_domains: Optional[list[str]] = None,
+        plugins: Optional[list[str]] = None,
+    ) -> int:
+        widf = str(workflow_id or "").strip().lower()
+        domains = sorted(
+            {
+                str(item or "").strip().lower()
+                for item in (root_domains or [])
+                if str(item or "").strip()
+            }
+        )
+        stages = sorted(
+            {
+                str(item or "").strip().lower()
+                for item in (plugins or [])
+                if str(item or "").strip()
+            }
+        )
+        where_sql = ["1=1"]
+        params: list[Any] = []
+        if widf:
+            where_sql.append("workflow_id = %s")
+            params.append(widf)
+        if domains:
+            where_sql.append("root_domain = ANY(%s)")
+            params.append(domains)
+        if stages:
+            where_sql.append("stage = ANY(%s)")
+            params.append(stages)
+        query = f"SELECT COUNT(*) FROM coordinator_stage_tasks WHERE {' AND '.join(where_sql)};"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                row = cur.fetchone()
+            conn.commit()
+        return int((row[0] if row else 0) or 0)
+
     def crawl_progress_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         safe_limit = max(1, min(2000, int(limit or 2000)))
         sql = """

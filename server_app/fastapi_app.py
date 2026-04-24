@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,6 +13,11 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Reques
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 from server_app.store import CoordinatorStore, _stream_file_chunks
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+WORKFLOW_FILE_SUFFIX = ".workflow.json"
+WORKFLOW_FILE_GLOB = f"*{WORKFLOW_FILE_SUFFIX}"
 
 
 def _bearer_token(header_value: str | None) -> str:
@@ -40,6 +46,86 @@ def _parse_status_filters(payload: dict[str, Any]) -> list[str]:
         seen.add(status)
         normalized.append(status)
     return normalized
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _normalize_workflow_id(value: Any, *, default: str = "") -> str:
+    raw = str(value or "").strip().lower()
+    safe = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    if safe:
+        return safe
+    fallback = str(default or "").strip().lower()
+    return re.sub(r"[^a-z0-9._-]+", "-", fallback).strip("-")
+
+
+def _workflow_id_from_path(path: Path) -> str:
+    name = str(path.name or "")
+    lowered = name.lower()
+    if lowered.endswith(WORKFLOW_FILE_SUFFIX):
+        return _normalize_workflow_id(name[:-len(WORKFLOW_FILE_SUFFIX)])
+    return _normalize_workflow_id(path.stem)
+
+
+def _iter_workflow_paths() -> list[Path]:
+    workflows_dir = BASE_DIR / "workflows"
+    if not workflows_dir.is_dir():
+        return []
+    return sorted(path.resolve() for path in workflows_dir.glob(WORKFLOW_FILE_GLOB) if path.is_file())
+
+
+def _load_workflow_payload(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    workflow_id = _normalize_workflow_id(parsed.get("workflow_id"), default=_workflow_id_from_path(path))
+    parsed["workflow_id"] = workflow_id or _workflow_id_from_path(path)
+    plugins = parsed.get("plugins")
+    parsed["plugins"] = [item for item in plugins if isinstance(item, dict)] if isinstance(plugins, list) else []
+    return parsed
+
+
+def _resolve_workflow_path(workflow_id: str) -> Path | None:
+    safe_id = _normalize_workflow_id(workflow_id)
+    if not safe_id:
+        return None
+    direct = (BASE_DIR / "workflows" / f"{safe_id}{WORKFLOW_FILE_SUFFIX}").resolve()
+    if direct.is_file():
+        return direct
+    for path in _iter_workflow_paths():
+        payload = _load_workflow_payload(path)
+        payload_id = _normalize_workflow_id(payload.get("workflow_id"), default=_workflow_id_from_path(path))
+        if payload_id and payload_id == safe_id:
+            return path
+    return None
+
+
+def _workflow_index_payload() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in _iter_workflow_paths():
+        payload = _load_workflow_payload(path)
+        workflow_id = _normalize_workflow_id(payload.get("workflow_id"), default=_workflow_id_from_path(path))
+        if not workflow_id:
+            continue
+        out.append(
+            {
+                "workflow_id": workflow_id,
+                "description": str(payload.get("description") or "").strip(),
+                "plugin_count": len(payload.get("plugins") if isinstance(payload.get("plugins"), list) else []),
+                "path_rel": str(path.relative_to(BASE_DIR)).replace("\\", "/"),
+            }
+        )
+    out.sort(key=lambda item: str(item.get("workflow_id") or ""))
+    return out
 
 
 def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator_api_token: str = "") -> FastAPI:
