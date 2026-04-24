@@ -5696,9 +5696,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json({"root_domain": root_domain, "artifacts": self.coordinator_store.list_artifacts(root_domain)})
             return
         if path == "/api/coord/workflow-interfaces":
-            if not self._is_coordinator_authorized():
-                self._write_json({"error": "unauthorized"}, status=401)
-                return
             catalog = self._get_workflow_interface_catalog()
             self._write_json(
                 {

@@ -3,6 +3,24 @@
   "workflow_type": "coordinator_plugin_scheduler",
   "workflow_id": "run-recon",
   "description": "Run recon tasks with resumable plugin stages: subdomain enumeration, spider methods, and high-value extraction.",
+  "interfaces": {
+    "control": {
+      "enabled": true,
+      "title": "Recon Workflow Control",
+      "nav_label": "Recon Control",
+      "route": "/workflow-interfaces/run-recon/control",
+      "template": "workflow_interfaces/recon_control.html.j2",
+      "description": "Select targets, choose recon steps, configure plugin parameters, and generate workflow tasks."
+    },
+    "results": {
+      "enabled": true,
+      "title": "Recon Workflow Results",
+      "nav_label": "Recon Results",
+      "route": "/workflow-interfaces/run-recon/results",
+      "template": "workflow_interfaces/recon_results.html.j2",
+      "description": "View per-target recon outcomes and run cleanup actions."
+    }
+  },
   "plugins": [
     {
       "name": "recon_subdomain_enumeration",

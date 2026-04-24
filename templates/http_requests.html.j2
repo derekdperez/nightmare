@@ -217,6 +217,11 @@
 
     const cookieToken = readCookie(TOKEN_COOKIE_NAME);
     if (cookieToken) document.getElementById("token").value = cookieToken;
+    const initParams = new URLSearchParams(window.location.search || "");
+    const initRootDomain = String(initParams.get("root_domain") || "").trim().toLowerCase();
+    if (initRootDomain) document.getElementById("domain").value = initRootDomain;
+    const initSearch = String(initParams.get("q") || "").trim();
+    if (initSearch) document.getElementById("search").value = initSearch;
     document.getElementById("refreshBtn").addEventListener("click", () => {
       state.offset = 0;
       refresh({ forceRefresh: true }).catch((e) => {
