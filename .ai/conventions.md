@@ -470,3 +470,15 @@ ightmare_shared/value_types.py rather than duplicated in multiple executables.
   - Clearing generated tasks should delete non-running matching stage-task rows and explicitly report remaining running tasks/workers.
   - Recon interface clear actions should offer a direct stop-worker path when running tasks block deletion, then require a follow-up clear after workers stop.
   - Domain-scoped workflow data cleanup should remove workflow-produced artifacts and coordinator session rows for that domain.
+
+- Workflow monitor action convention:
+  - The workflows monitor should remain operational-only (no timeline/enqueue/reset admin panels) and expose per-task `Delete`, `Pause`, and `Run` actions.
+  - `Pause` means stage task status `paused` and must prevent worker pickup.
+  - `Run` means force-ready execution and should bypass prerequisite gating once via checkpoint override metadata.
+
+- Navigation convention:
+  - Primary nav should include only: `Workers`, `Workflows`, workflow-generated interface pages, `Workflow Builder`, `Database`, `Docker Status`, `View Logs`.
+  - Dynamic workflow-interface nav hydration should de-duplicate routes client-side to avoid duplicate buttons.
+
+- Recon results surface convention:
+  - Recon results page is the consolidated output surface and should host crawl progress, discovered targets/sitemap, discovered files/high-value files, and extractor match browsing in one workflow-specific page.
