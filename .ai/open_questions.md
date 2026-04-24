@@ -2,4 +2,13 @@
 
 ## 2026-04-24
 
-- In some environments, `/api/coord/workflow/run` reports scheduled rows but immediate post-enqueue verification can still read zero persisted rows. Need to confirm whether this is caused by an external task-reset caller, DB-level trigger/job, or environment-level DB routing mismatch.
+- Recon Control task generation still intermittently diverges from builder-triggered workflow runs in some environments. Need a direct compare of:
+  - exact request payloads,
+  - resulting `coordinator_stage_tasks` row inserts,
+  - immediate post-insert reset/delete events.
+
+- Some deployments report many idle workers while queued tasks are not claimed. Need a quick diagnostic endpoint for:
+  - per-status stage counts,
+  - claim candidate count,
+  - current worker state summary,
+  - plugin allowlist visibility.

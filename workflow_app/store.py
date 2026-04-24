@@ -771,6 +771,8 @@ def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "")
         raise KeyError("workflow definition not found")
     run_id = str(uuid.uuid4())
     root_domain = str(payload.get("root_domain") or payload.get("input", {}).get("root_domain") or "").strip().lower()
+    if not root_domain:
+        raise ValueError("root_domain is required")
     input_json = _json(payload.get("input_json", payload.get("input")), {})
     # max_attempts is a total-attempt cap. 1 means "run once, do not retry".
     # Older workflow JSON often used 0 to mean "not configured"; normalize it to
@@ -827,15 +829,40 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
                     (definition["workflow_key"], root_domain, step["plugin_key"], json.dumps(checkpoint), step_max_attempts),
                 )
         conn.commit()
-    if root_domain:
-        # File/artifact and plugin prerequisite evaluation happens here and on
-        # every worker poll/completion. This makes newly-created runs immediately
-        # claimable when their first ready step has no unmet prerequisite.
+    # File/artifact and plugin prerequisite evaluation happens here and on
+    # every worker poll/completion. This makes newly-created runs immediately
+    # claimable when their first ready step has no unmet prerequisite.
+    try:
+        store.refresh_stage_task_readiness(root_domain=root_domain, workflow_id=definition["workflow_key"], limit=5000)
+    except Exception:
+        pass
+
+    persisted_stage_task_rows = 0
+    if hasattr(store, "count_stage_tasks"):
         try:
-            store.refresh_stage_task_readiness(root_domain=root_domain, workflow_id=definition["workflow_key"], limit=5000)
+            persisted_stage_task_rows = int(
+                store.count_stage_tasks(
+                    workflow_id=definition["workflow_key"],
+                    root_domains=[root_domain],
+                    plugins=[],
+                )
+                or 0
+            )
         except Exception:
-            pass
-    return {"id": run_id, "workflow_key": definition["workflow_key"], "root_domain": root_domain, "status": "queued"}
+            persisted_stage_task_rows = 0
+    else:
+        persisted_stage_task_rows = len(definition.get("steps") or [])
+
+    if persisted_stage_task_rows <= 0 and bool(definition.get("steps")):
+        raise RuntimeError("workflow run created but no rows were persisted to coordinator_stage_tasks")
+
+    return {
+        "id": run_id,
+        "workflow_key": definition["workflow_key"],
+        "root_domain": root_domain,
+        "status": "queued",
+        "persisted_stage_task_rows": persisted_stage_task_rows,
+    }
 
 
 def list_workflow_runs(store: Any, *, limit: int = 100) -> list[dict[str, Any]]:

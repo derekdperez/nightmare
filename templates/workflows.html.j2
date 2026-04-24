@@ -387,7 +387,7 @@
       const limit = Number(document.getElementById("limitSelect").value || 5000);
       const qs = new URLSearchParams({
         limit: String(Math.max(1, Math.min(5000, limit))),
-        cache_mode: "prefer",
+        cache_mode: "refresh",
       });
       const response = await fetch(`/api/coord/workflow-snapshot?${qs.toString()}`, {
         credentials: "same-origin",

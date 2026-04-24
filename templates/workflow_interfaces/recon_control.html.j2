@@ -281,22 +281,80 @@
       }
 
       async function generateTasks() {
-        const plugins = selectedPluginList();
-        if (!plugins.length) throw new Error("Select at least one workflow step.");
-        const domains = selectedDomainList();
-        if (!allDomainsSelected() && !domains.length) throw new Error("Select one or more domains, or choose ALL domains.");
-        const body = {
-          workflow_id: WORKFLOW_ID,
-          root_domains: allDomainsSelected() ? [] : domains,
-          plugins,
-          all_domains: allDomainsSelected(),
-          domain_limit: 10000,
-          plugin_parameter_overrides: state.pluginOverrides,
-          persist_parameter_overrides: true,
-          reload_workers: true,
-          reason: "workflow_interface_generate_tasks",
+        const selectedPlugins = selectedPluginList();
+        if (!selectedPlugins.length) throw new Error("Select at least one workflow step.");
+        const targetDomains = allDomainsSelected()
+          ? Array.from(
+              new Set(
+                state.domains
+                  .map((row) => String(row && row.root_domain ? row.root_domain : "").trim().toLowerCase())
+                  .filter(Boolean)
+              )
+            ).sort()
+          : selectedDomainList();
+        if (!targetDomains.length) throw new Error("Select one or more domains, or choose ALL domains.");
+
+        const allWorkflowPlugins = Array.from(new Set(state.plugins.map((plugin) => pluginName(plugin)).filter(Boolean))).sort();
+        const selectedSet = new Set(selectedPlugins);
+        const unselectedPlugins = allWorkflowPlugins.filter((name) => !selectedSet.has(name));
+        const createdRuns = [];
+
+        for (const rootDomain of targetDomains) {
+          await fetchJson("/api/workflow-runs", {
+            method: "POST",
+            body: JSON.stringify({
+              workflow_key: WORKFLOW_ID,
+              root_domain: rootDomain,
+              input: { root_domain: rootDomain },
+              trigger_source: "recon_control_generate",
+            }),
+          });
+          createdRuns.push(rootDomain);
+          if (unselectedPlugins.length) {
+            await fetchJson("/api/coord/workflow/clear-generated-tasks", {
+              method: "POST",
+              body: JSON.stringify({
+                workflow_id: WORKFLOW_ID,
+                root_domains: [rootDomain],
+                plugins: unselectedPlugins,
+                hard_delete: true,
+                stop_running_workers: false,
+              }),
+            });
+          }
+        }
+
+        const verifyPayload = await fetchJson(
+          `/api/coord/workflow-snapshot?limit=${encodeURIComponent(Math.max(5000, targetDomains.length * 20))}&cache_mode=refresh`
+        );
+        const domains = Array.isArray(verifyPayload.domains) ? verifyPayload.domains : [];
+        const targetSet = new Set(targetDomains);
+        let visibleTasks = 0;
+        for (const row of domains) {
+          if (!row || typeof row !== "object") continue;
+          const rootDomain = String(row.root_domain || "").trim().toLowerCase();
+          if (!rootDomain || !targetSet.has(rootDomain)) continue;
+          const workflowTasksAll = row.plugin_tasks && typeof row.plugin_tasks === "object" ? row.plugin_tasks : {};
+          const workflowTasks = workflowTasksAll[WORKFLOW_ID] && typeof workflowTasksAll[WORKFLOW_ID] === "object"
+            ? workflowTasksAll[WORKFLOW_ID]
+            : {};
+          for (const task of Object.values(workflowTasks)) {
+            if (!task || typeof task !== "object") continue;
+            const plugin = String(task.plugin_name || task.stage || "").trim().toLowerCase();
+            if (!plugin || !selectedSet.has(plugin)) continue;
+            visibleTasks += 1;
+          }
+        }
+        if (visibleTasks <= 0) {
+          throw new Error("Workflow runs were created, but no stage tasks are visible in the live workflow snapshot.");
+        }
+        return {
+          ok: true,
+          domains_count: createdRuns.length,
+          selected_plugins: selectedPlugins,
+          selected_plugins_count: selectedPlugins.length,
+          visible_tasks: visibleTasks,
         };
-        return fetchJson("/api/coord/workflow/run", { method: "POST", body: JSON.stringify(body) });
       }
 
       async function clearCurrentTasks(stopRunningWorkers = false) {
@@ -343,20 +401,10 @@
         try {
           setStatus("Generating workflow tasks...");
           const payload = await generateTasks();
-          const scheduled = Number((payload.counts || {}).scheduled || 0);
-          const alreadyPending = Number((payload.counts || {}).already_pending || 0);
-          const alreadyRunning = Number((payload.counts || {}).already_running || 0);
-          const alreadyCompleted = Number((payload.counts || {}).already_completed || 0);
-          if (scheduled <= 0) {
-            setStatus(
-              `No new tasks scheduled. already_pending=${alreadyPending}, already_running=${alreadyRunning}, already_completed=${alreadyCompleted}.`,
-              true
-            );
-          } else {
-            setStatus(
-              `Scheduled ${scheduled} tasks. already_pending=${alreadyPending}, already_running=${alreadyRunning}, already_completed=${alreadyCompleted}.`
-            );
-          }
+          const domainsCount = Number(payload.domains_count || 0);
+          const visibleTasks = Number(payload.visible_tasks || 0);
+          const selectedPluginsCount = Number(payload.selected_plugins_count || 0);
+          setStatus(`Generated tasks for ${domainsCount} domains across ${selectedPluginsCount} selected steps. Live visible tasks: ${visibleTasks}.`);
           await loadDomains();
         } catch (err) {
           setStatus(err.message || err, true);

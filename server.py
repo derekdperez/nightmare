@@ -6047,6 +6047,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._write_json({"ok": True, "item": item})
                     return
                 if path == "/api/workflow-runs":
+                    seed_builtin_plugins(self.coordinator_store)
+                    seed_builtin_workflows(self.coordinator_store)
                     item = create_workflow_run(self.coordinator_store, body, actor=actor)
                     self._write_json({"ok": True, "item": item})
                     return

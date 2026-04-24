@@ -1,11 +1,40 @@
 # Architecture Notes
 
-## 2026-04-24
+## Active Design
 
-- Workflow task control now supports explicit operator actions from the monitor:
-  - `Delete`: removes the stage task row.
-  - `Pause`: sets stage task to `paused` and clears active lease ownership.
-  - `Run`: sets stage task to `ready` and marks one-shot prerequisite bypass via checkpoint override.
-- Claim path consumes `force_run_override` and bypasses readiness gating for that claim, then clears override keys on transition to `running`.
-- Recon output surfaces were consolidated into workflow interface page `recon_results` (crawl/discovery/files/extractor views).
-- Primary navigation trimmed to operational pages and workflow-generated interfaces only.
+- `server.py` is the main production web/API runtime.
+  - Serves core pages (`/workers`, `/workflows`, `/workflow-definitions`, `/database`, `/docker-status`, `/view-logs`).
+  - Serves workflow-generated UI routes (for example `/workflow-interfaces/run-recon/control` and `/workflow-interfaces/run-recon/results`).
+  - Exposes both:
+    - workflow-builder APIs (`/api/workflow-definitions*`, `/api/workflow-runs*`)
+    - coordinator APIs (`/api/coord/*`).
+
+- `server_app/fastapi_app.py` provides a coordinator API surface used by FastAPI deployment paths.
+  - Not full feature parity with all `server.py` web/builder routes.
+  - Includes stage lifecycle and `/api/coord/workflow/run`.
+
+- `coordinator.py` runtime is plugin-worker centric.
+  - Starts plugin workers (`plugin_workers`) and optional scheduler loop.
+  - Legacy dedicated worker loops are intentionally disabled in `run()`.
+
+## Queue and Claim Rules
+
+- Stage task identity:
+  `workflow_id + root_domain + stage`.
+- Claim path:
+  `CoordinatorStore.try_claim_stage_with_resources()`.
+- Readiness transition:
+  `refresh_stage_task_readiness()` re-evaluates pending/ready tasks based on workflow preconditions.
+- Manual task controls:
+  - `Delete`: remove stage task row.
+  - `Pause`: set `paused`, clear lease/worker.
+  - `Run`: set `ready` + one-shot `force_run_override`.
+- Force-run behavior:
+  claim candidate selection allows `force_run_override` tasks to bypass normal running-target gating.
+
+## Recon Workflow Surfaces
+
+- Recon control page:
+  task generation + per-step parameter overrides + task clearing.
+- Recon results page:
+  recon rollup + crawl progress + discovered targets/files + extractor visibility.
