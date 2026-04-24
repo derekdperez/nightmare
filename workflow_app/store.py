@@ -454,6 +454,125 @@ def publish_workflow_definition(store: Any, workflow_key: str, *, actor: str = "
     return {"workflow_key": definition["workflow_key"], "version": version, "status": "published"}
 
 
+
+def set_workflow_definition_status(store: Any, workflow_key: str, status: str, *, actor: str = "") -> dict[str, Any]:
+    ensure_workflow_schema(store)
+    key = slugify_key(workflow_key, fallback="")
+    next_status = str(status or "").strip().lower()
+    allowed = {"draft", "published", "paused", "archived"}
+    if next_status not in allowed:
+        raise ValueError(f"workflow status must be one of {sorted(allowed)}")
+    with store._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+UPDATE workflow_definitions
+SET status=%s, updated_by=%s, updated_at_utc=NOW()
+WHERE workflow_key=%s
+RETURNING id::text, workflow_key, version, name, status, updated_at_utc;
+""",
+            (next_status, actor, key),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise KeyError("workflow definition not found")
+        cur.execute(
+            "INSERT INTO workflow_definition_audit(entity_type, entity_key, entity_version, action, actor, after_json) VALUES('workflow',%s,%s,%s,%s,%s::jsonb)",
+            (row[1], int(row[2]), f"status:{next_status}", actor, json.dumps({"workflow_key": row[1], "status": next_status})),
+        )
+        conn.commit()
+    return {
+        "id": row[0],
+        "workflow_key": row[1],
+        "version": int(row[2]),
+        "name": row[3],
+        "status": row[4],
+        "updated_at_utc": row[5].isoformat() if row[5] else None,
+    }
+
+
+def set_workflow_run_status(store: Any, run_id: str, status: str, *, actor: str = "") -> dict[str, Any]:
+    ensure_workflow_schema(store)
+    next_status = str(status or "").strip().lower()
+    allowed = {"queued", "running", "paused", "cancelled", "completed", "failed"}
+    if next_status not in allowed:
+        raise ValueError(f"workflow run status must be one of {sorted(allowed)}")
+    with store._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+UPDATE workflow_runs
+SET status=%s,
+    started_at_utc=CASE WHEN %s='running' AND started_at_utc IS NULL THEN NOW() ELSE started_at_utc END,
+    completed_at_utc=CASE WHEN %s IN ('cancelled','completed','failed') THEN NOW() ELSE completed_at_utc END,
+    updated_at_utc=NOW()
+WHERE id=%s
+RETURNING id::text, workflow_key, root_domain, status, updated_at_utc;
+""",
+            (next_status, next_status, next_status, run_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise KeyError("workflow run not found")
+        if next_status in {"paused", "cancelled"}:
+            # Prevent workers from claiming queued/ready work for stopped runs. Running work is not killed
+            # from here, but follow-up claims are blocked and UI reflects the operator action.
+            step_status = "pending" if next_status == "paused" else "cancelled"
+            cur.execute(
+                """
+UPDATE workflow_step_runs
+SET status=%s,
+    blocked_reason=%s,
+    lease_expires_at=NULL,
+    updated_at_utc=NOW()
+WHERE workflow_run_id=%s AND status IN ('queued','ready','pending','running');
+""",
+                (step_status, f"workflow run {next_status} by {actor or 'web'}", run_id),
+            )
+            cur.execute(
+                """
+UPDATE coordinator_stage_tasks
+SET status=%s,
+    worker_id=NULL,
+    lease_expires_at=NULL,
+    error=%s,
+    updated_at_utc=NOW()
+WHERE checkpoint_json->>'workflow_run_id' = %s AND status IN ('ready','pending','running');
+""",
+                (step_status, f"workflow run {next_status} by {actor or 'web'}", run_id),
+            )
+        elif next_status in {"queued", "running"}:
+            # Resume first non-completed step as ready; prerequisite re-evaluation still happens at claim time.
+            cur.execute(
+                """
+WITH next_step AS (
+  SELECT id FROM workflow_step_runs
+  WHERE workflow_run_id=%s AND status IN ('pending','paused','queued')
+  ORDER BY ordinal ASC
+  LIMIT 1
+)
+UPDATE workflow_step_runs s
+SET status='ready', blocked_reason='', updated_at_utc=NOW()
+FROM next_step
+WHERE s.id = next_step.id;
+""",
+                (run_id,),
+            )
+            cur.execute(
+                """
+UPDATE coordinator_stage_tasks
+SET status='ready', error=NULL, updated_at_utc=NOW()
+WHERE checkpoint_json->>'workflow_run_id' = %s AND status IN ('pending','paused','queued')
+  AND stage = (
+    SELECT plugin_key FROM workflow_step_runs
+    WHERE workflow_run_id=%s AND status='ready'
+    ORDER BY ordinal ASC LIMIT 1
+  );
+""",
+                (run_id, run_id),
+            )
+        conn.commit()
+    return {"id": row[0], "workflow_key": row[1], "root_domain": row[2], "status": row[3], "updated_at_utc": row[4].isoformat() if row[4] else None}
+
+
 def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
     ensure_workflow_schema(store)
     workflow_key = slugify_key(str(payload.get("workflow_key") or ""), fallback="")
