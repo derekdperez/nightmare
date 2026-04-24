@@ -277,7 +277,6 @@ def _normalize_workflow_interface_template(value: Any) -> str:
 
 
 def _workflow_interface_catalog_payload() -> dict[str, Any]:
-    interfaces: list[dict[str, Any]] = []
     routes: dict[str, dict[str, Any]] = {}
     for path in _iter_workflow_paths():
         payload = _load_workflow_payload(path)
@@ -326,9 +325,10 @@ def _workflow_interface_catalog_payload() -> dict[str, Any]:
                 "template": template_name,
                 "path_rel": _to_repo_relative_path(path) or str(path),
             }
-            interfaces.append(entry)
-            if route not in routes:
-                routes[route] = entry
+            # Last writer wins for duplicate routes so aliases/legacy workflow files
+            # do not generate duplicate navigation links.
+            routes[route] = entry
+    interfaces = list(routes.values())
     interfaces.sort(key=lambda row: (str(row.get("workflow_id") or ""), str(row.get("interface_type") or "")))
     return {"generated_at_utc": _iso_now(), "interfaces": interfaces, "routes": routes}
 

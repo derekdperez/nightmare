@@ -299,7 +299,7 @@
         return fetchJson("/api/coord/workflow/run", { method: "POST", body: JSON.stringify(body) });
       }
 
-      async function clearCurrentTasks() {
+      async function clearCurrentTasks(stopRunningWorkers = false) {
         const plugins = selectedPluginList();
         const domains = selectedDomainList();
         if (!allDomainsSelected() && !domains.length) throw new Error("Select one or more domains, or choose ALL domains.");
@@ -308,7 +308,7 @@
           root_domains: allDomainsSelected() ? [] : domains,
           plugins,
           hard_delete: true,
-          stop_running_workers: false,
+          stop_running_workers: Boolean(stopRunningWorkers),
         };
         return fetchJson("/api/coord/workflow/clear-generated-tasks", { method: "POST", body: JSON.stringify(body) });
       }
@@ -353,12 +353,31 @@
       document.getElementById("clearTasksBtn").addEventListener("click", async () => {
         try {
           setStatus("Clearing workflow tasks...");
-          const payload = await clearCurrentTasks();
+          let payload = await clearCurrentTasks(false);
           const affected = Number((payload.result || {}).affected_rows || 0);
-          const running = Number(payload.running_tasks_remaining || 0);
+          let running = Number(payload.running_tasks_remaining || 0);
           if (running > 0) {
             const workers = Array.isArray(payload.running_workers) ? payload.running_workers.join(", ") : "";
-            setStatus(`Cleared ${affected} task rows. ${running} running tasks remain. Stop workers: ${workers}`, true);
+            const shouldStop = window.confirm(
+              `Cleared ${affected} task rows. ${running} running tasks remain and cannot be deleted while running.` +
+              `${workers ? `\nRunning workers: ${workers}` : ""}\n\nQueue stop commands for those workers now?`
+            );
+            if (shouldStop) {
+              setStatus("Queueing stop commands for running workers...");
+              payload = await clearCurrentTasks(true);
+              running = Number(payload.running_tasks_remaining || 0);
+              const stopQueued = Array.isArray(payload.stop_commands_queued) ? payload.stop_commands_queued.length : 0;
+              if (running > 0) {
+                setStatus(
+                  `Queued stop on ${stopQueued} workers. ${running} running tasks still remain until workers stop; run Clear again after stop is observed.`,
+                  true
+                );
+              } else {
+                setStatus(`Queued stop on ${stopQueued} workers and cleared task rows.`);
+              }
+            } else {
+              setStatus(`Cleared ${affected} task rows. ${running} running tasks remain.`, true);
+            }
           } else {
             setStatus(`Cleared ${affected} task rows.`);
           }
