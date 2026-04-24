@@ -6626,6 +6626,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower() in selected_plugins
                 ]
             starter_plugins = list(runnable_plugins)
+            runnable_plugin_names = sorted(
+                {
+                    str(item.get("name") or item.get("plugin_name") or item.get("stage") or "").strip().lower()
+                    for item in starter_plugins
+                    if str(item.get("name") or item.get("plugin_name") or item.get("stage") or "").strip()
+                }
+            )
             if not runnable_plugins:
                 self._write_json({"error": "workflow has no enabled plugins"}, status=400)
                 return
@@ -6735,6 +6742,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "saved_parameter_overrides": saved_parameter_overrides,
                 },
             )
+            persisted_stage_task_rows = self.coordinator_store.count_stage_tasks(
+                workflow_id=workflow_id,
+                root_domains=root_domains,
+                plugins=runnable_plugin_names,
+            )
+            if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
+                self._write_json(
+                    {
+                        "error": "workflow run reported scheduled tasks but no rows were persisted to coordinator_stage_tasks",
+                        "workflow_id": workflow_id,
+                        "domains_count": len(root_domains),
+                        "selected_plugins": sorted(selected_plugins),
+                    },
+                    status=500,
+                )
+                return
             reload_workers_queued: list[str] = []
             if saved_parameter_overrides and bool(body.get("reload_workers", True)):
                 worker_snapshot = self.coordinator_store.worker_statuses(stale_after_seconds=DEFAULT_COORDINATOR_LEASE_SECONDS)
@@ -6758,13 +6781,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "domains_count": len(root_domains),
                     "domains": root_domains,
                     "selected_plugins": sorted(selected_plugins),
-                    "starter_plugins": [
-                        str(item.get("name") or item.get("plugin_name") or item.get("stage") or "").strip().lower()
-                        for item in starter_plugins
-                    ],
+                    "starter_plugins": runnable_plugin_names,
                     "saved_parameter_overrides": saved_parameter_overrides,
                     "reload_workers_queued": reload_workers_queued,
                     "counts": counts,
+                    "persisted_stage_task_rows": int(persisted_stage_task_rows),
                     "results": rows[:1000],
                     "results_truncated": max(0, len(rows) - 1000),
                 }

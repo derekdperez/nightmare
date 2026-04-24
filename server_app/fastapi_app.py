@@ -566,6 +566,201 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
     ) -> dict[str, Any]:
         return store.get_fleet_settings()
 
+    @app.get("/api/coord/workflow-config")
+    def workflow_config(
+        workflow_id: str = Query(default="run-recon"),
+        _auth: None = Depends(require_auth),
+    ) -> dict[str, Any]:
+        safe_workflow_id = _normalize_workflow_id(workflow_id, default="run-recon")
+        workflow_path = _resolve_workflow_path(safe_workflow_id)
+        if workflow_path is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": f"workflow not found: {safe_workflow_id or 'unknown'}",
+                    "available_workflows": _workflow_index_payload(),
+                },
+            )
+        workflow = _load_workflow_payload(workflow_path)
+        if not workflow:
+            raise HTTPException(status_code=500, detail=f"workflow config is empty or invalid: {workflow_path.name}")
+        return {
+            "ok": True,
+            "workflow_id": str(workflow.get("workflow_id") or safe_workflow_id),
+            "path_rel": str(workflow_path.relative_to(BASE_DIR)).replace("\\", "/"),
+            "workflow": workflow,
+            "available_workflows": _workflow_index_payload(),
+        }
+
+    @app.post("/api/coord/workflow/run")
+    def workflow_run(
+        body: dict[str, Any] = Body(default_factory=dict),
+        _auth: None = Depends(require_auth),
+        store: CoordinatorStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        workflow_id = _normalize_workflow_id(body.get("workflow_id"), default="run-recon")
+        workflow_path = _resolve_workflow_path(workflow_id)
+        if workflow_path is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": f"workflow not found: {workflow_id or 'unknown'}",
+                    "available_workflows": _workflow_index_payload(),
+                },
+            )
+        workflow = _load_workflow_payload(workflow_path)
+        if not workflow:
+            raise HTTPException(status_code=500, detail=f"workflow config is empty or invalid: {workflow_path.name}")
+        plugins = [item for item in (workflow.get("plugins") if isinstance(workflow.get("plugins"), list) else []) if isinstance(item, dict)]
+
+        selected_plugins_raw = body.get("plugins")
+        selected_plugins: set[str] = set()
+        if isinstance(selected_plugins_raw, str):
+            selected_plugins = {
+                str(item or "").strip().lower()
+                for item in selected_plugins_raw.split(",")
+                if str(item or "").strip()
+            }
+        elif isinstance(selected_plugins_raw, list):
+            selected_plugins = {
+                str(item or "").strip().lower()
+                for item in selected_plugins_raw
+                if str(item or "").strip()
+            }
+
+        runnable_plugins = [plugin for plugin in plugins if bool(plugin.get("enabled", True))]
+        if selected_plugins:
+            runnable_plugins = [
+                plugin
+                for plugin in runnable_plugins
+                if str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower() in selected_plugins
+            ]
+        if not runnable_plugins:
+            raise HTTPException(status_code=400, detail="workflow has no enabled plugins")
+
+        plugin_parameter_overrides_raw = body.get("plugin_parameter_overrides")
+        plugin_parameter_overrides: dict[str, dict[str, Any]] = {}
+        if isinstance(plugin_parameter_overrides_raw, dict):
+            for plugin_name, params in plugin_parameter_overrides_raw.items():
+                safe_name = str(plugin_name or "").strip().lower()
+                if not safe_name or not isinstance(params, dict):
+                    continue
+                plugin_parameter_overrides[safe_name] = dict(params)
+        saved_parameter_overrides = False
+        if plugin_parameter_overrides and bool(body.get("persist_parameter_overrides", True)):
+            changed = False
+            for plugin in plugins:
+                plugin_name = str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
+                if not plugin_name:
+                    continue
+                override = plugin_parameter_overrides.get(plugin_name)
+                if not isinstance(override, dict):
+                    continue
+                current_params = dict(plugin.get("parameters") or {}) if isinstance(plugin.get("parameters"), dict) else {}
+                merged_params = {**current_params, **override}
+                if merged_params != current_params:
+                    plugin["parameters"] = merged_params
+                    changed = True
+            if changed:
+                workflow["plugins"] = plugins
+                workflow_path.write_text(json.dumps(workflow, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                saved_parameter_overrides = True
+
+        root_domains_raw = body.get("root_domains")
+        root_domains: list[str] = []
+        if isinstance(root_domains_raw, list):
+            root_domains = sorted({str(item or "").strip().lower() for item in root_domains_raw if str(item or "").strip()})
+        if not root_domains:
+            domain_limit = max(1, min(20000, _safe_int(body.get("domain_limit", 5000), 5000)))
+            snapshot = store.workflow_scheduler_snapshot(limit=domain_limit)
+            root_domains = sorted(
+                {
+                    str(item.get("root_domain") or "").strip().lower()
+                    for item in (snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else [])
+                    if str(item.get("root_domain") or "").strip()
+                }
+            )
+        if not root_domains:
+            raise HTTPException(status_code=400, detail="no domains available to run workflow")
+
+        enqueue_reason = str(body.get("reason", "") or "").strip() or f"manual_run:{workflow_id}"
+        allow_retry_failed = bool(body.get("allow_retry_failed", False))
+        rows: list[dict[str, Any]] = []
+        counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
+        plugin_names = sorted(
+            {
+                str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
+                for plugin in runnable_plugins
+                if str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip()
+            }
+        )
+        for root_domain in root_domains:
+            for plugin in runnable_plugins:
+                plugin_name = str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
+                if not plugin_name:
+                    continue
+                resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
+                max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                result = store.schedule_stage(
+                    root_domain,
+                    plugin_name,
+                    workflow_id=workflow_id,
+                    reason=enqueue_reason,
+                    allow_retry_failed=allow_retry_failed,
+                    max_attempts=max_attempts,
+                    checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
+                    progress={"status": "queued", "plugin_name": plugin_name},
+                    progress_artifact_type=f"workflow_progress_{plugin_name}",
+                    resume_mode=resume_mode,
+                )
+                reason = str(result.get("reason") or "")
+                if bool(result.get("scheduled")):
+                    counts["scheduled"] += 1
+                elif reason == "already_pending":
+                    counts["already_pending"] += 1
+                elif reason == "already_running":
+                    counts["already_running"] += 1
+                elif reason == "already_completed":
+                    counts["already_completed"] += 1
+                elif reason.startswith("unsupported_status_") or reason in {"retry_not_allowed", "max_attempts_reached"}:
+                    counts["failed"] += 1
+                else:
+                    counts["other"] += 1
+                rows.append(
+                    {
+                        "root_domain": root_domain,
+                        "plugin_name": plugin_name,
+                        "scheduled": bool(result.get("scheduled")),
+                        "reason": reason,
+                        "status": str(result.get("status") or ""),
+                    }
+                )
+
+        persisted_stage_task_rows = store.count_stage_tasks(
+            workflow_id=workflow_id,
+            root_domains=root_domains,
+            plugins=plugin_names,
+        )
+        if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
+            raise HTTPException(
+                status_code=500,
+                detail="workflow run reported scheduled tasks but no rows were persisted to coordinator_stage_tasks",
+            )
+
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "domains_count": len(root_domains),
+            "domains": root_domains,
+            "selected_plugins": sorted(selected_plugins),
+            "starter_plugins": plugin_names,
+            "saved_parameter_overrides": saved_parameter_overrides,
+            "counts": counts,
+            "persisted_stage_task_rows": int(persisted_stage_task_rows),
+            "results": rows[:1000],
+            "results_truncated": max(0, len(rows) - 1000),
+        }
+
     @app.get("/api/coord/workflow-snapshot")
     def workflow_snapshot(
         limit: int = Query(default=2000),
