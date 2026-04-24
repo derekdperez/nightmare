@@ -687,6 +687,8 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         allow_retry_failed = bool(body.get("allow_retry_failed", False))
         rows: list[dict[str, Any]] = []
         counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
+        retry_counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
+        requeue_attempted = False
         plugin_names = sorted(
             {
                 str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
@@ -742,9 +744,55 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             plugins=plugin_names,
         )
         if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
+            requeue_attempted = True
+            for root_domain in root_domains:
+                for plugin in runnable_plugins:
+                    plugin_name = str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
+                    if not plugin_name:
+                        continue
+                    resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
+                    max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                    retry_result = store.schedule_stage(
+                        root_domain,
+                        plugin_name,
+                        workflow_id=workflow_id,
+                        reason=f"{enqueue_reason}:retry_after_zero_persist",
+                        allow_retry_failed=allow_retry_failed,
+                        max_attempts=max_attempts,
+                        checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
+                        progress={"status": "queued", "plugin_name": plugin_name},
+                        progress_artifact_type=f"workflow_progress_{plugin_name}",
+                        resume_mode=resume_mode,
+                    )
+                    retry_reason = str(retry_result.get("reason") or "")
+                    if bool(retry_result.get("scheduled")):
+                        retry_counts["scheduled"] += 1
+                    elif retry_reason == "already_pending":
+                        retry_counts["already_pending"] += 1
+                    elif retry_reason == "already_running":
+                        retry_counts["already_running"] += 1
+                    elif retry_reason == "already_completed":
+                        retry_counts["already_completed"] += 1
+                    elif retry_reason.startswith("unsupported_status_") or retry_reason in {"retry_not_allowed", "max_attempts_reached"}:
+                        retry_counts["failed"] += 1
+                    else:
+                        retry_counts["other"] += 1
+            persisted_stage_task_rows = store.count_stage_tasks(
+                workflow_id=workflow_id,
+                root_domains=root_domains,
+                plugins=plugin_names,
+            )
+        if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
             raise HTTPException(
                 status_code=500,
-                detail="workflow run reported scheduled tasks but no rows were persisted to coordinator_stage_tasks",
+                detail={
+                    "error": "workflow run reported scheduled tasks but no rows were persisted to coordinator_stage_tasks",
+                    "workflow_id": workflow_id,
+                    "domains_count": len(root_domains),
+                    "selected_plugins": sorted(selected_plugins),
+                    "requeue_attempted": requeue_attempted,
+                    "requeue_counts": retry_counts,
+                },
             )
 
         return {
@@ -757,6 +805,8 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             "saved_parameter_overrides": saved_parameter_overrides,
             "counts": counts,
             "persisted_stage_task_rows": int(persisted_stage_task_rows),
+            "requeue_attempted": requeue_attempted,
+            "requeue_counts": retry_counts,
             "results": rows[:1000],
             "results_truncated": max(0, len(rows) - 1000),
         }

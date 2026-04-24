@@ -65,4 +65,8 @@ def test_fastapi_workflow_run_fails_when_persistence_check_misses_rows() -> None
     )
     assert response.status_code == 500
     payload = response.json()
-    assert "no rows were persisted" in str(payload.get("detail") or "").lower()
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        assert "no rows were persisted" in str(detail.get("error") or "").lower()
+    else:
+        assert "no rows were persisted" in str(detail or "").lower()
