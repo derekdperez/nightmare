@@ -66,6 +66,13 @@
     <div class="table-wrap"><table id="workflowTable"><thead><tr><th>Domain</th><th>Running Tasks</th><th>Pending Tasks</th><th>Failed Tasks</th><th>Active Stages</th><th>Workflow IDs</th></tr></thead><tbody id="workflowRows"><tr><td colspan="6">Loading...</td></tr></tbody></table></div>
   </div>
   <div class="section">
+    <h2>Coordinator Observability</h2>
+    <div class="table-wrap"><table id="observabilityTable"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody id="observabilityRows"><tr><td colspan="2">Loading...</td></tr></tbody></table></div>
+    <div class="muted" style="margin-top:8px">
+      Workflow controls are available at <a href="/workflow-runs">Workflow Runs</a> (cancel run + retry failed tasks).
+    </div>
+  </div>
+  <div class="section">
     <h2>Detailed Log Sources</h2>
     <div class="table-wrap"><table id="logSourceTable"><thead><tr><th>Label</th><th>Type</th><th>Source ID</th><th>Details</th></tr></thead><tbody id="logSourceRows"><tr><td colspan="4">Loading...</td></tr></tbody></table></div>
   </div>
@@ -95,7 +102,7 @@
       const status = document.getElementById("statusText");
       status.textContent = "Loading...";
       try {
-        const [docker, events, db, logs, workers, workflows, logSources] = await Promise.all([
+        const [docker, events, db, logs, workers, workflows, logSources, observability] = await Promise.all([
           authJson("/api/coord/docker-status?include_logs=0&log_lines=100"),
           authJson("/api/coord/events?limit=100&offset=0&sort_dir=desc"),
           authJson("/api/coord/database-status"),
@@ -103,6 +110,7 @@
           authJson("/api/coord/workers?stale_after_seconds=180"),
           authJson("/api/coord/workflow-snapshot?limit=2000"),
           authJson("/api/coord/log-sources"),
+          authJson("/api/coord/observability/summary"),
         ]);
 
         const vmRows = ((docker.ec2_instances && docker.ec2_instances.instances) || []).map((r) =>
@@ -166,6 +174,25 @@
         }).join("");
         setRows("logSourceRows", logSourceRows, 4);
 
+        const statusCounts = observability.stage_task_status_counts || {};
+        const workerCounts = observability.workers || {};
+        const observabilityRows = [
+          ["Generated At", observability.generated_at_utc || ""],
+          ["Active Workflow Runs", observability.active_workflow_runs || 0],
+          ["Oldest Ready Task Age (s)", observability.oldest_ready_task_age_seconds || 0],
+          ["Events (Last 5m)", (observability.event_volume || {}).last_5m || 0],
+          ["Events (Last 1h)", (observability.event_volume || {}).last_1h || 0],
+          ["Active Leases", (observability.leases || {}).active_leases || 0],
+          ["Expired Leases", (observability.leases || {}).expired_leases || 0],
+          ["Tasks Running", statusCounts.running || 0],
+          ["Tasks Ready", statusCounts.ready || 0],
+          ["Tasks Failed", statusCounts.failed || 0],
+          ["Workers Online", workerCounts.online_workers || 0],
+          ["Workers Idle", workerCounts.idle_workers || 0],
+          ["Workers Running", workerCounts.running_workers || 0],
+        ].map((row) => `<tr><td>${esc(row[0])}</td><td>${esc(row[1])}</td></tr>`).join("");
+        setRows("observabilityRows", observabilityRows, 2);
+
         const cards = [
           ["VMs", ((docker.ec2_instances && docker.ec2_instances.instances) || []).length],
           ["Containers", (docker.all_containers || []).length],
@@ -174,6 +201,8 @@
           ["Log Messages", (logs.items || []).length],
           ["Plugin Workers", pluginWorkers.length],
           ["Workflow Domains", (workflows.domains || []).length],
+          ["Active Runs", observability.active_workflow_runs || 0],
+          ["Event Rate (5m)", (observability.event_volume || {}).last_5m || 0],
           ["Log Sources", (logSources.sources || []).length],
         ];
         document.getElementById("cards").innerHTML = cards.map(([k,v]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");

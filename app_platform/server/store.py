@@ -1815,6 +1815,85 @@ ORDER BY ordinal_position;
             "generated_at_utc": _iso_now(),
         }
 
+    def observability_summary(self) -> dict[str, Any]:
+        """Return operational observability counters for dashboard/test UI."""
+        status_counts: dict[str, int] = {}
+        lease_counts: dict[str, int] = {"active_leases": 0, "expired_leases": 0}
+        event_counts: dict[str, int] = {"last_5m": 0, "last_1h": 0}
+        active_workflow_runs = 0
+        oldest_ready_task_age_seconds = 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+SELECT status, COUNT(*)
+FROM coordinator_stage_tasks
+GROUP BY status;
+"""
+                )
+                for status, count in cur.fetchall():
+                    key = str(status or "").strip().lower()
+                    if key:
+                        status_counts[key] = int(count or 0)
+                cur.execute(
+                    """
+SELECT
+  COUNT(*) FILTER (WHERE lease_expires_at IS NOT NULL AND lease_expires_at > NOW()) AS active_leases,
+  COUNT(*) FILTER (WHERE lease_expires_at IS NOT NULL AND lease_expires_at <= NOW()) AS expired_leases
+FROM coordinator_stage_tasks;
+"""
+                )
+                lease_row = cur.fetchone() or (0, 0)
+                lease_counts["active_leases"] = int(lease_row[0] or 0)
+                lease_counts["expired_leases"] = int(lease_row[1] or 0)
+                cur.execute(
+                    """
+SELECT COUNT(*)
+FROM coordinator_event_log
+WHERE created_at_utc >= NOW() - INTERVAL '5 minutes';
+"""
+                )
+                event_counts["last_5m"] = int((cur.fetchone() or [0])[0] or 0)
+                cur.execute(
+                    """
+SELECT COUNT(*)
+FROM coordinator_event_log
+WHERE created_at_utc >= NOW() - INTERVAL '1 hour';
+"""
+                )
+                event_counts["last_1h"] = int((cur.fetchone() or [0])[0] or 0)
+                cur.execute(
+                    """
+SELECT COUNT(DISTINCT COALESCE(checkpoint_json->>'workflow_run_id',''))
+FROM coordinator_stage_tasks
+WHERE COALESCE(checkpoint_json->>'workflow_run_id','') <> ''
+  AND status IN ('pending', 'ready', 'running', 'paused');
+"""
+                )
+                active_workflow_runs = int((cur.fetchone() or [0])[0] or 0)
+                cur.execute(
+                    """
+SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(updated_at_utc))), 0)
+FROM coordinator_stage_tasks
+WHERE status = 'ready';
+"""
+                )
+                oldest_ready_task_age_seconds = int(float((cur.fetchone() or [0])[0] or 0.0))
+            conn.commit()
+        worker_snapshot = self.worker_statuses(stale_after_seconds=DEFAULT_COORDINATOR_LEASE_SECONDS)
+        worker_counts = worker_snapshot.get("counts") if isinstance(worker_snapshot, dict) else {}
+        if not isinstance(worker_counts, dict):
+            worker_counts = {}
+        return {
+            "generated_at_utc": _iso_now(),
+            "stage_task_status_counts": status_counts,
+            "leases": lease_counts,
+            "event_volume": event_counts,
+            "active_workflow_runs": active_workflow_runs,
+            "oldest_ready_task_age_seconds": oldest_ready_task_age_seconds,
+            "workers": worker_counts,
+        }
+
 
     def workflow_scheduler_domains(self, *, limit: int = 2000) -> dict[str, Any]:
         """Return root domains that may need workflow scheduling.

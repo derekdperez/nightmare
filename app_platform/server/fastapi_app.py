@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from time import perf_counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -14,11 +15,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 
 from app_platform.server.store import CoordinatorStore, DEFAULT_COORDINATOR_LEASE_SECONDS, _stream_file_chunks
 from app_platform.workflow.tailor_adapter import normalize_workflow_payload, resolve_workflow_runtime_payload
+from shared.observability import get_telemetry
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 WORKFLOW_FILE_SUFFIX = ".workflow.json"
 WORKFLOW_FILE_GLOB = f"*{WORKFLOW_FILE_SUFFIX}"
+_telemetry = get_telemetry("coordinator.fastapi")
 
 
 def _bearer_token(header_value: str | None) -> str:
@@ -589,6 +592,14 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             sort_dir=sort_dir,
         )
 
+    @app.get("/api/coord/observability/summary")
+    def observability_summary(
+        _auth: None = Depends(require_auth),
+        store: CoordinatorStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        """Return coordinator observability counters for dashboard controls."""
+        return store.observability_summary()
+
     @app.get("/api/coord/event-log")
     def event_log(
         limit: int = Query(default=250, ge=1, le=5000),
@@ -642,6 +653,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         _auth: None = Depends(require_auth),
         store: CoordinatorStore = Depends(get_store),
     ) -> dict[str, Any]:
+        started = perf_counter()
         workflow_id = _normalize_workflow_id(body.get("workflow_id"), default="run-recon")
         workflow_path = _resolve_workflow_path(workflow_id)
         if workflow_path is None:
@@ -891,7 +903,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             except Exception:
                 workers_notified = []
 
-        return {
+        result = {
             "ok": True,
             "workflow_id": workflow_id,
             "domains_count": len(root_domains),
@@ -908,6 +920,9 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             "results": rows[:1000],
             "results_truncated": max(0, len(rows) - 1000),
         }
+        _telemetry.incr("coordinator.api.workflow.run.requests")
+        _telemetry.observe_ms("coordinator.api.workflow.run.duration_ms", (perf_counter() - started) * 1000.0)
+        return result
 
     @app.post("/api/coord/workflow/run/cancel")
     def cancel_workflow_run(
@@ -915,6 +930,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         _auth: None = Depends(require_auth),
         store: CoordinatorStore = Depends(get_store),
     ) -> dict[str, Any]:
+        started = perf_counter()
         workflow_run_id = str(body.get("workflow_run_id") or "").strip()
         if not workflow_run_id:
             raise HTTPException(status_code=400, detail="workflow_run_id is required")
@@ -925,6 +941,8 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         )
         if not bool(result.get("ok")):
             raise HTTPException(status_code=400, detail=result.get("error") or "cancel failed")
+        _telemetry.incr("coordinator.api.workflow.run.cancel.requests")
+        _telemetry.observe_ms("coordinator.api.workflow.run.cancel.duration_ms", (perf_counter() - started) * 1000.0)
         return result
 
     @app.post("/api/coord/workflow/tasks/retry-failed")
@@ -933,6 +951,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         _auth: None = Depends(require_auth),
         store: CoordinatorStore = Depends(get_store),
     ) -> dict[str, Any]:
+        started = perf_counter()
         result = store.retry_failed_workflow_tasks(
             workflow_id=str(body.get("workflow_id") or ""),
             workflow_run_id=str(body.get("workflow_run_id") or ""),
@@ -942,6 +961,8 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         )
         if not bool(result.get("ok")):
             raise HTTPException(status_code=400, detail=result.get("error") or "retry failed")
+        _telemetry.incr("coordinator.api.workflow.tasks.retry_failed.requests")
+        _telemetry.observe_ms("coordinator.api.workflow.tasks.retry_failed.duration_ms", (perf_counter() - started) * 1000.0)
         return result
 
 
