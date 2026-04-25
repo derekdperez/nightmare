@@ -4768,6 +4768,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json(payload)
             return
+        if path == "/api/coord/readiness":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            try:
+                payload = self.coordinator_store.readiness_probe()
+            except Exception as exc:
+                self.log_message("readiness_probe failed: %r", exc)
+                self._write_json(
+                    {
+                        "ok": False,
+                        "ready": False,
+                        "generated_at_utc": _iso_now(),
+                        "database": {"reachable": False, "ping_ms": 0.0, "error": str(exc)},
+                        "schema": {},
+                        "issues": [f"readiness_probe raised: {exc}"],
+                    },
+                    status=503,
+                )
+                return
+            status = 200 if bool(payload.get("ready")) else 503
+            self._write_json(payload, status=status)
+            return
         if path == "/api/coord/docker-status":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)

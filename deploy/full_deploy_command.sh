@@ -136,10 +136,18 @@ ids_empty() {
 probe_coordinator_http_code() {
   local base_url="$1"
   local code
+  # Prefer /api/coord/readiness: lightweight DB ping + schema migration markers (503 + JSON body if not ready).
   code="$(curl -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${COORDINATOR_API_TOKEN}" \
-    "${base_url%/}/api/coord/database-status" || true)"
+    "${base_url%/}/api/coord/readiness" || true)"
   printf '%s' "$code"
+}
+
+probe_coordinator_readiness_body() {
+  local base_url="$1"
+  curl -k -sS --connect-timeout 2 --max-time 8 \
+    -H "Authorization: Bearer ${COORDINATOR_API_TOKEN}" \
+    "${base_url%/}/api/coord/readiness" 2>/dev/null || true
 }
 
 resolve_local_coordinator_base_url() {
@@ -153,7 +161,8 @@ resolve_local_coordinator_base_url() {
 
   for candidate in "${candidates[@]}"; do
     code="$(probe_coordinator_http_code "$candidate")"
-    if [[ "$code" == "200" || "$code" == "401" || "$code" == "403" ]]; then
+    # 503 from /api/coord/readiness means HTTP is up but DB/schema is not fully ready yet (body explains missing pieces).
+    if [[ "$code" == "200" || "$code" == "401" || "$code" == "403" || "$code" == "503" ]]; then
       printf '%s\n%s' "$candidate" "$code"
       return 0
     fi
@@ -163,7 +172,7 @@ resolve_local_coordinator_base_url() {
 }
 
 print_coordinator_probe_diagnostics() {
-  local candidate code
+  local candidate code body_preview
   local candidates=()
   candidates+=("${COORDINATOR_BASE_URL%/}")
   candidates+=("https://127.0.0.1")
@@ -174,7 +183,18 @@ print_coordinator_probe_diagnostics() {
   echo "Coordinator probe diagnostics:" >&2
   for candidate in "${candidates[@]}"; do
     code="$(probe_coordinator_http_code "$candidate")"
-    echo "  ${candidate}/api/coord/database-status -> ${code:-none}" >&2
+    echo "  ${candidate}/api/coord/readiness -> ${code:-none}" >&2
+    db_code="$(curl -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w "%{http_code}" \
+      -H "Authorization: Bearer ${COORDINATOR_API_TOKEN}" \
+      "${candidate%/}/api/coord/database-status" || true)"
+    echo "  ${candidate}/api/coord/database-status -> ${db_code:-none}" >&2
+    if [[ -n "${candidate:-}" ]]; then
+      body_preview="$(probe_coordinator_readiness_body "$candidate" | head -c 900)"
+      if [[ -n "${body_preview:-}" ]]; then
+        echo "  (readiness JSON preview for ${candidate})" >&2
+        printf '%s\n' "$body_preview" | sed 's/^/    /' >&2
+      fi
+    fi
   done
 }
 

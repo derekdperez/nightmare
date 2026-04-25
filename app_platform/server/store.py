@@ -9,6 +9,7 @@ import base64
 import io
 import gzip
 import os
+import time
 import zipfile
 import uuid
 from contextlib import contextmanager
@@ -1889,6 +1890,151 @@ WHERE status = 'ready';
             "active_workflow_runs": active_workflow_runs,
             "oldest_ready_task_age_seconds": oldest_ready_task_age_seconds,
             "workers": worker_counts,
+        }
+
+    def readiness_probe(self) -> dict[str, Any]:
+        """Lightweight DB ping plus schema checks for deploy probes and operators.
+
+        Does not run ``_ensure_schema`` or heavy table scans. Use this to see
+        whether the coordinator process can reach Postgres and whether expected
+        migration artifacts (columns, indexes, tables) are present.
+        """
+        generated = _iso_now()
+        ping_ms = 0.0
+        ping_ok = False
+        ping_error = ""
+        started = time.perf_counter()
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+                    cur.fetchone()
+                conn.commit()
+            ping_ok = True
+            ping_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        except Exception as exc:
+            ping_error = str(exc)
+            return {
+                "ok": False,
+                "ready": False,
+                "generated_at_utc": generated,
+                "database": {"reachable": False, "ping_ms": ping_ms, "error": ping_error},
+                "schema": {},
+                "issues": [f"database ping failed: {ping_error}"],
+            }
+
+        required_columns: list[tuple[str, str]] = [
+            ("coordinator_artifacts", "workflow_run_id"),
+            ("coordinator_artifacts", "task_id"),
+            ("coordinator_artifacts", "step_id"),
+            ("coordinator_artifacts", "plugin_id"),
+            ("coordinator_event_log", "correlation_id"),
+            ("coordinator_event_log", "causation_id"),
+            ("coordinator_stage_tasks", "checkpoint_json"),
+        ]
+        required_indexes: list[str] = [
+            "idx_artifacts_workflow_run",
+            "idx_artifacts_task_id",
+            "idx_artifacts_plugin_id",
+            "idx_event_log_correlation",
+        ]
+        required_tables: list[str] = [
+            "coordinator_task_attempts",
+        ]
+
+        column_results: dict[str, dict[str, bool]] = {}
+        index_results: dict[str, bool] = {}
+        table_results: dict[str, bool] = {}
+        issues: list[str] = []
+
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    for table_name, column_name in required_columns:
+                        cur.execute(
+                            """
+SELECT EXISTS (
+  SELECT 1
+  FROM information_schema.columns
+  WHERE table_schema = 'public'
+    AND table_name = %s
+    AND column_name = %s
+);
+""",
+                            (table_name, column_name),
+                        )
+                        row = cur.fetchone()
+                        present = bool(row and row[0])
+                        column_results.setdefault(table_name, {})[column_name] = present
+                        if not present:
+                            issues.append(f"missing column public.{table_name}.{column_name}")
+
+                    for index_name in required_indexes:
+                        cur.execute(
+                            """
+SELECT EXISTS (
+  SELECT 1 FROM pg_indexes
+  WHERE schemaname = 'public' AND indexname = %s
+);
+""",
+                            (index_name,),
+                        )
+                        row = cur.fetchone()
+                        present = bool(row and row[0])
+                        index_results[index_name] = present
+                        if not present:
+                            issues.append(f"missing index public.{index_name}")
+
+                    for table_name in required_tables:
+                        cur.execute(
+                            """
+SELECT EXISTS (
+  SELECT 1 FROM information_schema.tables
+  WHERE table_schema = 'public' AND table_name = %s
+);
+""",
+                            (table_name,),
+                        )
+                        row = cur.fetchone()
+                        present = bool(row and row[0])
+                        table_results[table_name] = present
+                        if not present:
+                            issues.append(f"missing table public.{table_name}")
+                conn.commit()
+        except Exception as exc:
+            err = str(exc)
+            issues.append(f"schema inspection failed: {err}")
+            return {
+                "ok": False,
+                "ready": False,
+                "generated_at_utc": generated,
+                "database": {"reachable": True, "ping_ms": ping_ms, "error": ""},
+                "schema": {
+                    "columns": column_results,
+                    "indexes": index_results,
+                    "tables": table_results,
+                },
+                "issues": issues,
+            }
+
+        columns_ok = all(
+            all(bool(v) for v in cols.values()) for cols in column_results.values()
+        )
+        indexes_ok = all(bool(v) for v in index_results.values())
+        tables_ok = all(bool(v) for v in table_results.values())
+        ready = bool(columns_ok and indexes_ok and tables_ok and not issues)
+
+        return {
+            "ok": ready,
+            "ready": ready,
+            "generated_at_utc": generated,
+            "database": {"reachable": True, "ping_ms": ping_ms, "error": ""},
+            "schema": {
+                "columns": column_results,
+                "indexes": index_results,
+                "tables": table_results,
+            },
+            "issues": issues,
         }
 
 

@@ -167,6 +167,21 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
     ) -> dict[str, Any]:
         return store.database_status()
 
+    @app.get("/api/coord/readiness")
+    def coordinator_readiness(
+        _auth: None = Depends(require_auth),
+        store: CoordinatorStore = Depends(get_store),
+    ) -> JSONResponse:
+        """Lightweight readiness: DB ping + expected schema migration markers.
+
+        Returns HTTP 503 when the database is unreachable or required schema
+        artifacts are missing, so deploy scripts can distinguish \"no HTTP\"
+        from \"HTTP but not migrated\".
+        """
+        payload = store.readiness_probe()
+        status_code = 200 if bool(payload.get("ready")) else 503
+        return JSONResponse(status_code=status_code, content=payload)
+
     @app.post("/api/coord/register-targets")
     def register_targets(
         body: dict[str, Any] = Body(default_factory=dict),
