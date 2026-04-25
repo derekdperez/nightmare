@@ -107,6 +107,9 @@
       const reason = result.reason;
       return reason && reason.message ? String(reason.message) : String(reason || "request failed");
     }
+    function asArray(value) {
+      return Array.isArray(value) ? value : [];
+    }
     async function refreshDashboard() {
       const status = document.getElementById("statusText");
       status.textContent = "Loading...";
@@ -141,39 +144,39 @@
           ["observability-summary", settledError(results[7])],
         ].filter((item) => item[1]);
 
-        const vmRows = ((docker.ec2_instances && docker.ec2_instances.instances) || []).map((r) =>
+        const vmRows = asArray(docker.ec2_instances && docker.ec2_instances.instances).map((r) =>
           `<tr><td>${esc(r.name || "")}</td><td>${esc(r.instance_id || "")}</td><td>${esc(r.state || "")}</td><td>${esc(r.private_ip || "")}</td><td>${esc(r.public_ip || "")}</td></tr>`
         ).join("");
         setRows("vmRows", vmRows, 5);
 
-        const dockerRows = (docker.all_containers || []).map((r) =>
+        const dockerRows = asArray(docker.all_containers).map((r) =>
           `<tr><td>${esc(r.name || "")}</td><td>${esc(r.host_label || r.host_type || "")}</td><td>${esc(r.image || "")}</td><td>${esc(r.status || "")}</td><td>${esc(r.running_for || "")}</td><td>${esc(r.ports || "")}</td><td><code>${esc(r.id || "")}</code></td></tr>`
         ).join("");
         setRows("dockerRows", dockerRows, 7);
 
-        const eventRows = (events.items || []).map((e) =>
+        const eventRows = asArray(events.items).map((e) =>
           `<tr><td>${esc(e.created_at || "")}</td><td>${esc(e.event_type || "")}</td><td>${esc(e.source || "")}</td><td>${esc(e.aggregate_key || "")}</td><td>${esc(e.message || "")}</td></tr>`
         ).join("");
         setRows("eventRows", eventRows, 5);
 
-        const dbRows = (db.tables || []).map((t) =>
+        const dbRows = asArray(db.tables).map((t) =>
           `<tr><td>${esc(t.schema || "")}</td><td>${esc(t.name || "")}</td><td>${esc(t.row_count || 0)}</td><td>${esc(t.rows_returned || 0)}</td><td>${esc((t.columns || []).length)}</td></tr>`
         ).join("");
         setRows("dbRows", dbRows, 5);
 
-        const logRows = (logs.items || []).map((l) =>
+        const logRows = asArray(logs.items).map((l) =>
           `<tr><td>${esc(l.event_time_utc || "")}</td><td>${esc(l.severity || "")}</td><td>${esc(l.machine || "")}</td><td>${esc(l.source_id || "")}</td><td>${esc(l.description || "")}</td></tr>`
         ).join("");
         setRows("logRows", logRows, 5);
 
-        const pluginWorkers = (workers.workers || []).filter((w) => String(w.worker_id || "").toLowerCase().includes("-plugin-"));
+        const pluginWorkers = asArray(workers.workers).filter((w) => String(w.worker_id || "").toLowerCase().includes("-plugin-"));
         const pluginWorkerRows = pluginWorkers.map((w) =>
           `<tr><td>${esc(w.worker_id || "")}</td><td>${esc(w.status || "")}</td><td>${esc(w.worker_state || "")}</td><td>${esc(w.current_root_domain || "")}</td><td>${esc(w.current_stage || "")}</td><td>${esc(w.running_targets || 0)}</td><td>${esc(w.running_stage_tasks || 0)}</td><td>${esc(w.last_heartbeat_at_utc || "")}</td></tr>`
         ).join("");
         setRows("pluginWorkerRows", pluginWorkerRows, 8);
 
         const runningWorkflowRows = [];
-        for (const d of (workflows.domains || [])) {
+        for (const d of asArray(workflows.domains)) {
           const pluginTasks = d.plugin_tasks || {};
           let running = 0, pending = 0, failed = 0;
           const activeStages = [];
@@ -194,7 +197,7 @@
         }
         setRows("workflowRows", runningWorkflowRows.join(""), 6);
 
-        const logSourceRows = (logSources.sources || []).map((s) => {
+        const logSourceRows = asArray(logSources.sources).map((s) => {
           const sourceId = String(s.source_id || "");
           const detailsHref = `/view-logs#source=${encodeURIComponent(sourceId)}`;
           const apiHref = `/api/coord/log-tail?source_id=${encodeURIComponent(sourceId)}&lines=200`;
@@ -222,16 +225,16 @@
         setRows("observabilityRows", observabilityRows, 2);
 
         const cards = [
-          ["VMs", ((docker.ec2_instances && docker.ec2_instances.instances) || []).length],
-          ["Containers", (docker.all_containers || []).length],
-          ["Events", (events.items || []).length],
-          ["DB Tables", (db.tables || []).length],
-          ["Log Messages", (logs.items || []).length],
+          ["VMs", asArray(docker.ec2_instances && docker.ec2_instances.instances).length],
+          ["Containers", asArray(docker.all_containers).length],
+          ["Events", asArray(events.items).length],
+          ["DB Tables", asArray(db.tables).length],
+          ["Log Messages", asArray(logs.items).length],
           ["Plugin Workers", pluginWorkers.length],
-          ["Workflow Domains", (workflows.domains || []).length],
+          ["Workflow Domains", asArray(workflows.domains).length],
           ["Active Runs", observability.active_workflow_runs || 0],
           ["Event Rate (5m)", (observability.event_volume || {}).last_5m || 0],
-          ["Log Sources", (logSources.sources || []).length],
+          ["Log Sources", asArray(logSources.sources).length],
         ];
         document.getElementById("cards").innerHTML = cards.map(([k,v]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
         if (failedSources.length) {
