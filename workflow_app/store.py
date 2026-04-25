@@ -13,6 +13,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from workflow_app.tailor_adapter import normalize_workflow_payload
+from workflow_app.bindings import resolve_bindings
+
 _KEY_RE = re.compile(r"[^a-z0-9_\-]+")
 DEFAULT_WORKFLOW_RETRY_LIMIT = 3
 BOOTSTRAP_READY_STAGES = {"recon_subdomain_enumeration", "recon-subdomain-enumeration"}
@@ -327,8 +330,9 @@ def _merge_requirement_lists(base: dict[str, Any], extra: dict[str, Any]) -> dic
 def workflow_payload_from_scheduler_file(path: str | Path) -> dict[str, Any]:
     """Convert a legacy coordinator scheduler workflow JSON file into the DB builder format."""
     wf_path = Path(path)
-    raw = json.loads(wf_path.read_text(encoding="utf-8-sig"))
+    raw = normalize_workflow_payload(json.loads(wf_path.read_text(encoding="utf-8-sig")))
     plugins = raw.get("plugins") if isinstance(raw.get("plugins"), list) else []
+    workflow_retry = workflow_retry_limit(raw.get("retry_limit"))
     workflow_key = slugify_key(str(raw.get("workflow_id") or wf_path.stem.replace(".workflow", "")), fallback="workflow")
     steps: list[dict[str, Any]] = []
     for idx, item in enumerate(plugins, start=1):
@@ -346,6 +350,7 @@ def workflow_payload_from_scheduler_file(path: str | Path) -> dict[str, Any]:
         for meta_key in ("handler", "resume_mode", "config_schema"):
             if meta_key in item and item.get(meta_key) not in (None, ""):
                 config_json.setdefault(meta_key, item.get(meta_key))
+        step_retry_limit = workflow_retry_limit(item.get("retry_limit"))
         steps.append(
             {
                 "step_key": step_key,
@@ -356,7 +361,8 @@ def workflow_payload_from_scheduler_file(path: str | Path) -> dict[str, Any]:
                 "enabled": bool(item.get("enabled", True)),
                 "continue_on_error": bool(item.get("continue_on_error", False)),
                 "retry_failed": bool(item.get("retry_failed", False)),
-                "max_attempts": int(item.get("max_attempts") or 0),
+                "retry_limit": step_retry_limit,
+                "max_attempts": max(1, int(item.get("max_attempts") or (step_retry_limit + 1))),
                 "timeout_seconds": int(item.get("timeout_seconds") or 0),
                 "input_bindings": inputs if isinstance(inputs, dict) else {},
                 "config_json": config_json,
@@ -822,6 +828,9 @@ def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "")
     if not root_domain:
         raise ValueError("root_domain is required")
     input_json = _json(payload.get("input_json", payload.get("input")), {})
+    workflow_type = str((definition.get("ui_schema") or {}).get("workflow_type") or "single_run").strip().lower() or "single_run"
+    runtime_variables = (definition.get("ui_schema") or {}).get("tailor_runtime_variables")
+    runtime_variables = runtime_variables if isinstance(runtime_variables, dict) else {}
     with store._connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -837,6 +846,9 @@ VALUES(%s,%s,%s,%s,%s,'queued',%s,%s::jsonb,%s);
             has_prerequisites = _preconditions_require_wait(preconditions, plugin_key=plugin_key)
             initial_status = "pending" if has_prerequisites else "ready"
             initial_blocked_reason = "Waiting for Prerequisites..." if has_prerequisites else ""
+            resolved_inputs = resolve_bindings(step.get("input_bindings"), workflow_input=input_json)
+            step_config = step.get("config_json") if isinstance(step.get("config_json"), dict) else {}
+            resolved_config = {**step_config, **resolved_inputs}
             cur.execute(
                 """
 INSERT INTO workflow_step_runs(
@@ -848,7 +860,7 @@ VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb);
                 (
                     str(uuid.uuid4()), run_id, definition["id"], step["id"], step["step_key"], step["plugin_key"],
                     int(step["ordinal"]), initial_status, initial_blocked_reason, step_max_attempts,
-                    json.dumps(input_json), json.dumps(step.get("config_json") or {}),
+                    json.dumps(input_json), json.dumps(resolved_config),
                 ),
             )
             # Compatibility bridge: enqueue coordinator stage tasks so existing
@@ -861,7 +873,12 @@ VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb);
                     "preconditions_json": preconditions if isinstance(preconditions, dict) else {},
                     "max_attempts": step_max_attempts,
                     "retry_failed": bool(step.get("retry_failed", False)),
+                    "workflow_type": workflow_type,
+                    "runtime_variables": runtime_variables,
                 }
+                if workflow_type.startswith("iteration_over_"):
+                    checkpoint["iteration_mode"] = workflow_type
+                    checkpoint["iteration_items"] = input_json.get("iteration_items", [])
                 cur.execute(
                     """
 INSERT INTO coordinator_stage_tasks(workflow_id, root_domain, stage, status, checkpoint_json, error, max_attempts)

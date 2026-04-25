@@ -13,6 +13,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Reques
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 from server_app.store import CoordinatorStore, DEFAULT_COORDINATOR_LEASE_SECONDS, _stream_file_chunks
+from workflow_app.tailor_adapter import normalize_workflow_payload, resolve_workflow_runtime_payload
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -89,9 +90,10 @@ def _load_workflow_payload(path: Path) -> dict[str, Any]:
         return {}
     workflow_id = _normalize_workflow_id(parsed.get("workflow_id"), default=_workflow_id_from_path(path))
     parsed["workflow_id"] = workflow_id or _workflow_id_from_path(path)
-    plugins = parsed.get("plugins")
-    parsed["plugins"] = [item for item in plugins if isinstance(item, dict)] if isinstance(plugins, list) else []
-    return parsed
+    normalized = normalize_workflow_payload(parsed)
+    plugins = normalized.get("plugins")
+    normalized["plugins"] = [item for item in plugins if isinstance(item, dict)] if isinstance(plugins, list) else []
+    return normalized
 
 
 def _resolve_workflow_path(workflow_id: str) -> Path | None:
@@ -653,6 +655,8 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         workflow = _load_workflow_payload(workflow_path)
         if not workflow:
             raise HTTPException(status_code=500, detail=f"workflow config is empty or invalid: {workflow_path.name}")
+        runtime_input = body.get("input")
+        workflow = resolve_workflow_runtime_payload(workflow, runtime_input if isinstance(runtime_input, dict) else {})
         plugins = [item for item in (workflow.get("plugins") if isinstance(workflow.get("plugins"), list) else []) if isinstance(item, dict)]
 
         selected_plugins_raw = body.get("plugins")

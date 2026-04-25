@@ -29,6 +29,7 @@ from shared.events import DbEventBroker, build_projection
 from shared.schemas import EventSchema
 from shared.models import EventRecord, RiskScorecard
 from shared.versioning import registry
+from workflow_app.tailor_adapter import normalize_workflow_payload
 
 from nightmare_shared.page_classification import (
     PAGE_CLASS_API_ERROR,
@@ -4106,6 +4107,7 @@ RETURNING command;
                     continue
                 if not isinstance(payload, dict):
                     continue
+                payload = normalize_workflow_payload(payload)
                 payload_id = self._normalize_workflow_token(payload.get("workflow_id"), default=path.name.replace(".workflow.json", ""))
                 if payload_id != wid:
                     continue
@@ -4189,11 +4191,11 @@ LIMIT 1;
         rd = str(root_domain or "").strip().lower()
         wid = str(workflow_id or "").strip().lower() or "default"
         stg = str(stage or "").strip().lower()
-        if _is_bootstrap_ready_stage(stg):
-            # Bootstrap recon has no prerequisites. Trust this invariant over
-            # stale workflow definitions/checkpoints so it is always claimable.
-            return True, ""
         prereq = self._load_workflow_stage_preconditions(wid, stg)
+        if _is_bootstrap_ready_stage(stg) and not prereq:
+            # Bootstrap recon can start immediately only when no explicit
+            # prerequisite policy is configured for the stage.
+            return True, ""
         if not prereq:
             try:
                 cur.execute(
@@ -4212,6 +4214,16 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
                 prereq = {}
         if not prereq:
             return True, ""
+        if _is_bootstrap_ready_stage(stg):
+            # Bootstrap recon ignores stale artifact/plugin gating copied from
+            # older checkpoints, but still honors explicit target-completion
+            # requirements when configured.
+            strict_target_statuses = prereq.get("target_statuses")
+            strict_require_completed = bool(prereq.get("require_target_completed", False))
+            if not strict_require_completed and not (
+                isinstance(strict_target_statuses, list) and any(str(item or "").strip() for item in strict_target_statuses)
+            ):
+                return True, ""
 
         # Compatibility with workflow_app.conditions-style checks.
         explicit_checks = prereq.get("all") if isinstance(prereq.get("all"), list) else []

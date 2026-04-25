@@ -14,6 +14,7 @@ def test_run_recon_workflow_config_exists_and_has_expected_plugins() -> None:
     names = [str(item.get("plugin_name", "")).strip().lower() for item in plugins if isinstance(item, dict)]
     assert names == [
         "recon_subdomain_enumeration",
+        "recon_subdomain_takeover",
         "recon_spider_source_tags",
         "recon_spider_script_links",
         "recon_spider_wordlist",
