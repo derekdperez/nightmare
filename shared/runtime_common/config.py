@@ -218,7 +218,7 @@ class CoordinatorSettings(BaseModel):
         self.workflow_scheduler_interval_seconds = max(5.0, self.workflow_scheduler_interval_seconds)
         self.fozzy_process_workers = max(1, self.fozzy_process_workers)
         self.extractor_process_workers = max(1, self.extractor_process_workers)
-        self.plugin_workers = max(0, self.plugin_workers)
+        self.plugin_workers = max(1, self.plugin_workers)
         self.api_token = str(self.api_token or "").strip()
         self.python_executable = str(self.python_executable or "python3").strip() or "python3"
         return self

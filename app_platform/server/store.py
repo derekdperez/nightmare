@@ -352,6 +352,8 @@ def _make_target_entry_id(line_no: int, raw: str) -> str:
 
 
 class CoordinatorStore:
+    _telemetry = get_telemetry("coordinator.store")
+
     def __init__(self, database_url: str, *, artifact_store_root: str | None = None):
         if psycopg is None or ConnectionPool is None:
             raise RuntimeError("psycopg and psycopg_pool are required for postgres coordinator mode")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_app import store as workflow_store
+from app_platform.workflow import store as workflow_store
 
 
 class _FakeCursor:

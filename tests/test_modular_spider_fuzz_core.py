@@ -1,4 +1,4 @@
-from nightmare_app import spider_url_policy
+from plugins.spider.nightmare_app import spider_url_policy
 from plugins.fuzzing.fozzy_app.fuzz_core import (
     ParameterMeta,
     RouteGroup,
