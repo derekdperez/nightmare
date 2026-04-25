@@ -592,6 +592,15 @@ class CoordinatorClient:
     def get_fleet_settings(self) -> dict[str, Any]:
         return self._request_json("GET", "/api/coord/fleet-settings")
 
+
+    def get_workflow_domains(self, *, limit: int = 2000) -> list[str]:
+        query = urlencode({"limit": max(1, int(limit or 1))})
+        rsp = self._request_json("GET", f"/api/coord/workflow-domains?{query}")
+        domains = rsp.get("root_domains")
+        if not isinstance(domains, list):
+            return []
+        return [str(item or "").strip().lower() for item in domains if str(item or "").strip()]
+
     def get_workflow_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         query = urlencode({"limit": max(1, int(limit or 1))})
         return self._request_json("GET", f"/api/coord/workflow-snapshot?{query}")

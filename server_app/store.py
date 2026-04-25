@@ -1638,6 +1638,53 @@ ORDER BY ordinal_position;
             "generated_at_utc": _iso_now(),
         }
 
+
+    def workflow_scheduler_domains(self, *, limit: int = 2000) -> dict[str, Any]:
+        """Return root domains that may need workflow scheduling.
+
+        This intentionally avoids loading full task/artifact snapshots for the
+        whole fleet. Callers can then refresh one domain at a time through
+        workflow_domain_scheduler_state.
+        """
+        safe_limit = max(1, min(20000, int(limit or 2000)))
+        domains_sql = """
+SELECT root_domain
+FROM (
+    SELECT DISTINCT root_domain FROM coordinator_targets
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_stage_tasks
+    UNION
+    SELECT DISTINCT root_domain FROM coordinator_artifacts
+) d
+WHERE root_domain IS NOT NULL AND root_domain <> ''
+ORDER BY
+  CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM coordinator_stage_tasks s
+      WHERE s.root_domain = d.root_domain
+    ) THEN 0
+    ELSE 1
+  END ASC,
+  root_domain ASC
+LIMIT %s;
+"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(domains_sql, (safe_limit,))
+                domains = [
+                    str(row[0] or "").strip().lower()
+                    for row in cur.fetchall()
+                    if str(row[0] or "").strip()
+                ]
+            conn.commit()
+        return {
+            "generated_at_utc": _iso_now(),
+            "limit": safe_limit,
+            "root_domains": domains,
+            "count": len(domains),
+        }
+
     def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         safe_limit = max(1, min(20000, int(limit or 2000)))
         domains_sql = """

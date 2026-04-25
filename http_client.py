@@ -24,12 +24,24 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+_SENSITIVE_HEADER_NAMES = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "x-csrf-token",
+}
+
+
 def _sanitize_headers_for_log(headers: dict[str, str], *, redact_authorization: bool = True) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in dict(headers or {}).items():
         key_text = str(key or "")
         val_text = str(value or "")
-        if redact_authorization and key_text.lower() == "authorization":
+        normalized = key_text.strip().lower()
+        if redact_authorization and normalized in _SENSITIVE_HEADER_NAMES:
             out[key_text] = "<redacted>"
         else:
             out[key_text] = val_text
@@ -44,6 +56,24 @@ def _truncate_text_for_log(text: str, max_chars: int | None) -> str:
     if safe_max <= 0 or len(value) <= safe_max:
         return value
     return value[:safe_max] + f"...<truncated:{len(value) - safe_max} chars>"
+
+
+def _validate_http_url(url: str) -> str:
+    safe_url = str(url or "").strip()
+    if not safe_url:
+        raise ValueError("url is required")
+    try:
+        parsed = httpx.URL(safe_url)
+    except Exception as exc:
+        raise ValueError(f"invalid url: {safe_url!r}") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.host:
+        raise ValueError("url must be an absolute http or https URL")
+    return safe_url
+
+
+def _has_header(headers: dict[str, str], header_name: str) -> bool:
+    wanted = header_name.lower()
+    return any(str(key or "").strip().lower() == wanted for key in headers)
 
 
 def _client_key(verify: bool, timeout_seconds: float, follow_redirects: bool, user_agent: str) -> tuple[bool, float, bool, str]:
@@ -128,7 +158,7 @@ def request_capped(
     user_agent: str = DEFAULT_USER_AGENT,
     cookies: Any = None,
 ) -> CappedResponse:
-    owned_client = client is None
+    safe_url = _validate_http_url(url)
     http = client or get_shared_client(
         verify=verify,
         timeout_seconds=timeout_seconds,
@@ -136,12 +166,12 @@ def request_capped(
         user_agent=user_agent,
     )
     request_headers = dict(headers or {})
-    if "User-Agent" not in {str(k): str(v) for k, v in request_headers.items()}:
+    if not _has_header(request_headers, "User-Agent"):
         request_headers.setdefault("User-Agent", user_agent)
     t0 = time.perf_counter()
     with http.stream(
         method.upper(),
-        url,
+        safe_url,
         headers=request_headers,
         content=content,
         timeout=timeout_seconds,
@@ -175,6 +205,7 @@ def request_json(
     max_logged_body_chars: int | None = None,
     redact_authorization_header: bool = True,
 ) -> dict[str, Any]:
+    safe_url = _validate_http_url(url)
     http = client or get_shared_client(
         verify=verify,
         timeout_seconds=timeout_seconds,
@@ -182,6 +213,8 @@ def request_json(
         user_agent=user_agent,
     )
     request_headers = dict(headers or {})
+    if not _has_header(request_headers, "User-Agent"):
+        request_headers.setdefault("User-Agent", user_agent)
     should_log = bool(log_details) if log_details is not None else _env_truthy("NIGHTMARE_HTTP_LOG_DETAILS", default=False)
     should_include_payloads = (
         bool(include_payloads)
@@ -192,7 +225,7 @@ def request_json(
     if logger is not None and should_log:
         req_event: dict[str, Any] = {
             "http_method": method.upper(),
-            "http_url": url,
+            "http_url": safe_url,
             "timeout_seconds": float(timeout_seconds),
             "verify_tls": bool(verify),
             "request_headers": _sanitize_headers_for_log(
@@ -206,7 +239,7 @@ def request_json(
     try:
         response = http.request(
             method.upper(),
-            url,
+            safe_url,
             headers=request_headers,
             json=json_payload,
             timeout=timeout_seconds,
@@ -216,10 +249,10 @@ def request_json(
             logger.error(
                 "http_request_network_error",
                 http_method=method.upper(),
-                http_url=url,
+                http_url=safe_url,
                 error=str(exc),
             )
-        raise RuntimeError(f"Network error {method.upper()} {url}: {exc}") from exc
+        raise RuntimeError(f"Network error {method.upper()} {safe_url}: {exc}") from exc
     elapsed_ms = int(round((time.perf_counter() - started_at) * 1000.0))
     text = response.text
     parsed_any: Any = None
@@ -232,10 +265,13 @@ def request_json(
     if logger is not None and should_log:
         resp_event: dict[str, Any] = {
             "http_method": method.upper(),
-            "http_url": url,
+            "http_url": safe_url,
             "http_status_code": int(response.status_code),
             "elapsed_ms": elapsed_ms,
-            "response_headers": dict(response.headers.items()),
+            "response_headers": _sanitize_headers_for_log(
+                dict(response.headers.items()),
+                redact_authorization=redact_authorization_header,
+            ),
         }
         if should_include_payloads:
             resp_event["response_text"] = _truncate_text_for_log(text, max_logged_body_chars)
@@ -248,6 +284,6 @@ def request_json(
         else:
             logger.info("http_response_inbound", **resp_event)
     if response.is_error:
-        raise RuntimeError(f"HTTP {response.status_code} {method.upper()} {url}: {text[:400]}")
+        raise RuntimeError(f"HTTP {response.status_code} {method.upper()} {safe_url}: {text[:400]}")
     parsed = parsed_any if parsed_any is not None else {}
     return parsed if isinstance(parsed, dict) else {}

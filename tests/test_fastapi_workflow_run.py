@@ -21,6 +21,9 @@ class _StoreRunOk:
         self.calls.append((str(root_domain), str(plugin_name), str(kwargs.get("workflow_id") or "")))
         return {"ok": True, "scheduled": True, "reason": "inserted_ready", "status": "ready"}
 
+    def workflow_scheduler_domains(self, *, limit: int = 2000) -> dict[str, Any]:
+        return {"root_domains": [], "limit": limit, "count": 0}
+
     def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         return {"domains": [], "limit": limit}
 

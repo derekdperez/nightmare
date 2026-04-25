@@ -894,47 +894,50 @@ class DistributedCoordinator:
 
     def _rescan_workflow_domains(self, *, worker_id: str, reason: str) -> int:
         try:
-            snapshot = self.client.get_workflow_snapshot(limit=5000)
+            root_domains = self.client.get_workflow_domains(limit=2000)
         except Exception as exc:
             self.logger.error(
-                "workflow_scheduler_snapshot_scan_failed",
+                "workflow_scheduler_domain_list_failed",
                 worker_id=worker_id,
                 reason=reason,
                 error=str(exc),
             )
             self._record_worker_error(
                 worker_id=worker_id,
-                description="Workflow scheduler failed to scan workflow snapshot",
+                description="Workflow scheduler failed to list workflow domains",
                 exception=exc,
                 metadata={"reason": reason, "source": "_rescan_workflow_domains"},
                 mark_errored=False,
             )
             return 0
-        domains = snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else []
         scheduled_total = 0
         scanned_domains = 0
-        for domain_row in domains:
-            if not isinstance(domain_row, dict):
+        for root_domain in root_domains:
+            safe_domain = str(root_domain or "").strip().lower()
+            if not safe_domain:
                 continue
             scanned_domains += 1
             try:
-                scheduled_total += int(self._schedule_domain_workflows(domain_row, worker_id=worker_id) or 0)
+                scheduled_total += int(
+                    self._refresh_domain_workflow_schedule(root_domain=safe_domain, worker_id=worker_id) or 0
+                )
             except Exception as exc:
                 self.logger.error(
                     "workflow_scheduler_domain_scan_failed",
                     worker_id=worker_id,
                     reason=reason,
-                    root_domain=str(domain_row.get("root_domain") or "").strip().lower(),
+                    root_domain=safe_domain,
                     error=str(exc),
                 )
         self.logger.info(
-            "workflow_scheduler_snapshot_scan_complete",
+            "workflow_scheduler_domain_scan_complete",
             worker_id=worker_id,
             reason=reason,
             scanned_domains=scanned_domains,
             tasks_scheduled=scheduled_total,
         )
         return scheduled_total
+
 
     def _workflow_scheduler_loop(self) -> None:
         worker_id = f"{self.worker_prefix}-scheduler-1"
@@ -2616,35 +2619,6 @@ class DistributedCoordinator:
             return
         checkpoint = dict(entry.get("checkpoint") or {}) if isinstance(entry.get("checkpoint"), dict) else {}
         progress = dict(entry.get("progress") or {}) if isinstance(entry.get("progress"), dict) else {}
-        log_dir = _domain_output_dir(root_domain, self.cfg.output_root) / "workflow-logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        task_log_path = log_dir / f"{workflow_id}.{plugin_name}.jsonl"
-
-        def _append_task_log(event: str, **fields: Any) -> None:
-            payload = {
-                "event": str(event or ""),
-                "timestamp_utc": _now_iso(),
-                "worker_id": worker_id,
-                "workflow_id": workflow_id,
-                "root_domain": root_domain,
-                "plugin_name": plugin_name,
-                **fields,
-            }
-            try:
-                with task_log_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-            except Exception as log_exc:
-                self.logger.warning(
-                    "workflow_task_log_write_failed",
-                    worker_id=worker_id,
-                    workflow_id=workflow_id,
-                    root_domain=root_domain,
-                    stage=plugin_name,
-                    log_path=str(task_log_path),
-                    error=str(log_exc),
-                )
-
-        _append_task_log("claimed", entry={k: v for k, v in entry.items() if k not in {"checkpoint", "progress"}})
         checkpoint.update({"status": "running", "started_at_utc": _now_iso(), "plugin_name": plugin_name})
         progress.update({"status": "running", "plugin_name": plugin_name, "root_domain": root_domain})
         self._begin_job()
@@ -2700,7 +2674,6 @@ class DistributedCoordinator:
                 checkpoint=checkpoint,
                 progress=progress,
             )
-            _append_task_log("completed", exit_code=int(exit_code), error=str(err_text or ""))
             self.client.complete_stage(
                 worker_id,
                 root_domain,
@@ -2713,23 +2686,6 @@ class DistributedCoordinator:
                 progress_artifact_type=f"workflow_progress_{plugin_name}",
                 resume_mode="exact",
             )
-            try:
-                self._upload_file_artifact(
-                    root_domain,
-                    f"workflow_log_{plugin_name}",
-                    task_log_path,
-                    worker_id,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "workflow_task_log_upload_failed",
-                    worker_id=worker_id,
-                    workflow_id=workflow_id,
-                    root_domain=root_domain,
-                    stage=plugin_name,
-                    log_path=str(task_log_path),
-                    error=str(exc),
-                )
             self.logger.info(
                 "workflow_task_complete",
                 worker_id=worker_id,
@@ -2782,7 +2738,6 @@ class DistributedCoordinator:
                 metadata={"workflow_id": workflow_id, "root_domain": root_domain, "stage": plugin_name},
                 mark_errored=False,
             )
-            _append_task_log("failed", error=str(exc))
             try:
                 self.client.complete_stage(
                     worker_id,
@@ -2796,23 +2751,6 @@ class DistributedCoordinator:
                     progress_artifact_type=f"workflow_progress_{plugin_name}",
                     resume_mode="exact",
                 )
-                try:
-                    self._upload_file_artifact(
-                        root_domain,
-                        f"workflow_log_{plugin_name}",
-                        task_log_path,
-                        worker_id,
-                    )
-                except Exception as upload_exc:
-                    self.logger.warning(
-                        "workflow_task_log_upload_failed_after_exception",
-                        worker_id=worker_id,
-                        workflow_id=workflow_id,
-                        root_domain=root_domain,
-                        stage=plugin_name,
-                        log_path=str(task_log_path),
-                        error=str(upload_exc),
-                    )
             except Exception as complete_exc:
                 self.logger.error(
                     "workflow_task_complete_failed_after_exception",

@@ -104,7 +104,11 @@ def test_request_json_logs_detailed_request_and_response_payloads():
     assert len(logger.rows) == 2
     assert logger.rows[0][1] == "http_request_outbound"
     assert logger.rows[1][1] == "http_response_inbound"
-    assert logger.rows[0][2]["request_headers"] == {"Authorization": "<redacted>", "X-Test": "1"}
+    assert logger.rows[0][2]["request_headers"] == {
+        "Authorization": "<redacted>",
+        "X-Test": "1",
+        "User-Agent": http_client.DEFAULT_USER_AGENT,
+    }
     assert logger.rows[0][2]["request_json_payload"] == {"hello": "world"}
     assert logger.rows[1][2]["http_status_code"] == 200
     assert logger.rows[1][2]["response_json_payload"] == {"ok": True, "n": 1}
@@ -137,3 +141,39 @@ def test_request_json_logs_http_error_event():
     assert logger.rows[0][1] == "http_request_outbound"
     assert logger.rows[1][0] == "error"
     assert logger.rows[1][1] == "http_response_error"
+
+
+def test_request_json_rejects_non_http_urls():
+    with pytest.raises(ValueError, match="absolute http or https URL"):
+        http_client.request_json("GET", "file:///etc/passwd")
+
+
+def test_request_json_redacts_cookie_like_headers_in_logs():
+    class CaptureLogger:
+        def __init__(self):
+            self.rows: list[tuple[str, str, dict[str, object]]] = []
+
+        def info(self, event: str, **kwargs):
+            self.rows.append(("info", event, kwargs))
+
+        def error(self, event: str, **kwargs):
+            self.rows.append(("error", event, kwargs))
+
+    logger = CaptureLogger()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=req, json={"ok": True}, headers={"Set-Cookie": "session=secret"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    http_client.request_json(
+        "GET",
+        "https://example.com/api",
+        client=client,
+        headers={"Cookie": "session=secret", "X-Api-Key": "secret-key"},
+        logger=logger,
+        log_details=True,
+    )
+
+    assert logger.rows[0][2]["request_headers"]["Cookie"] == "<redacted>"
+    assert logger.rows[0][2]["request_headers"]["X-Api-Key"] == "<redacted>"
+    assert logger.rows[1][2]["response_headers"]["set-cookie"] == "<redacted>"
