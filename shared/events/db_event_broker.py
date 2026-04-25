@@ -23,9 +23,9 @@ class DbEventBroker:
                 """
 INSERT INTO coordinator_event_log(
     event_id, created_at_utc, event_type, aggregate_key, schema_version,
-    source, message, idempotency_key, payload_json
+    source, message, idempotency_key, correlation_id, causation_id, payload_json
 )
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
 ON CONFLICT (event_id) DO NOTHING;
 """,
                 (
@@ -37,6 +37,8 @@ ON CONFLICT (event_id) DO NOTHING;
                     event.source,
                     event.message,
                     event.idempotency_key,
+                    str(getattr(event, "correlation_id", "") or ""),
+                    str(getattr(event, "causation_id", "") or ""),
                     payload,
                 ),
             )
@@ -50,7 +52,7 @@ ON CONFLICT (event_id) DO NOTHING;
             cur.execute(
                 """
 SELECT event_sequence, event_id, created_at_utc, event_type, aggregate_key,
-       schema_version, source, message, idempotency_key, payload_json
+       schema_version, source, message, idempotency_key, correlation_id, causation_id, payload_json
 FROM coordinator_event_log
 WHERE event_sequence > %s
 ORDER BY event_sequence ASC
@@ -71,7 +73,9 @@ LIMIT %s;
                 "source": str(row[6] or ""),
                 "message": str(row[7] or ""),
                 "idempotency_key": str(row[8] or ""),
-                "payload": row[9] if isinstance(row[9], dict) else {},
+                "correlation_id": str(row[9] or ""),
+                "causation_id": str(row[10] or ""),
+                "payload": row[11] if isinstance(row[11], dict) else {},
             }
             for row in rows
         ]

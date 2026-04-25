@@ -725,6 +725,7 @@ CREATE TABLE IF NOT EXISTS coordinator_stage_tasks (
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_stage ON coordinator_stage_tasks(stage, status);
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_lease ON coordinator_stage_tasks(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_stage_tasks_domain_status ON coordinator_stage_tasks(root_domain, status, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_stage_tasks_workflow_status ON coordinator_stage_tasks(workflow_id, status, lease_expires_at);
 
 CREATE TABLE IF NOT EXISTS coordinator_resource_leases (
   lease_id TEXT PRIMARY KEY,
@@ -804,6 +805,24 @@ CREATE INDEX IF NOT EXISTS idx_manifest_entries_hash
 CREATE INDEX IF NOT EXISTS idx_manifest_entries_shard
   ON coordinator_artifact_manifest_entries(root_domain, artifact_type, shard_key);
 
+CREATE TABLE IF NOT EXISTS coordinator_task_attempts (
+  task_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  root_domain TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  attempt_number INTEGER NOT NULL,
+  worker_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  error TEXT NOT NULL DEFAULT '',
+  started_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at_utc TIMESTAMPTZ,
+  duration_ms BIGINT NOT NULL DEFAULT 0,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY(task_id, attempt_number)
+);
+CREATE INDEX IF NOT EXISTS idx_task_attempts_workflow ON coordinator_task_attempts(workflow_id, root_domain, stage);
+CREATE INDEX IF NOT EXISTS idx_task_attempts_status ON coordinator_task_attempts(status, started_at_utc DESC);
+
 CREATE TABLE IF NOT EXISTS coordinator_recent_events (
   event_id TEXT PRIMARY KEY,
   created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -827,11 +846,14 @@ CREATE TABLE IF NOT EXISTS coordinator_event_log (
   source TEXT NOT NULL DEFAULT '',
   message TEXT NOT NULL DEFAULT '',
   idempotency_key TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  causation_id TEXT NOT NULL DEFAULT '',
   payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 CREATE INDEX IF NOT EXISTS idx_event_log_created ON coordinator_event_log(created_at_utc DESC);
 CREATE INDEX IF NOT EXISTS idx_event_log_aggregate ON coordinator_event_log(aggregate_key, event_sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_event_log_type ON coordinator_event_log(event_type, event_sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_correlation ON coordinator_event_log(correlation_id, event_sequence DESC);
 
 CREATE TABLE IF NOT EXISTS coordinator_fleet_settings (
   singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
@@ -914,15 +936,22 @@ CREATE TABLE IF NOT EXISTS coordinator_projection_state (
             "CREATE INDEX IF NOT EXISTS idx_recent_events_created ON coordinator_recent_events(created_at_utc DESC)",
             "CREATE INDEX IF NOT EXISTS idx_recent_events_lookup ON coordinator_recent_events(event_type, aggregate_key, source)",
             "CREATE TABLE IF NOT EXISTS coordinator_event_log (event_sequence BIGSERIAL PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, created_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), event_type TEXT NOT NULL, aggregate_key TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL DEFAULT '', payload_json JSONB NOT NULL DEFAULT '{}'::jsonb)",
+            "ALTER TABLE coordinator_event_log ADD COLUMN IF NOT EXISTS correlation_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE coordinator_event_log ADD COLUMN IF NOT EXISTS causation_id TEXT NOT NULL DEFAULT ''",
             "CREATE INDEX IF NOT EXISTS idx_event_log_created ON coordinator_event_log(created_at_utc DESC)",
             "CREATE INDEX IF NOT EXISTS idx_event_log_aggregate ON coordinator_event_log(aggregate_key, event_sequence DESC)",
             "CREATE INDEX IF NOT EXISTS idx_event_log_type ON coordinator_event_log(event_type, event_sequence DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_event_log_correlation ON coordinator_event_log(correlation_id, event_sequence DESC)",
             "CREATE INDEX IF NOT EXISTS idx_targets_claim_partial ON coordinator_targets(line_number, created_at_utc) WHERE status IN ('pending','running')",
             "CREATE INDEX IF NOT EXISTS idx_targets_running_domain_lease ON coordinator_targets(root_domain, lease_expires_at) WHERE status='running'",
             "CREATE INDEX IF NOT EXISTS idx_stage_tasks_claim_partial ON coordinator_stage_tasks(workflow_id, created_at_utc) WHERE status IN ('ready','running')",
             "CREATE INDEX IF NOT EXISTS idx_stage_tasks_running_domain_lease ON coordinator_stage_tasks(root_domain, lease_expires_at) WHERE status='running'",
             "CREATE INDEX IF NOT EXISTS idx_stage_tasks_concurrency ON coordinator_stage_tasks(root_domain, concurrency_group, status, lease_expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_stage_tasks_workflow_stage_status ON coordinator_stage_tasks(workflow_id, stage, status)",
+            "CREATE INDEX IF NOT EXISTS idx_stage_tasks_workflow_status ON coordinator_stage_tasks(workflow_id, status, lease_expires_at)",
+            "CREATE TABLE IF NOT EXISTS coordinator_task_attempts (task_id TEXT NOT NULL, workflow_id TEXT NOT NULL, root_domain TEXT NOT NULL, stage TEXT NOT NULL, attempt_number INTEGER NOT NULL, worker_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', error TEXT NOT NULL DEFAULT '', started_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at_utc TIMESTAMPTZ, duration_ms BIGINT NOT NULL DEFAULT 0, metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY(task_id, attempt_number))",
+            "CREATE INDEX IF NOT EXISTS idx_task_attempts_workflow ON coordinator_task_attempts(workflow_id, root_domain, stage)",
+            "CREATE INDEX IF NOT EXISTS idx_task_attempts_status ON coordinator_task_attempts(status, started_at_utc DESC)",
             "CREATE INDEX IF NOT EXISTS idx_artifacts_retention ON coordinator_artifacts(retention_class)",
             "CREATE INDEX IF NOT EXISTS idx_artifacts_hot_fields ON coordinator_artifacts(root_domain, artifact_type, summary_match_count, summary_anomaly_count)",
         ]
@@ -5149,6 +5178,33 @@ SET lease_expires_at = EXCLUDED.lease_expires_at,
                             lease_key,
                             row_map["max_parallelism"],
                             lease,
+                        ),
+                    )
+                    cur.execute(
+                        """
+INSERT INTO coordinator_task_attempts(
+  task_id, workflow_id, root_domain, stage, attempt_number, worker_id, status, metadata_json
+)
+VALUES (%s,%s,%s,%s,%s,%s,'running',%s::jsonb)
+ON CONFLICT (task_id, attempt_number) DO NOTHING;
+""",
+                        (
+                            f"{updated[0]}:{updated[1]}:{updated[2]}",
+                            str(updated[0] or ""),
+                            str(updated[1] or ""),
+                            str(updated[2] or ""),
+                            int(updated[5] or 0),
+                            str(wid or ""),
+                            json.dumps(
+                                {
+                                    "resource_class": row_map["resource_class"],
+                                    "access_mode": row_map["access_mode"],
+                                    "concurrency_group": row_map["concurrency_group"],
+                                    "max_parallelism": int(row_map["max_parallelism"] or 1),
+                                    "max_attempts": int(row_map["max_attempts"] or 1),
+                                },
+                                ensure_ascii=False,
+                            ),
                         ),
                     )
                     claimed = updated
