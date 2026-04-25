@@ -30,6 +30,10 @@
     td code { white-space: pre-wrap; word-break: break-word; font-size: 11px; display: block; max-width: 480px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .type-badge { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 999px; padding: 2px 8px; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+    .sev-badge { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 999px; padding: 2px 8px; font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: .03em; }
+    .sev-info, .sev-debug { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
+    .sev-warning { border-color: #fcd34d; color: #92400e; background: #fffbeb; }
+    .sev-error, .sev-critical { border-color: #fca5a5; color: #991b1b; background: #fef2f2; }
   </style>
 </head>
 <body>
@@ -67,14 +71,16 @@
         <tr>
           <th style="min-width:180px;">Time (EST)</th>
           <th style="min-width:180px;">Event Type</th>
+          <th style="min-width:90px;">Severity</th>
           <th style="min-width:180px;">Source</th>
           <th style="min-width:220px;">Aggregate</th>
+          <th style="min-width:180px;">Correlation</th>
           <th style="min-width:260px;">Message</th>
           <th>Payload</th>
         </tr>
       </thead>
       <tbody id="eventsBody">
-        <tr><td colspan="6" class="muted">Loading events…</td></tr>
+        <tr><td colspan="8" class="muted">Loading events…</td></tr>
       </tbody>
     </table>
   </div>
@@ -162,17 +168,22 @@
     function renderRows(events) {
       const body = document.getElementById("eventsBody");
       if (!Array.isArray(events) || events.length === 0) {
-        body.innerHTML = '<tr><td colspan="6" class="muted">No events matched the current filters.</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" class="muted">No events matched the current filters.</td></tr>';
         return;
       }
       body.innerHTML = events.map((event) => {
-        const payload = escapeHtml(JSON.stringify(event.payload || {}, null, 2));
+        const payloadObj = event.payload || {};
+        const severity = String(payloadObj.severity || "info").toLowerCase();
+        const correlationId = String(payloadObj.correlation_id || event.correlation_id || "");
+        const payload = escapeHtml(JSON.stringify(payloadObj, null, 2));
         return `
           <tr>
             <td class="mono">${escapeHtml(formatEventTime(event.created_at || ""))}</td>
             <td><span class="type-badge">${escapeHtml(event.event_type || "")}</span></td>
+            <td><span class="sev-badge sev-${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
             <td>${escapeHtml(event.source || "")}</td>
             <td class="mono">${escapeHtml(event.aggregate_key || "")}</td>
+            <td class="mono">${escapeHtml(correlationId || "—")}</td>
             <td>${escapeHtml(event.message || "")}</td>
             <td><code>${payload}</code></td>
           </tr>

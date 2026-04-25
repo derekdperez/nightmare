@@ -39,6 +39,7 @@
     .b-completed { border-color: #86efac; color: #166534; background: #f0fdf4; }
     .b-failed { border-color: #fca5a5; color: #991b1b; background: #fef2f2; }
     .b-paused { border-color: #fcd34d; color: #92400e; background: #fffbeb; }
+    .b-created, .b-canceled { border-color: #ddd6fe; color: #5b21b6; background: #f5f3ff; }
     .b-pending { border-color: #cbd5e1; color: #334155; background: #f8fafc; }
     .task-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .run-panel { display: grid; gap: 8px; grid-template-columns: 1.2fr 2fr auto auto; align-items: end; margin: 10px 0 14px; }
@@ -62,6 +63,7 @@
     <div class="card"><div class="k">Total Domains</div><div class="v" id="totalDomains">0</div></div>
     <div class="card"><div class="k">Visible Tasks</div><div class="v" id="visibleTasks">0</div></div>
     <div class="card"><div class="k">Running Tasks</div><div class="v" id="runningTasks">0</div></div>
+    <div class="card"><div class="k">Ready Tasks</div><div class="v" id="readyTasks">0</div></div>
     <div class="card"><div class="k">Paused Tasks</div><div class="v" id="pausedTasks">0</div></div>
   </div>
 
@@ -72,10 +74,12 @@
     <input id="searchPlugin" type="text" placeholder="Filter plugin">
     <select id="statusFilter">
       <option value="">All statuses</option>
+      <option value="created">created</option>
       <option value="pending">waiting</option>
       <option value="ready">ready</option>
       <option value="running">running</option>
       <option value="paused">paused</option>
+      <option value="canceled">canceled</option>
       <option value="completed">completed</option>
       <option value="failed">failed</option>
     </select>
@@ -201,6 +205,8 @@
     }
     function statusLabel(status) {
       const value = String(status || "").trim().toLowerCase();
+      if (value === "created") return "Created";
+      if (value === "canceled") return "Canceled";
       if (value === "pending") return "Waiting for Prerequisites...";
       return value || "Waiting for Prerequisites...";
     }
@@ -211,6 +217,8 @@
       if (value === "failed") return "badge b-failed";
       if (value === "ready") return "badge b-ready";
       if (value === "paused") return "badge b-paused";
+      if (value === "created") return "badge b-created";
+      if (value === "canceled") return "badge b-canceled";
       return "badge b-pending";
     }
     function formatStamp(value) {
@@ -280,14 +288,14 @@
       body.innerHTML = domains.map((domain) => {
         const root = String(domain.root_domain || "");
         const tasks = flattenTasks(domain).filter(taskFiltersMatch);
-        const statuses = { pending: 0, ready: 0, running: 0, paused: 0, completed: 0, failed: 0 };
+        const statuses = { created: 0, pending: 0, ready: 0, running: 0, paused: 0, canceled: 0, completed: 0, failed: 0 };
         for (const task of tasks) {
           const key = String(task.status || "").toLowerCase();
           if (Object.prototype.hasOwnProperty.call(statuses, key)) statuses[key] += 1;
         }
         const targetStats = domain.targets || {};
         const targetText = `p:${Number(targetStats.pending || 0)} r:${Number(targetStats.running || 0)} c:${Number(targetStats.completed || 0)} f:${Number(targetStats.failed || 0)}`;
-        const statusText = `waiting:${statuses.pending} ready:${statuses.ready} running:${statuses.running} paused:${statuses.paused} completed:${statuses.completed} failed:${statuses.failed}`;
+        const statusText = `created:${statuses.created} waiting:${statuses.pending} ready:${statuses.ready} running:${statuses.running} paused:${statuses.paused} canceled:${statuses.canceled} completed:${statuses.completed} failed:${statuses.failed}`;
         const selectedClass = state.selectedDomain === root ? "selected" : "";
         return `
           <tr class="${selectedClass}" data-domain="${escapeHtml(root)}">
@@ -383,12 +391,14 @@
       const payload = state.snapshot || {};
       let visibleTaskCount = 0;
       let runningTaskCount = 0;
+      let readyTaskCount = 0;
       let pausedTaskCount = 0;
       for (const domain of domains) {
         for (const task of flattenTasks(domain).filter(taskFiltersMatch)) {
           visibleTaskCount += 1;
           const status = String(task.status || "").toLowerCase();
           if (status === "running") runningTaskCount += 1;
+          if (status === "ready") readyTaskCount += 1;
           if (status === "paused") pausedTaskCount += 1;
         }
       }
@@ -396,6 +406,7 @@
       document.getElementById("totalDomains").textContent = String(Number(payload.domain_count || 0));
       document.getElementById("visibleTasks").textContent = String(visibleTaskCount);
       document.getElementById("runningTasks").textContent = String(runningTaskCount);
+      document.getElementById("readyTasks").textContent = String(readyTaskCount);
       document.getElementById("pausedTasks").textContent = String(pausedTaskCount);
     }
     function renderAll() {
