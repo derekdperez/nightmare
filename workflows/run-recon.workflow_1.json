@@ -32,7 +32,6 @@
       "resume_mode": "exact",
       "preconditions": {},
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {},
       "outputs": {
         "artifacts": [
@@ -71,7 +70,6 @@
         ]
       },
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
           "recon_subdomains_json"
@@ -109,7 +107,6 @@
         ]
       },
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
           "recon_subdomains_json"
@@ -153,7 +150,6 @@
         ]
       },
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
           "nightmare_session_json"
@@ -197,7 +193,6 @@
         ]
       },
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
           "nightmare_session_json"
@@ -242,7 +237,6 @@
         ]
       },
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
           "nightmare_session_json",
@@ -295,7 +289,6 @@
         ]
       },
       "retry_failed": true,
-      "max_attempts": 0,
       "inputs": {
         "artifacts_all": [
           "nightmare_session_json",
@@ -319,5 +312,6 @@
         "wordlist": "resources/wordlists/high_value_extractor_list.txt"
       }
     }
-  ]
+  ],
+  "retry_limit": 3
 }

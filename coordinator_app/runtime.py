@@ -357,7 +357,7 @@ class CoordinatorClient:
                 "worker_id": str(worker_id or "").strip(),
                 "reason": str(reason or "").strip(),
                 "allow_retry_failed": bool(allow_retry_failed),
-                "max_attempts": int(max_attempts or 0),
+                "max_attempts": int(max_attempts or 0),  # optional; server supplies the default retry policy when omitted/zero
                 "checkpoint": (dict(checkpoint) if isinstance(checkpoint, dict) else None),
                 "progress": (dict(progress) if isinstance(progress, dict) else None),
                 "progress_artifact_type": str(progress_artifact_type or "").strip().lower(),

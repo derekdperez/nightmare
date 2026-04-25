@@ -44,6 +44,23 @@ DEFAULT_COORDINATOR_LEASE_SECONDS = 120
 DEFAULT_WORKER_RETENTION_SECONDS = 3600
 MAX_AUDIT_TEXT_LEN = 4000
 
+DEFAULT_WORKFLOW_RETRY_LIMIT = 3
+
+
+def _coerce_workflow_retry_limit(value: Any = None) -> int:
+    """Return a positive retry count. Defaults to three retries and never allows zero."""
+    if value is None or value == "":
+        value = os.getenv("WORKFLOW_RETRY_LIMIT") or os.getenv("WORKFLOW_MAX_RETRIES") or DEFAULT_WORKFLOW_RETRY_LIMIT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_WORKFLOW_RETRY_LIMIT
+    return max(1, parsed)
+
+
+def _workflow_total_attempts(value: Any = None) -> int:
+    return _coerce_workflow_retry_limit(value) + 1
+
 SUPPORTED_PAGE_CLASSIFICATIONS = {
     PAGE_CLASS_EXISTS,
     PAGE_CLASS_LIKELY_SOFT_404,
@@ -615,7 +632,7 @@ CREATE TABLE IF NOT EXISTS coordinator_stage_tasks (
   completed_at_utc TIMESTAMPTZ,
   heartbeat_at_utc TIMESTAMPTZ,
   attempt_count INTEGER NOT NULL DEFAULT 0,
-  max_attempts INTEGER NOT NULL DEFAULT 1,
+  max_attempts INTEGER NOT NULL DEFAULT 4,
   exit_code INTEGER,
   error TEXT,
   checkpoint_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -825,8 +842,8 @@ CREATE TABLE IF NOT EXISTS coordinator_projection_state (
                 cur.execute(ddl)
                 cur.execute("""
 ALTER TABLE coordinator_stage_tasks
-  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 1;
-UPDATE coordinator_stage_tasks SET max_attempts = 1 WHERE COALESCE(max_attempts, 0) < 1;
+  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 4;
+UPDATE coordinator_stage_tasks SET max_attempts = 4 WHERE COALESCE(max_attempts, 0) < 1;
 """)
             conn.commit()
             for sql in migration_statements:
@@ -4379,7 +4396,11 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
         widf = str(workflow_id or "").strip().lower() or "default"
         wid = str(worker_id or "").strip()
         source_reason = str(reason or "").strip()
-        max_attempts_int = max(1, int(max_attempts or 1))
+        try:
+            requested_total_attempts = int(max_attempts or 0)
+        except (TypeError, ValueError):
+            requested_total_attempts = 0
+        max_attempts_int = _workflow_total_attempts() if requested_total_attempts <= 0 else max(2, requested_total_attempts)
         if not rd or not stg:
             return {
                 "ok": False,
@@ -4513,7 +4534,7 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
                         decision_reason = "already_running"
                     elif current_status == "failed":
                         can_retry = bool(allow_retry_failed)
-                        if max_attempts_int > 0 and attempt_count >= max_attempts_int:
+                        if attempt_count >= max_attempts_int:
                             can_retry = False
                             decision_reason = "max_attempts_reached"
                         if can_retry:
@@ -4579,7 +4600,7 @@ WHERE workflow_id = %s
                     "worker_id": wid,
                     "reason": source_reason or decision_reason,
                     "allow_retry_failed": bool(allow_retry_failed),
-                    "max_attempts": max_attempts_int,
+                    "retry_limit": max(1, max_attempts_int - 1),
                     "resume_mode": resume_mode_text,
                     "progress_artifact_type": progress_artifact_type_text,
                     "table": "coordinator_stage_tasks",
@@ -4596,6 +4617,7 @@ WHERE workflow_id = %s
             "status": status,
             "reason": decision_reason,
             "attempt_count": attempt_count,
+            "retry_limit": max(1, max_attempts_int - 1),
         }
 
     def enqueue_stage(
@@ -4751,7 +4773,7 @@ SELECT workflow_id, root_domain, stage, status, worker_id, attempt_count, lease_
        checkpoint_json, progress_json, progress_artifact_type, resume_mode,
        COALESCE(resource_class, 'default'), COALESCE(access_mode, 'write'),
        COALESCE(concurrency_group, ''), GREATEST(COALESCE(max_parallelism, 1), 1),
-       GREATEST(COALESCE(max_attempts, 1), 1)
+       GREATEST(COALESCE(max_attempts, 4), 2)
 FROM coordinator_stage_tasks
 WHERE (
     status = 'ready'
@@ -4759,7 +4781,7 @@ WHERE (
       status = 'running'
       AND lease_expires_at IS NOT NULL
       AND lease_expires_at < NOW()
-      AND attempt_count < GREATEST(COALESCE(max_attempts, 1), 1)
+      AND attempt_count < GREATEST(COALESCE(max_attempts, 4), 2)
     )
 )
   AND (%s::text[] IS NULL OR stage = ANY(%s))

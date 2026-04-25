@@ -704,7 +704,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
                     if not plugin_name:
                         continue
                     resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
-                    max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                    max_attempts = 0
                     checkpoint = {"schema_version": 1, "resume_mode": resume_mode, "state": "queued"}
                     if force_ready:
                         checkpoint.update({"force_run_override": True, "force_run_requested_at_utc": _iso_now()})
@@ -761,7 +761,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
                         if not plugin_name:
                             continue
                         resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
-                        max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                        max_attempts = 0
                         checkpoint = {"schema_version": 1, "resume_mode": resume_mode, "state": "queued"}
                         if force_ready:
                             checkpoint.update({"force_run_override": True, "force_run_requested_at_utc": _iso_now()})

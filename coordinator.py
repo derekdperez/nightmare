@@ -94,6 +94,24 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+DEFAULT_WORKFLOW_RETRY_LIMIT = 3
+
+
+def _default_workflow_retry_limit() -> int:
+    try:
+        return max(1, int(os.getenv("WORKFLOW_RETRY_LIMIT") or os.getenv("WORKFLOW_MAX_RETRIES") or DEFAULT_WORKFLOW_RETRY_LIMIT))
+    except (TypeError, ValueError):
+        return DEFAULT_WORKFLOW_RETRY_LIMIT
+
+
+def _workflow_total_attempts_from_entry(entry: dict[str, Any]) -> int:
+    try:
+        retry_limit = int(entry.get("retry_limit", _default_workflow_retry_limit()) or _default_workflow_retry_limit())
+    except (TypeError, ValueError):
+        retry_limit = _default_workflow_retry_limit()
+    return max(1, retry_limit) + 1
+
+
 def _normalize_subdomain_start_url(value: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -115,7 +133,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
             "enabled": True,
             "prerequisites": {"target_statuses": ["completed"]},
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {},
         },
@@ -132,7 +149,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_crawl_core"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {},
         },
@@ -149,7 +165,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_ai_discovery"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {},
         },
@@ -166,7 +181,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_ai_probe_execution"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {},
         },
@@ -183,7 +197,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_url_verification"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {},
         },
@@ -200,7 +213,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_inventory_export"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {},
         },
@@ -217,7 +229,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_crawl_core"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {
                 "min_delay_seconds": 0.25,
@@ -238,7 +249,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["nightmare_inventory_export"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {
                 "max_background_workers": 1,
@@ -259,7 +269,6 @@ def _default_workflow_entries() -> list[dict[str, Any]]:
                 "requires_plugins_all": ["fozzy"],
             },
             "retry_failed": False,
-            "max_attempts": 1,
             "resume_mode": "exact",
             "parameters": {"force": True},
         },
@@ -316,7 +325,7 @@ def _normalize_workflow_entry(raw: Any) -> dict[str, Any] | None:
             "require_target_completed": bool(require_target_completed),
         },
         "retry_failed": bool(raw.get("retry_failed", False)),
-        "max_attempts": max(0, _safe_int(raw.get("max_attempts", 0), 0)),
+        "retry_limit": max(1, _safe_int(raw.get("retry_limit", _default_workflow_retry_limit()), _default_workflow_retry_limit())),
         "inputs": dict(raw.get("inputs") or {}) if isinstance(raw.get("inputs"), dict) else {},
         "outputs": dict(raw.get("outputs") or {}) if isinstance(raw.get("outputs"), dict) else {},
         "resume_mode": str(raw.get("resume_mode") or "exact").strip().lower() or "exact",
@@ -370,7 +379,10 @@ def _load_workflow_catalog(path: Path, logger: Any) -> tuple[str, dict[str, list
             continue
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
+        workflow_retry_limit = max(1, _safe_int(payload.get("retry_limit", _default_workflow_retry_limit()), _default_workflow_retry_limit()))
         for raw in candidates:
+            if isinstance(raw, dict) and "retry_limit" not in raw:
+                raw = {**raw, "retry_limit": workflow_retry_limit}
             normalized = _normalize_workflow_entry(raw)
             if not normalized:
                 continue
@@ -852,14 +864,14 @@ class DistributedCoordinator:
                 status = str(task_row.get("status", "") or "").strip().lower()
                 attempt_count = _safe_int(task_row.get("attempt_count", 0), 0)
                 retry_failed = bool(entry.get("retry_failed", False))
-                max_attempts = max(0, _safe_int(entry.get("max_attempts", 0), 0))
+                max_attempts = _workflow_total_attempts_from_entry(entry)
                 if status in {"pending", "running", "completed"}:
                     continue
                 allow_retry_failed = False
                 if status == "failed":
                     if not retry_failed:
                         continue
-                    if max_attempts > 0 and attempt_count >= max_attempts:
+                    if attempt_count >= max_attempts:
                         continue
                     allow_retry_failed = True
                 resume_mode = str(entry.get("resume_mode") or "exact").strip().lower() or "exact"
@@ -886,7 +898,7 @@ class DistributedCoordinator:
                         stage=plugin_name,
                         prior_status=status or "none",
                         attempt_count=attempt_count,
-                        max_attempts=max_attempts,
+                        retry_limit=max(1, max_attempts - 1),
                         retry_failed=retry_failed,
                         artifacts_available=sorted(artifacts),
                     )

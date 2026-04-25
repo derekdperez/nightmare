@@ -6251,7 +6251,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             worker_id = str(body.get("worker_id", "") or "").strip()
             reason = str(body.get("reason", "") or "").strip()
             allow_retry_failed = bool(body.get("allow_retry_failed", False))
-            max_attempts = _safe_int(body.get("max_attempts", 0), 0)
+            max_attempts = _safe_int(body.get("max_attempts", 0), 0)  # optional; zero means use the system retry policy
             checkpoint = body.get("checkpoint") if isinstance(body.get("checkpoint"), dict) else None
             progress = body.get("progress") if isinstance(body.get("progress"), dict) else None
             progress_artifact_type = str(body.get("progress_artifact_type", "") or "").strip().lower()
@@ -6707,7 +6707,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         if not plugin_name:
                             continue
                         resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
-                        max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                        max_attempts = 0
                         checkpoint = {"schema_version": 1, "resume_mode": resume_mode, "state": "queued"}
                         if force_ready:
                             checkpoint.update({"force_run_override": True, "force_run_requested_at_utc": _iso_now()})
@@ -6779,7 +6779,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             if not plugin_name:
                                 continue
                             resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
-                            max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                            max_attempts = 0
                             checkpoint = {"schema_version": 1, "resume_mode": resume_mode, "state": "queued"}
                             if force_ready:
                                 checkpoint.update({"force_run_override": True, "force_run_requested_at_utc": _iso_now()})

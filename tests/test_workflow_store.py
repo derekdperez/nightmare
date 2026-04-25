@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from workflow_app.store import get_workflow_definition, save_workflow_definition
+from workflow_app.store import get_workflow_definition, save_workflow_definition, workflow_payload_from_scheduler_file
 
 
 def test_save_workflow_definition_archives_removed_steps_without_deleting():
@@ -100,7 +100,7 @@ def test_get_workflow_definition_excludes_archived_steps():
 
         def execute(self, sql, params=None):
             compact = " ".join(str(sql).split())
-            if compact.startswith("CREATE TABLE IF NOT EXISTS") or compact.startswith("ALTER TABLE ") or compact.startswith("UPDATE workflow_steps SET max_attempts = 1") or compact.startswith("UPDATE workflow_step_runs SET max_attempts = 1"):
+            if compact.startswith("CREATE TABLE IF NOT EXISTS") or compact.startswith("ALTER TABLE ") or compact.startswith("UPDATE workflow_steps SET max_attempts = 4") or compact.startswith("UPDATE workflow_step_runs SET max_attempts = 4"):
                 return
             if "FROM workflow_definitions WHERE workflow_key=%s" in compact:
                 self._fetchone = ("wf-1", "run-recon", 1, "Run Recon", "", "draft", "manual", {}, {}, [])
@@ -117,7 +117,7 @@ def test_get_workflow_definition_excludes_archived_steps():
                         True,
                         False,
                         False,
-                        1,
+                        4,
                         0,
                         {},
                         {},
@@ -156,3 +156,28 @@ def test_get_workflow_definition_excludes_archived_steps():
     assert workflow["workflow_key"] == "run-recon"
     assert len(workflow["steps"]) == 1
     assert workflow["steps"][0]["step_key"] == "active-step"
+
+
+def test_scheduler_workflow_uses_default_retry_limit_without_required_attempts(tmp_path):
+    workflow_path = tmp_path / "sample.workflow.json"
+    workflow_path.write_text(
+        """{
+          "workflow_id": "run-recon",
+          "retry_limit": 3,
+          "plugins": [
+            {
+              "name": "recon_subdomain_enumeration",
+              "plugin_name": "recon_subdomain_enumeration",
+              "enabled": true,
+              "preconditions": {},
+              "retry_failed": true
+            }
+          ]
+        }""",
+        encoding="utf-8",
+    )
+
+    payload = workflow_payload_from_scheduler_file(workflow_path)
+    step = payload["steps"][0]
+    assert step["retry_limit"] == 3
+    assert step["max_attempts"] == 4

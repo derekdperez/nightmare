@@ -138,7 +138,6 @@
               <th>Workflow</th>
               <th>Plugin</th>
               <th>Status</th>
-              <th>Attempt</th>
               <th>Worker</th>
               <th>Updated</th>
               <th>Progress</th>
@@ -146,7 +145,7 @@
             </tr>
           </thead>
           <tbody id="taskRows">
-            <tr><td colspan="8" class="muted">Select a domain to inspect plugin tasks.</td></tr>
+            <tr><td colspan="7" class="muted">Select a domain to inspect plugin tasks.</td></tr>
           </tbody>
         </table>
       </div>
@@ -233,7 +232,6 @@
             workflow_id: String(workflowId || "default").toLowerCase(),
             plugin_name: String(pluginName || "").toLowerCase(),
             status: String(task.status || "").toLowerCase(),
-            attempt_count: Number(task.attempt_count || 0),
             worker_id: String(task.worker_id || ""),
             updated_at_utc: task.updated_at_utc || task.heartbeat_at_utc || task.started_at_utc || "",
             completed_at_utc: task.completed_at_utc || "",
@@ -331,14 +329,14 @@
       const selected = domains.find((domain) => String(domain.root_domain || "") === state.selectedDomain);
       if (!selected) {
         document.getElementById("taskPanelTitle").textContent = "Plugin Tasks";
-        body.innerHTML = '<tr><td colspan="8" class="muted">Select a domain to inspect plugin tasks.</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="muted">Select a domain to inspect plugin tasks.</td></tr>';
         return;
       }
       const root = String(selected.root_domain || "");
       document.getElementById("taskPanelTitle").textContent = `Plugin Tasks: ${root}`;
       const tasks = flattenTasks(selected).filter(taskFiltersMatch);
       if (!tasks.length) {
-        body.innerHTML = '<tr><td colspan="8" class="muted">No plugin tasks match filters for this domain.</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="muted">No plugin tasks match filters for this domain.</td></tr>';
         return;
       }
       body.innerHTML = tasks.map((task) => `
@@ -346,7 +344,6 @@
           <td class="mono">${escapeHtml(task.workflow_id || "default")}</td>
           <td class="mono">${escapeHtml(task.plugin_name)}</td>
           <td><span class="${badgeClass(task.status)}">${escapeHtml(statusLabel(task.status))}</span></td>
-          <td>${Number(task.attempt_count || 0)}</td>
           <td class="mono">${escapeHtml(task.worker_id || "")}</td>
           <td class="mono">${escapeHtml(formatStamp(task.updated_at_utc || task.completed_at_utc || ""))}</td>
           <td title="${escapeHtml(JSON.stringify(task.progress || {}))}">${escapeHtml(progressSummary(task))}</td>

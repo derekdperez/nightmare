@@ -8,12 +8,58 @@ introducing a second database configuration path.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from pathlib import Path
 from typing import Any
 
 _KEY_RE = re.compile(r"[^a-z0-9_\-]+")
+
+
+DEFAULT_WORKFLOW_RETRY_LIMIT = 3
+
+
+def _default_retry_limit() -> int:
+    raw = os.getenv("WORKFLOW_RETRY_LIMIT") or os.getenv("WORKFLOW_MAX_RETRIES") or DEFAULT_WORKFLOW_RETRY_LIMIT
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_WORKFLOW_RETRY_LIMIT
+    return max(1, parsed)
+
+
+def _coerce_retry_limit(value: Any, *, default: int | None = None) -> int:
+    """Return a positive retry count. Workflows retry by default; zero disables nothing."""
+    if default is None:
+        default = _default_retry_limit()
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(1, parsed)
+
+
+def _step_retry_limit(step: dict[str, Any]) -> int:
+    if "retry_limit" in step:
+        return _coerce_retry_limit(step.get("retry_limit"))
+    config = step.get("config_json") if isinstance(step.get("config_json"), dict) else {}
+    if isinstance(config, dict) and "retry_limit" in config:
+        return _coerce_retry_limit(config.get("retry_limit"))
+    # Backward compatibility: old definitions stored a total attempt cap.
+    # Treat max_attempts <= 1 as "not configured" and use the default.
+    if "max_attempts" in step:
+        try:
+            legacy_total_attempts = int(step.get("max_attempts") or 0)
+        except (TypeError, ValueError):
+            legacy_total_attempts = 0
+        if legacy_total_attempts > 1:
+            return _coerce_retry_limit(legacy_total_attempts - 1)
+    return _default_retry_limit()
+
+
+def _step_total_attempts(step: dict[str, Any]) -> int:
+    return _step_retry_limit(step) + 1
 
 
 def slugify_key(value: str, *, fallback: str = "workflow") -> str:
@@ -87,7 +133,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   continue_on_error BOOLEAN NOT NULL DEFAULT FALSE,
   retry_failed BOOLEAN NOT NULL DEFAULT FALSE,
-  max_attempts INTEGER NOT NULL DEFAULT 1,
+  max_attempts INTEGER NOT NULL DEFAULT 4,
   timeout_seconds INTEGER NOT NULL DEFAULT 0,
   input_bindings JSONB NOT NULL DEFAULT '{}'::jsonb,
   config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -148,7 +194,7 @@ CREATE TABLE IF NOT EXISTS workflow_step_runs (
   blocked_reason TEXT NOT NULL DEFAULT '',
   worker_id TEXT,
   attempt_count INTEGER NOT NULL DEFAULT 0,
-  max_attempts INTEGER NOT NULL DEFAULT 1,
+  max_attempts INTEGER NOT NULL DEFAULT 4,
   input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   resolved_config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -217,7 +263,7 @@ ALTER TABLE workflow_steps
   ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE,
   ADD COLUMN IF NOT EXISTS continue_on_error BOOLEAN NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS retry_failed BOOLEAN NOT NULL DEFAULT FALSE,
-  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 4,
   ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS input_bindings JSONB NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -228,7 +274,7 @@ ALTER TABLE workflow_step_runs
   ADD COLUMN IF NOT EXISTS blocked_reason TEXT NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS worker_id TEXT,
   ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 4,
   ADD COLUMN IF NOT EXISTS input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS resolved_config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -238,8 +284,8 @@ ALTER TABLE workflow_step_runs
   ADD COLUMN IF NOT EXISTS started_at_utc TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS completed_at_utc TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS updated_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW();
-UPDATE workflow_steps SET max_attempts = 1 WHERE COALESCE(max_attempts, 0) < 1;
-UPDATE workflow_step_runs SET max_attempts = 1 WHERE COALESCE(max_attempts, 0) < 1;
+UPDATE workflow_steps SET max_attempts = 4 WHERE COALESCE(max_attempts, 0) < 1;
+UPDATE workflow_step_runs SET max_attempts = 4 WHERE COALESCE(max_attempts, 0) < 1;
 """)
         conn.commit()
 
@@ -297,6 +343,7 @@ def workflow_payload_from_scheduler_file(path: str | Path) -> dict[str, Any]:
     wf_path = Path(path)
     raw = json.loads(wf_path.read_text(encoding="utf-8-sig"))
     plugins = raw.get("plugins") if isinstance(raw.get("plugins"), list) else []
+    workflow_retry_limit = _coerce_retry_limit(raw.get("retry_limit", _default_retry_limit()))
     workflow_key = slugify_key(str(raw.get("workflow_id") or wf_path.stem.replace(".workflow", "")), fallback="workflow")
     steps: list[dict[str, Any]] = []
     for idx, item in enumerate(plugins, start=1):
@@ -324,7 +371,8 @@ def workflow_payload_from_scheduler_file(path: str | Path) -> dict[str, Any]:
                 "enabled": bool(item.get("enabled", True)),
                 "continue_on_error": bool(item.get("continue_on_error", False)),
                 "retry_failed": bool(item.get("retry_failed", False)),
-                "max_attempts": int(item.get("max_attempts") or 0),
+                "retry_limit": _coerce_retry_limit(item.get("retry_limit", workflow_retry_limit)),
+                "max_attempts": _coerce_retry_limit(item.get("retry_limit", workflow_retry_limit)) + 1,
                 "timeout_seconds": int(item.get("timeout_seconds") or 0),
                 "input_bindings": inputs if isinstance(inputs, dict) else {},
                 "config_json": config_json,
@@ -579,7 +627,7 @@ ORDER BY ordinal ASC;
             {
                 "id": s[0], "step_key": s[1], "display_name": s[2], "plugin_key": s[3],
                 "ordinal": int(s[4]), "enabled": bool(s[5]), "continue_on_error": bool(s[6]),
-                "retry_failed": bool(s[7]), "max_attempts": max(1, int(s[8] or 1)), "timeout_seconds": int(s[9] or 0),
+                "retry_failed": bool(s[7]), "retry_limit": max(1, int(s[8] or 4) - 1), "max_attempts": max(2, int(s[8] or 4)), "timeout_seconds": int(s[9] or 0),
                 "input_bindings": s[10] or {}, "config_json": s[11] or {},
                 "preconditions_json": s[12] or {}, "outputs_json": s[13] or {},
             }
@@ -599,6 +647,7 @@ def save_workflow_definition(store: Any, payload: dict[str, Any], *, actor: str 
     name = str(payload.get("name") or workflow_key).strip()
     row_id = str(payload.get("id") or uuid.uuid4())
     steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    workflow_retry_limit = _coerce_retry_limit(payload.get("retry_limit", _default_retry_limit()))
     with store._connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT to_jsonb(w.*) FROM workflow_definitions w WHERE workflow_key=%s", (workflow_key,))
         before = cur.fetchone()
@@ -679,7 +728,8 @@ ORDER BY ordinal ASC;
                     "enabled": bool(step.get("enabled", True)),
                     "continue_on_error": bool(step.get("continue_on_error", False)),
                     "retry_failed": bool(step.get("retry_failed", False)),
-                    "max_attempts": max(1, int(step.get("max_attempts") or 1)),
+                    "retry_limit": _step_retry_limit({**step, "retry_limit": step.get("retry_limit", workflow_retry_limit)}),
+                    "max_attempts": _step_total_attempts({**step, "retry_limit": step.get("retry_limit", workflow_retry_limit)}),
                     "timeout_seconds": int(step.get("timeout_seconds") or 0),
                     "input_bindings": json.dumps(_json(step.get("input_bindings"), {})),
                     "config_json": json.dumps(_json(step.get("config_json", step.get("config")), {})),
@@ -790,9 +840,8 @@ def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "")
     if not root_domain:
         raise ValueError("root_domain is required")
     input_json = _json(payload.get("input_json", payload.get("input")), {})
-    # max_attempts is a total-attempt cap. 1 means "run once, do not retry".
-    # Older workflow JSON often used 0 to mean "not configured"; normalize it to
-    # 1 so 0 never becomes an accidental infinite retry setting.
+    # Workflow definitions configure retry counts, not required run-attempt counts.
+    # The internal max_attempts column stores total attempts for compatibility.
     with store._connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -802,7 +851,7 @@ VALUES(%s,%s,%s,%s,%s,'queued',%s,%s::jsonb,%s);
             (run_id, definition["id"], definition["workflow_key"], int(definition.get("version") or 1), root_domain, str(payload.get("trigger_source") or "manual"), json.dumps(input_json), actor),
         )
         for step in definition["steps"]:
-            step_max_attempts = max(1, int(step.get("max_attempts") or 1))
+            step_max_attempts = _step_total_attempts(step)
             preconditions = step.get("preconditions_json") or {}
             has_prerequisites = _preconditions_require_wait(preconditions)
             initial_status = "pending" if has_prerequisites else "ready"
