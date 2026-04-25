@@ -69,3 +69,16 @@ def test_schedule_stage_promotes_pending_task_to_ready_when_prerequisites_are_me
     assert result["reason"] == "prerequisites_satisfied_ready"
     assert conn.cursor_obj.updated_statuses == ["ready"]
     assert conn.committed is True
+
+
+def test_subdomain_enumeration_is_always_treated_as_bootstrap_ready() -> None:
+    store = CoordinatorStore.__new__(CoordinatorStore)
+    store._normalize_workflow_token = lambda value, default="": str(value or default).strip().lower()  # type: ignore[attr-defined]
+
+    prereq = CoordinatorStore._load_workflow_stage_preconditions(
+        store,
+        "run-recon",
+        "recon_subdomain_enumeration",
+    )
+
+    assert prereq == {}

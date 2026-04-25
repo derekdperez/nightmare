@@ -6672,19 +6672,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 root_domains = sorted({str(item or "").strip().lower() for item in root_domains_raw if str(item or "").strip()})
             if not root_domains:
                 domain_limit = max(1, min(20000, _safe_int(body.get("domain_limit", 5000), 5000)))
-                snapshot = self.coordinator_store.workflow_scheduler_snapshot(limit=domain_limit)
-                root_domains = sorted(
-                    {
-                        str(item.get("root_domain") or "").strip().lower()
-                        for item in (snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else [])
-                        if str(item.get("root_domain") or "").strip()
-                    }
-                )
+                if hasattr(self.coordinator_store, "workflow_scheduler_domains"):
+                    domain_payload = self.coordinator_store.workflow_scheduler_domains(limit=domain_limit)
+                    root_domains = sorted(
+                        {
+                            str(item or "").strip().lower()
+                            for item in (domain_payload.get("root_domains") if isinstance(domain_payload.get("root_domains"), list) else [])
+                            if str(item or "").strip()
+                        }
+                    )
+                else:
+                    snapshot = self.coordinator_store.workflow_scheduler_snapshot(limit=domain_limit)
+                    root_domains = sorted(
+                        {
+                            str(item.get("root_domain") or "").strip().lower()
+                            for item in (snapshot.get("domains") if isinstance(snapshot.get("domains"), list) else [])
+                            if str(item.get("root_domain") or "").strip()
+                        }
+                    )
             if not root_domains:
                 self._write_json({"error": "no domains available to run workflow"}, status=400)
                 return
             enqueue_reason = str(body.get("reason", "") or "").strip() or f"manual_run:{workflow_id}"
             allow_retry_failed = bool(body.get("allow_retry_failed", False))
+            force_ready = bool(body.get("force_ready", body.get("force_run", False)))
             rows: list[dict[str, Any]] = []
             counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
             retry_counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
@@ -6697,6 +6708,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             continue
                         resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
                         max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                        checkpoint = {"schema_version": 1, "resume_mode": resume_mode, "state": "queued"}
+                        if force_ready:
+                            checkpoint.update({"force_run_override": True, "force_run_requested_at_utc": _iso_now()})
                         result = self.coordinator_store.schedule_stage(
                             root_domain,
                             plugin_name,
@@ -6704,7 +6718,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             reason=enqueue_reason,
                             allow_retry_failed=allow_retry_failed,
                             max_attempts=max_attempts,
-                            checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
+                            checkpoint=checkpoint,
                             progress={"status": "queued", "plugin_name": plugin_name},
                             progress_artifact_type=f"workflow_progress_{plugin_name}",
                             resume_mode=resume_mode,
@@ -6766,6 +6780,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 continue
                             resume_mode = str(plugin.get("resume_mode") or "exact").strip().lower() or "exact"
                             max_attempts = max(0, _safe_int(plugin.get("max_attempts", 0), 0))
+                            checkpoint = {"schema_version": 1, "resume_mode": resume_mode, "state": "queued"}
+                            if force_ready:
+                                checkpoint.update({"force_run_override": True, "force_run_requested_at_utc": _iso_now()})
                             retry_result = self.coordinator_store.schedule_stage(
                                 root_domain,
                                 plugin_name,
@@ -6773,7 +6790,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 reason=f"{enqueue_reason}:retry_after_zero_persist",
                                 allow_retry_failed=allow_retry_failed,
                                 max_attempts=max_attempts,
-                                checkpoint={"schema_version": 1, "resume_mode": resume_mode, "state": "queued"},
+                                checkpoint=checkpoint,
                                 progress={"status": "queued", "plugin_name": plugin_name},
                                 progress_artifact_type=f"workflow_progress_{plugin_name}",
                                 resume_mode=resume_mode,
@@ -6801,6 +6818,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         root_domains=root_domains,
                         plugins=[],
                     )
+            try:
+                for root_domain in root_domains:
+                    self.coordinator_store.refresh_stage_task_readiness(root_domain=root_domain, workflow_id=workflow_id, limit=5000)
+            except Exception:
+                pass
             if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
                 self._write_json(
                     {

@@ -1687,6 +1687,12 @@ LIMIT %s;
 
     def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         safe_limit = max(1, min(20000, int(limit or 2000)))
+        try:
+            self.refresh_stage_task_readiness(limit=safe_limit)
+        except Exception:
+            # Snapshot rendering must remain best-effort even if a partial
+            # deployment is missing newer workflow tables/columns.
+            pass
         domains_sql = """
 SELECT root_domain
 FROM (
@@ -1836,6 +1842,10 @@ ORDER BY root_domain ASC;
         rd = str(root_domain or "").strip().lower()
         if not rd:
             return {"generated_at_utc": _iso_now(), "found": False, "root_domain": rd}
+        try:
+            self.refresh_stage_task_readiness(root_domain=rd, limit=5000)
+        except Exception:
+            pass
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -3993,6 +4003,11 @@ RETURNING command;
         stg = str(stage or "").strip().lower()
         if not wid or not stg:
             return {}
+        # This bootstrap stage intentionally has no prerequisites.  Treat the
+        # workflow JSON as authoritative here so stale DB-authored workflow
+        # definitions or old checkpoint metadata cannot strand it as pending.
+        if stg == "recon_subdomain_enumeration":
+            return {}
         def _read_file_preconditions() -> tuple[bool, dict[str, Any]]:
             candidates: list[Path] = []
             workflow_dir = self._workflow_catalog_dir()
@@ -5542,12 +5557,35 @@ SET status = 'pending',
     updated_at_utc = NOW()
 WHERE {where_clause};
 """
+        readiness_updates = 0
         with self._connect() as conn:
             with conn.cursor() as cur:
                 self._lock_stage_task_scope_cur(cur, widf or "default")
                 cur.execute(sql, tuple(params))
                 affected = int(cur.rowcount or 0)
             conn.commit()
+        if affected > 0 and not hard_delete:
+            try:
+                if domains:
+                    for domain in domains:
+                        readiness_updates += int(
+                            self.refresh_stage_task_readiness(
+                                root_domain=domain,
+                                workflow_id=widf,
+                                limit=max(affected, 500),
+                            )
+                            or 0
+                        )
+                else:
+                    readiness_updates = int(
+                        self.refresh_stage_task_readiness(
+                            workflow_id=widf,
+                            limit=max(affected, 500),
+                        )
+                        or 0
+                    )
+            except Exception:
+                readiness_updates = 0
         self.record_system_event(
             "workflow.task.reset",
             "workflow_tasks",
@@ -5559,6 +5597,7 @@ WHERE {where_clause};
                 "statuses": normalized_statuses,
                 "hard_delete": bool(hard_delete),
                 "affected_rows": affected,
+                "readiness_updates": readiness_updates,
             },
         )
         return {
@@ -5569,6 +5608,7 @@ WHERE {where_clause};
             "statuses": normalized_statuses,
             "hard_delete": bool(hard_delete),
             "affected_rows": affected,
+            "readiness_updates": readiness_updates,
             "reset_at_utc": _iso_now(),
         }
 

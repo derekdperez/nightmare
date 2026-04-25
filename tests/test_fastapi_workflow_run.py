@@ -11,6 +11,7 @@ from server_app.fastapi_app import create_app
 class _StoreRunOk:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
+        self.schedule_kwargs: list[dict[str, Any]] = []
 
     @contextmanager
     def workflow_stage_task_scope(self, workflow_id: str):
@@ -19,10 +20,15 @@ class _StoreRunOk:
 
     def schedule_stage(self, root_domain: str, plugin_name: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((str(root_domain), str(plugin_name), str(kwargs.get("workflow_id") or "")))
+        self.schedule_kwargs.append(dict(kwargs))
         return {"ok": True, "scheduled": True, "reason": "inserted_ready", "status": "ready"}
 
     def workflow_scheduler_domains(self, *, limit: int = 2000) -> dict[str, Any]:
         return {"root_domains": [], "limit": limit, "count": 0}
+
+    def refresh_stage_task_readiness(self, *, root_domain: str = "", workflow_id: str = "", limit: int = 500) -> int:
+        _ = (root_domain, workflow_id, limit)
+        return 0
 
     def workflow_scheduler_snapshot(self, *, limit: int = 2000) -> dict[str, Any]:
         return {"domains": [], "limit": limit}
@@ -86,3 +92,27 @@ def test_fastapi_workflow_run_fails_when_persistence_check_misses_rows() -> None
         assert "no rows were persisted" in str(detail.get("error") or "").lower()
     else:
         assert "no rows were persisted" in str(detail or "").lower()
+
+
+def test_fastapi_workflow_run_passes_force_ready_checkpoint() -> None:
+    store = _StoreRunOk()
+    app = create_app(coordinator_store=store, coordinator_api_token="")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/coord/workflow/run",
+        json={
+            "workflow_id": "run-recon",
+            "root_domains": ["example.com"],
+            "plugins": ["recon_subdomain_enumeration"],
+            "force_ready": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert store.schedule_kwargs
+    checkpoint = store.schedule_kwargs[0].get("checkpoint")
+    assert isinstance(checkpoint, dict)
+    assert checkpoint["force_run_override"] is True
+    assert checkpoint["force_run_requested_at_utc"]
