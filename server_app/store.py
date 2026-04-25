@@ -866,7 +866,6 @@ CREATE TABLE IF NOT EXISTS coordinator_event_log (
 CREATE INDEX IF NOT EXISTS idx_event_log_created ON coordinator_event_log(created_at_utc DESC);
 CREATE INDEX IF NOT EXISTS idx_event_log_aggregate ON coordinator_event_log(aggregate_key, event_sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_event_log_type ON coordinator_event_log(event_type, event_sequence DESC);
-CREATE INDEX IF NOT EXISTS idx_event_log_correlation ON coordinator_event_log(correlation_id, event_sequence DESC);
 
 CREATE TABLE IF NOT EXISTS coordinator_fleet_settings (
   singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),

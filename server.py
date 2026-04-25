@@ -4179,7 +4179,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._serve_static_file(all_domains_html)
             return
         if path == "/dashboard":
-            self._write_text("Dashboard page removed. Use /workers.", status=404)
+            self._write_text(render_dashboard_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/operations":
             self._write_text("Operations page removed.", status=404)
