@@ -16,7 +16,7 @@ def test_runtime_scheduler_no_longer_uses_whole_fleet_snapshot() -> None:
 
 
 def test_resource_lock_claim_path_is_primary() -> None:
-    store = _read("server_app/store.py")
+    store = _read("app_platform/server/store.py")
     assert "coordinator_resource_leases" in store
     assert "def try_claim_stage_with_resources" in store
     assert "return self.try_claim_stage_with_resources" in store
@@ -24,7 +24,7 @@ def test_resource_lock_claim_path_is_primary() -> None:
 
 
 def test_eventstream_and_zip_handoff_removed_from_runtime() -> None:
-    store = _read("server_app/store.py")
+    store = _read("app_platform/server/store.py")
     coordinator = _read("coordinator.py")
     assert "EventStream" not in store
     assert "_upload_zip_artifact" not in coordinator
@@ -34,9 +34,9 @@ def test_eventstream_and_zip_handoff_removed_from_runtime() -> None:
 
 
 def test_content_addressed_manifest_tables_and_api_exist() -> None:
-    store = _read("server_app/store.py")
-    api = _read("server_app/fastapi_app.py")
-    runtime = _read("coordinator_app/runtime.py")
+    store = _read("app_platform/server/store.py")
+    api = _read("app_platform/server/fastapi_app.py")
+    runtime = _read("app_platform/coordinator_runtime/runtime.py")
     assert "coordinator_artifact_objects" in store
     assert "coordinator_artifact_manifest_entries" in store
     assert "list_artifact_manifest_entries" in store

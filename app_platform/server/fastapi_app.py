@@ -16,7 +16,7 @@ from app_platform.server.store import CoordinatorStore, DEFAULT_COORDINATOR_LEAS
 from app_platform.workflow.tailor_adapter import normalize_workflow_payload, resolve_workflow_runtime_payload
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]
 WORKFLOW_FILE_SUFFIX = ".workflow.json"
 WORKFLOW_FILE_GLOB = f"*{WORKFLOW_FILE_SUFFIX}"
 

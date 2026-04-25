@@ -301,7 +301,7 @@ UPDATE workflow_step_runs SET max_attempts = 1 WHERE COALESCE(max_attempts, 0) <
 
 
 
-_BUILTIN_WORKFLOW_DIR = Path(__file__).resolve().parents[1] / "workflows"
+_BUILTIN_WORKFLOW_DIR = Path(__file__).resolve().parents[2] / "workflows"
 
 
 

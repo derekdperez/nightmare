@@ -61,7 +61,7 @@ def summarize_subprocess_failure(program_name: str, exit_code: int | Path, log_p
     return f"{program_name} exit code {int(actual_exit_code)}"
 from shared.runtime_common.logging_utils import get_logger
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH_DEFAULT = BASE_DIR / "config" / "coordinator.json"
 OUTPUT_ROOT_DEFAULT = BASE_DIR / "output"
 
