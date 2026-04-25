@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from nightmare_app.artifacts import FileSystemArtifactStore
 from shared.events import DbEventBroker, build_projection
-from shared.schemas import EventSchema
+from shared.schemas import ArtifactSchema, EventSchema, ExecutionResultSchema, TaskSchema
 from shared.models import EventRecord, RiskScorecard
 from shared.versioning import registry
 from workflow_app.tailor_adapter import normalize_workflow_payload
@@ -58,13 +58,21 @@ def _positive_int(value: Any, default: int) -> int:
 
 
 def _workflow_retry_limit(value: Any = None) -> int:
-    """Return the configured retry count, never zero or negative."""
+    """Return configured retry count where zero means no retries."""
     if value is not None and str(value).strip() != "":
-        return _positive_int(value, DEFAULT_WORKFLOW_RETRY_LIMIT)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return int(DEFAULT_WORKFLOW_RETRY_LIMIT)
+        return max(0, parsed)
     for env_name in ("WORKFLOW_RETRY_LIMIT", "WORKFLOW_MAX_RETRIES"):
         env_value = os.environ.get(env_name)
         if env_value is not None and str(env_value).strip() != "":
-            return _positive_int(env_value, DEFAULT_WORKFLOW_RETRY_LIMIT)
+            try:
+                parsed = int(env_value)
+            except (TypeError, ValueError):
+                return int(DEFAULT_WORKFLOW_RETRY_LIMIT)
+            return max(0, parsed)
     return DEFAULT_WORKFLOW_RETRY_LIMIT
 
 
@@ -444,6 +452,17 @@ class CoordinatorStore:
             aggregate_key=str(event.aggregate_key or "system"),
             schema_version=int(event.schema_version or 1),
             source=str(safe_payload.get("source") or "")[:120],
+            severity=str(safe_payload.get("severity") or "info"),
+            timestamp=datetime.now(timezone.utc),
+            workflow_id=str(safe_payload.get("workflow_id") or ""),
+            workflow_run_id=str(safe_payload.get("workflow_run_id") or ""),
+            task_id=str(safe_payload.get("task_id") or ""),
+            step_id=str(safe_payload.get("step_id") or ""),
+            plugin_id=str(safe_payload.get("plugin_id") or safe_payload.get("stage") or ""),
+            worker_id=str(safe_payload.get("worker_id") or ""),
+            target_id=str(safe_payload.get("target_id") or safe_payload.get("root_domain") or ""),
+            correlation_id=str(safe_payload.get("correlation_id") or ""),
+            causation_id=str(safe_payload.get("causation_id") or ""),
             message=str(safe_payload.get("message") or "")[:1000],
             payload=safe_payload,
             idempotency_key=str(safe_payload.get("idempotency_key") or "")[:500],
@@ -4465,6 +4484,19 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
                     )
                     self._sync_workflow_step_runs_for_stage_cur(cur, workflow_id=wid, root_domain=rd, stage=stg, status=desired, error=reason if desired == "pending" else "")
                     changed += int(cur.rowcount or 0)
+                    self.record_system_event(
+                        "workflow.task.ready" if desired == "ready" else "workflow.task.pending",
+                        f"workflow_task:{wid}:{rd}:{stg}",
+                        {
+                            "source": "coordinator_store.refresh_stage_task_readiness",
+                            "workflow_id": wid,
+                            "root_domain": rd,
+                            "stage": stg,
+                            "plugin_id": stg,
+                            "status": desired,
+                            "blocked_reason": reason[:2000],
+                        },
+                    )
             conn.commit()
         return changed
 
@@ -4499,6 +4531,31 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
                 "plugin_name": stg,
                 "status": "",
                 "reason": "invalid_input",
+                "attempt_count": 0,
+            }
+        try:
+            TaskSchema.model_validate(
+                {
+                    "workflow_id": widf,
+                    "root_domain": rd,
+                    "stage": stg,
+                    "status": "pending",
+                    "attempt_count": 0,
+                    "max_attempts": max_attempts_int,
+                    "checkpoint": dict(checkpoint or {}) if isinstance(checkpoint, dict) else {},
+                    "progress": dict(progress or {}) if isinstance(progress, dict) else {},
+                }
+            )
+        except Exception:
+            return {
+                "ok": False,
+                "scheduled": False,
+                "workflow_id": widf,
+                "root_domain": rd,
+                "stage": stg,
+                "plugin_name": stg,
+                "status": "",
+                "reason": "invalid_task_schema",
                 "attempt_count": 0,
             }
         checkpoint_obj = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
@@ -4676,7 +4733,22 @@ WHERE workflow_id = %s
 
         if scheduled:
             self.record_system_event(
-                "workflow.task.enqueued",
+                "workflow.task.created",
+                f"workflow_task:{widf}:{rd}:{stg}",
+                {
+                    "source": "coordinator_store.schedule_stage",
+                    "workflow_id": widf,
+                    "root_domain": rd,
+                    "stage": stg,
+                    "plugin_name": stg,
+                    "plugin_id": stg,
+                    "status": status,
+                    "reason": source_reason or decision_reason,
+                    "max_attempts": max_attempts_int,
+                },
+            )
+            self.record_system_event(
+                "workflow.task.ready" if status == "ready" else "workflow.task.pending",
                 f"workflow_task:{widf}:{rd}:{stg}",
                 {
                     "source": "coordinator_store.schedule_stage",
@@ -4694,6 +4766,22 @@ WHERE workflow_id = %s
                     "table": "coordinator_stage_tasks",
                 },
             )
+            if str(decision_reason or "").startswith("retry_"):
+                self.record_system_event(
+                    "workflow.task.retry_scheduled",
+                    f"workflow_task:{widf}:{rd}:{stg}",
+                    {
+                        "source": "coordinator_store.schedule_stage",
+                        "workflow_id": widf,
+                        "root_domain": rd,
+                        "stage": stg,
+                        "plugin_id": stg,
+                        "status": status,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts_int,
+                        "reason": decision_reason,
+                    },
+                )
 
         return {
             "ok": True,
@@ -4854,6 +4942,33 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s AND worker_id = %s;
                 )
                 updated = int(cur.rowcount or 0)
             conn.commit()
+        if updated > 0:
+            self.record_system_event(
+                "workflow.task.lease_renewed",
+                f"workflow_task:{widf}:{rd}:{stg}",
+                {
+                    "source": "coordinator_store.heartbeat_stage_with_workflow",
+                    "workflow_id": widf,
+                    "root_domain": rd,
+                    "stage": stg,
+                    "plugin_id": stg,
+                    "worker_id": wid,
+                    "lease_seconds": lease,
+                    "status": "running",
+                },
+            )
+            self.record_system_event(
+                "worker.heartbeat",
+                f"worker:{wid}",
+                {
+                    "source": "coordinator_store.heartbeat_stage_with_workflow",
+                    "worker_id": wid,
+                    "workflow_id": widf,
+                    "root_domain": rd,
+                    "stage": stg,
+                    "status": "running",
+                },
+            )
         return updated > 0
 
     def try_claim_stage_with_resources(
@@ -5060,6 +5175,21 @@ SET lease_expires_at = EXCLUDED.lease_expires_at,
                 "access_mode": str(row[12] or "write"),
                 "concurrency_group": str(row[13] or ""),
                 "max_parallelism": int(row[14] or 1),
+                "max_attempts": int(row[15] or 1),
+            },
+        )
+        self.record_system_event(
+            "workflow.task.started",
+            f"workflow_task:{row[0]}:{row[1]}:{row[2]}",
+            {
+                "source": "coordinator_store.try_claim_stage_with_resources",
+                "workflow_id": row[0],
+                "root_domain": row[1],
+                "stage": row[2],
+                "plugin_id": row[2],
+                "status": "running",
+                "worker_id": row[4],
+                "attempt_count": int(row[5] or 0),
                 "max_attempts": int(row[15] or 1),
             },
         )
@@ -5300,6 +5430,18 @@ WHERE workflow_id = %s
             return False
         ok = int(exit_code) == 0
         next_status = "completed" if ok else "failed"
+        try:
+            ExecutionResultSchema.model_validate(
+                {
+                    "status": next_status,
+                    "exit_code": int(exit_code),
+                    "error": str(error or ""),
+                    "checkpoint": dict(checkpoint or {}) if isinstance(checkpoint, dict) else {},
+                    "progress": dict(progress or {}) if isinstance(progress, dict) else {},
+                }
+            )
+        except Exception:
+            return False
         checkpoint_dict = dict(checkpoint or {}) if isinstance(checkpoint, dict) else {}
         progress_dict = dict(progress or {}) if isinstance(progress, dict) else {}
         checkpoint_json = json.dumps(checkpoint_dict, ensure_ascii=False) if checkpoint_dict else None
@@ -5403,6 +5545,35 @@ WHERE workflow_id = %s
                     "last_milestone": last_milestone,
                 },
             )
+            if next_status == "completed":
+                self.record_system_event(
+                    "workflow.task.succeeded",
+                    f"workflow_task:{widf}:{rd}:{stg}",
+                    {
+                        "source": "coordinator_store.complete_stage",
+                        "workflow_id": widf,
+                        "root_domain": rd,
+                        "stage": stg,
+                        "plugin_id": stg,
+                        "worker_id": wid,
+                        "status": "succeeded",
+                    },
+                )
+            else:
+                self.record_system_event(
+                    "workflow.task.failed",
+                    f"workflow_task:{widf}:{rd}:{stg}",
+                    {
+                        "source": "coordinator_store.complete_stage",
+                        "workflow_id": widf,
+                        "root_domain": rd,
+                        "stage": stg,
+                        "plugin_id": stg,
+                        "worker_id": wid,
+                        "status": "failed",
+                        "error": str(error or "")[:2000],
+                    },
+                )
         return updated > 0
 
     def control_stage_task(
@@ -5568,6 +5739,20 @@ WHERE workflow_id = %s
                 "affected_rows": affected,
             },
         )
+        if act in {"delete", "pause"} and affected > 0:
+            self.record_system_event(
+                "workflow.task.canceled",
+                f"workflow_task:{widf}:{rd}:{stg}",
+                {
+                    "source": "coordinator_store.control_stage_task",
+                    "workflow_id": widf,
+                    "root_domain": rd,
+                    "stage": stg,
+                    "plugin_id": stg,
+                    "status": "canceled",
+                    "action": act,
+                },
+            )
 
         return {
             "ok": bool(affected > 0),
@@ -5914,6 +6099,22 @@ WHERE {where_clause};
             media_type_text = str(manifest_dict.get("media_type") or media_type or "application/octet-stream")
             size_bytes = int(manifest_dict.get("content_size_bytes") or 0)
             inline_content = None
+        try:
+            ArtifactSchema.model_validate(
+                {
+                    "artifact_id": f"{rd}:{at}:{sha256}",
+                    "artifact_type": at,
+                    "root_domain": rd,
+                    "sha256": sha256,
+                    "size_bytes": int(size_bytes),
+                    "storage_backend": storage_backend,
+                    "storage_uri": storage_uri or f"{storage_backend}://{rd}/{at}/{sha256}",
+                    "media_type": media_type_text,
+                    "schema_version": int(registry.current_version("artifact_metadata") or 1),
+                }
+            )
+        except Exception:
+            return False
         summary_match_count = int(manifest_dict.get("match_count") or manifest_dict.get("summary_match_count") or 0)
         summary_anomaly_count = int(manifest_dict.get("anomaly_count") or manifest_dict.get("summary_anomaly_count") or 0)
         summary_request_count = int(manifest_dict.get("request_count") or manifest_dict.get("summary_request_count") or 0)

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from shared.schemas import PluginManifestSchema
+
 
 @dataclass(frozen=True)
 class PluginContract:
@@ -28,16 +30,17 @@ class WorkflowPluginRegistry:
             return []
         plugins: list[PluginContract] = []
         for path in sorted(self.plugins_dir.glob("*.json")):
-            data = json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            manifest = PluginManifestSchema.model_validate(raw)
             plugins.append(
                 PluginContract(
-                    name=str(data.get("name") or "").strip(),
-                    display_name=str(data.get("display_name") or data.get("name") or "").strip(),
-                    description=str(data.get("description") or "").strip(),
-                    category=str(data.get("category") or "general").strip(),
-                    contract_version=str(data.get("contract_version") or "1.0.0").strip(),
-                    handler=str(data.get("handler") or "legacy_step_adapter").strip(),
-                    config_schema=dict(data.get("config_schema") or {}),
+                    name=str(manifest.name or "").strip(),
+                    display_name=str(manifest.display_name or manifest.name or "").strip(),
+                    description=str(manifest.description or "").strip(),
+                    category=str(manifest.category or "general").strip(),
+                    contract_version=str(manifest.contract_version or "1.0.0").strip(),
+                    handler=str(manifest.handler or "legacy_step_adapter").strip(),
+                    config_schema=dict(manifest.config_schema or {}),
                     manifest_path=path,
                 )
             )

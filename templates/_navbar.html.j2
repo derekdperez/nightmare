@@ -103,6 +103,12 @@
     <div class="app-nav-links">
       <a class="app-nav-link" href="/workers" data-nav-path="/workers">Workers</a>
       <a class="app-nav-link" href="/workflows" data-nav-path="/workflows">Workflows</a>
+      {% if show_recon_nav_links | default(true) %}
+      <a class="app-nav-link" href="/crawl-progress" data-nav-path="/crawl-progress">Crawl Progress</a>
+      <a class="app-nav-link" href="/http-requests" data-nav-path="/http-requests">HTTP Requests</a>
+      <a class="app-nav-link" href="/extractor-matches" data-nav-path="/extractor-matches">Extractor Matches</a>
+      <a class="app-nav-link" href="/fuzzing" data-nav-path="/fuzzing">Fuzzing</a>
+      {% endif %}
       <span id="workflowInterfaceNav"></span>
       <a class="app-nav-link" href="/workflow-definitions" data-nav-path="/workflow-definitions">Workflow Builder</a>
       <a class="app-nav-link" href="/database" data-nav-path="/database">Database</a>

@@ -19,7 +19,8 @@ class WorkflowStepSchema(BaseModel):
     enabled: bool = True
     continue_on_error: bool = False
     retry_failed: bool = True
-    max_retries: int = Field(default=3, ge=1)
+    retry_limit: int = Field(default=3, ge=0)
+    max_attempts: int | None = Field(default=None, ge=1)
     timeout_seconds: int = Field(default=0, ge=0)
     input_bindings: dict[str, Any] = Field(default_factory=dict)
     config_json: dict[str, Any] = Field(default_factory=dict)

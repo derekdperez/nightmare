@@ -16,10 +16,10 @@ class TaskSchema(BaseModel):
     workflow_id: str = Field(default="default", min_length=1, max_length=200)
     root_domain: str = Field(min_length=1, max_length=253)
     stage: str = Field(min_length=1, max_length=200)
-    status: Literal["pending", "ready", "running", "completed", "failed", "paused"] = "pending"
+    status: Literal["created", "pending", "ready", "running", "completed", "failed", "paused", "canceled"] = "pending"
     worker_id: str = ""
     attempt_count: int = Field(default=0, ge=0)
-    max_attempts: int = Field(default=4, ge=2)
+    max_attempts: int = Field(default=4, ge=1)
     lease_expires_at: datetime | None = None
     checkpoint: dict[str, Any] = Field(default_factory=dict)
     progress: dict[str, Any] = Field(default_factory=dict)

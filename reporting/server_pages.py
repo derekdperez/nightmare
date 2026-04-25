@@ -11,7 +11,7 @@ def render_dashboard_html() -> str:
 
 
 def render_workers_html() -> str:
-    return render_template("worker_control.html.j2")
+    return render_template("worker_control.html.j2", show_recon_nav_links=False)
 
 
 def render_operations_html() -> str:

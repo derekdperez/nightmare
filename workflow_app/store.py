@@ -15,6 +15,7 @@ from typing import Any
 
 from workflow_app.tailor_adapter import normalize_workflow_payload
 from workflow_app.bindings import resolve_bindings
+from shared.schemas import WorkflowDefinitionSchema
 
 _KEY_RE = re.compile(r"[^a-z0-9_\-]+")
 DEFAULT_WORKFLOW_RETRY_LIMIT = 3
@@ -31,7 +32,11 @@ def _positive_int(value: Any, default: int) -> int:
 
 def workflow_retry_limit(value: Any = None) -> int:
     if value is not None and str(value).strip() != "":
-        return _positive_int(value, DEFAULT_WORKFLOW_RETRY_LIMIT)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return int(DEFAULT_WORKFLOW_RETRY_LIMIT)
+        return max(0, parsed)
     return DEFAULT_WORKFLOW_RETRY_LIMIT
 
 
@@ -633,6 +638,43 @@ ORDER BY ordinal ASC;
 
 def save_workflow_definition(store: Any, payload: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
     ensure_workflow_schema(store)
+    draft_steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    try:
+        WorkflowDefinitionSchema.model_validate(
+            {
+                "workflow_key": str(payload.get("workflow_key") or payload.get("name") or "workflow"),
+                "version": int(payload.get("version") or 1),
+                "name": str(payload.get("name") or payload.get("workflow_key") or "Workflow"),
+                "description": str(payload.get("description") or ""),
+                "status": str(payload.get("status") or "draft"),
+                "trigger_mode": str(payload.get("trigger_mode") or "manual"),
+                "input_schema": _json(payload.get("input_schema"), {}),
+                "ui_schema": _json(payload.get("ui_schema"), {}),
+                "tags": _json(payload.get("tags"), []),
+                "steps": [
+                    {
+                        "step_key": str(step.get("step_key") or step.get("display_name") or f"step-{idx}"),
+                        "display_name": str(step.get("display_name") or ""),
+                        "plugin_key": str(step.get("plugin_key") or step.get("plugin_name") or step.get("type") or ""),
+                        "ordinal": int(step.get("ordinal") or idx),
+                        "enabled": bool(step.get("enabled", True)),
+                        "continue_on_error": bool(step.get("continue_on_error", False)),
+                        "retry_failed": bool(step.get("retry_failed", True)),
+                        "retry_limit": int(step.get("retry_limit") or 3),
+                        "max_attempts": (int(step.get("max_attempts")) if step.get("max_attempts") not in (None, "") else None),
+                        "timeout_seconds": int(step.get("timeout_seconds") or 0),
+                        "input_bindings": _json(step.get("input_bindings"), {}),
+                        "config_json": _json(step.get("config_json", step.get("config")), {}),
+                        "preconditions_json": _json(step.get("preconditions_json", step.get("preconditions")), {}),
+                        "outputs_json": _json(step.get("outputs_json", step.get("outputs")), {}),
+                    }
+                    for idx, step in enumerate(draft_steps, start=1)
+                    if isinstance(step, dict)
+                ],
+            }
+        )
+    except Exception as exc:
+        raise ValueError(f"invalid workflow definition payload: {exc}") from exc
     workflow_key = slugify_key(str(payload.get("workflow_key") or payload.get("name") or ""), fallback="workflow")
     name = str(payload.get("name") or workflow_key).strip()
     row_id = str(payload.get("id") or uuid.uuid4())
@@ -823,6 +865,11 @@ def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "")
     definition = get_workflow_definition(store, workflow_key)
     if not definition:
         raise KeyError("workflow definition not found")
+    from workflow_app.validation import validate_workflow_definition
+
+    validation_errors = validate_workflow_definition(definition)
+    if validation_errors:
+        raise ValueError("invalid workflow definition: " + "; ".join(validation_errors))
     run_id = str(uuid.uuid4())
     root_domain = str(payload.get("root_domain") or payload.get("input", {}).get("root_domain") or "").strip().lower()
     if not root_domain:
@@ -878,6 +925,13 @@ INSERT INTO workflow_step_runs(
   ordinal, status, blocked_reason, max_attempts, input_json, resolved_config_json
 )
 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb);
+ON CONFLICT(workflow_run_id, step_key) DO UPDATE SET
+  status = EXCLUDED.status,
+  blocked_reason = EXCLUDED.blocked_reason,
+  max_attempts = EXCLUDED.max_attempts,
+  input_json = EXCLUDED.input_json,
+  resolved_config_json = EXCLUDED.resolved_config_json,
+  updated_at_utc = NOW();
 """,
                 (
                     str(uuid.uuid4()), run_id, definition["id"], step["id"], step_run_key, step["plugin_key"],
@@ -959,13 +1013,52 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
     if persisted_stage_task_rows <= 0 and bool(definition.get("steps")):
         raise RuntimeError("workflow run created but no rows were persisted to coordinator_stage_tasks")
 
-    return {
+    result = {
         "id": run_id,
         "workflow_key": definition["workflow_key"],
         "root_domain": root_domain,
         "status": "queued",
         "persisted_stage_task_rows": persisted_stage_task_rows,
     }
+    if hasattr(store, "record_system_event"):
+        try:
+            store.record_system_event(
+                "workflow.definition.validated",
+                f"workflow_definition:{definition['workflow_key']}",
+                {
+                    "source": "workflow_app.store.create_workflow_run",
+                    "workflow_id": definition["workflow_key"],
+                    "workflow_run_id": run_id,
+                    "status": "validated",
+                },
+            )
+            store.record_system_event(
+                "workflow.run.created",
+                f"workflow_run:{run_id}",
+                {
+                    "source": "workflow_app.store.create_workflow_run",
+                    "workflow_id": definition["workflow_key"],
+                    "workflow_run_id": run_id,
+                    "root_domain": root_domain,
+                    "status": "queued",
+                },
+            )
+            if bool(definition.get("steps")):
+                store.record_system_event(
+                    "workflow.run.started",
+                    f"workflow_run:{run_id}",
+                    {
+                        "source": "workflow_app.store.create_workflow_run",
+                        "workflow_id": definition["workflow_key"],
+                        "workflow_run_id": run_id,
+                        "root_domain": root_domain,
+                        "status": "queued",
+                        "message": "Run initialized and tasks enqueued.",
+                    },
+                )
+        except Exception:
+            pass
+    return result
 
 
 def list_workflow_runs(store: Any, *, limit: int = 100) -> list[dict[str, Any]]:
