@@ -4794,6 +4794,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status = 200 if bool(payload.get("ready")) else 503
             self._write_json(payload, status=status)
             return
+        if path == "/api/coord/observability/summary":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            try:
+                payload = self.coordinator_store.observability_summary()
+            except Exception as exc:
+                self.log_message("observability_summary failed: %r", exc)
+                self._write_json(
+                    {
+                        "error": "observability summary query failed",
+                        "detail": str(exc),
+                    },
+                    status=500,
+                )
+                return
+            self._write_json(payload)
+            return
         if path == "/api/coord/docker-status":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
