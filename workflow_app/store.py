@@ -831,6 +831,9 @@ def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "")
     workflow_type = str((definition.get("ui_schema") or {}).get("workflow_type") or "single_run").strip().lower() or "single_run"
     runtime_variables = (definition.get("ui_schema") or {}).get("tailor_runtime_variables")
     runtime_variables = runtime_variables if isinstance(runtime_variables, dict) else {}
+    iteration_items = input_json.get("iteration_items")
+    is_iteration = workflow_type.startswith("iteration_over_") and isinstance(iteration_items, list) and bool(iteration_items)
+    run_scope_ids: list[str] = []
     with store._connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -846,10 +849,29 @@ VALUES(%s,%s,%s,%s,%s,'queued',%s,%s::jsonb,%s);
             has_prerequisites = _preconditions_require_wait(preconditions, plugin_key=plugin_key)
             initial_status = "pending" if has_prerequisites else "ready"
             initial_blocked_reason = "Waiting for Prerequisites..." if has_prerequisites else ""
-            resolved_inputs = resolve_bindings(step.get("input_bindings"), workflow_input=input_json)
-            step_config = step.get("config_json") if isinstance(step.get("config_json"), dict) else {}
-            resolved_config = {**step_config, **resolved_inputs}
-            cur.execute(
+            units: list[dict[str, Any]]
+            if is_iteration:
+                units = [
+                    {"index": idx + 1, "item": item, "workflow_scope_id": f"{definition['workflow_key']}.run.{run_id}.iter.{idx + 1}"}
+                    for idx, item in enumerate(iteration_items)
+                ]
+            else:
+                units = [{"index": 0, "item": None, "workflow_scope_id": str(definition["workflow_key"])}]
+            for unit in units:
+                unit_index = int(unit["index"])
+                unit_item = unit.get("item")
+                workflow_scope_id = str(unit["workflow_scope_id"])
+                if workflow_scope_id not in run_scope_ids:
+                    run_scope_ids.append(workflow_scope_id)
+                unit_input = dict(input_json)
+                if unit_index > 0:
+                    unit_input["iteration_index"] = unit_index
+                    unit_input["iteration_item"] = unit_item
+                resolved_inputs = resolve_bindings(step.get("input_bindings"), workflow_input=unit_input)
+                step_config = step.get("config_json") if isinstance(step.get("config_json"), dict) else {}
+                resolved_config = {**step_config, **resolved_inputs}
+                step_run_key = str(step["step_key"]) if unit_index <= 0 else f"{step['step_key']}__iter_{unit_index}"
+                cur.execute(
                 """
 INSERT INTO workflow_step_runs(
   id, workflow_run_id, workflow_definition_id, step_definition_id, step_key, plugin_key,
@@ -858,28 +880,31 @@ INSERT INTO workflow_step_runs(
 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb);
 """,
                 (
-                    str(uuid.uuid4()), run_id, definition["id"], step["id"], step["step_key"], step["plugin_key"],
+                    str(uuid.uuid4()), run_id, definition["id"], step["id"], step_run_key, step["plugin_key"],
                     int(step["ordinal"]), initial_status, initial_blocked_reason, step_max_attempts,
-                    json.dumps(input_json), json.dumps(resolved_config),
+                    json.dumps(unit_input), json.dumps(resolved_config),
                 ),
             )
-            # Compatibility bridge: enqueue coordinator stage tasks so existing
-            # workers can process DB-backed workflow runs. "pending" means
-            # waiting for prerequisites; only "ready" tasks are claimable.
-            if root_domain:
-                checkpoint = {
-                    "workflow_run_id": run_id,
-                    "step_key": step["step_key"],
-                    "preconditions_json": preconditions if isinstance(preconditions, dict) else {},
-                    "max_attempts": step_max_attempts,
-                    "retry_failed": bool(step.get("retry_failed", False)),
-                    "workflow_type": workflow_type,
-                    "runtime_variables": runtime_variables,
-                }
-                if workflow_type.startswith("iteration_over_"):
-                    checkpoint["iteration_mode"] = workflow_type
-                    checkpoint["iteration_items"] = input_json.get("iteration_items", [])
-                cur.execute(
+                # Compatibility bridge: enqueue coordinator stage tasks so existing
+                # workers can process DB-backed workflow runs. "pending" means
+                # waiting for prerequisites; only "ready" tasks are claimable.
+                if root_domain:
+                    checkpoint = {
+                        "workflow_run_id": run_id,
+                        "step_key": step_run_key,
+                        "base_step_key": step["step_key"],
+                        "preconditions_json": preconditions if isinstance(preconditions, dict) else {},
+                        "max_attempts": step_max_attempts,
+                        "retry_failed": bool(step.get("retry_failed", False)),
+                        "workflow_type": workflow_type,
+                        "runtime_variables": runtime_variables,
+                        "workflow_definition_key": definition["workflow_key"],
+                    }
+                    if unit_index > 0:
+                        checkpoint["iteration_mode"] = workflow_type
+                        checkpoint["iteration_index"] = unit_index
+                        checkpoint["iteration_item"] = unit_item
+                    cur.execute(
                     """
 INSERT INTO coordinator_stage_tasks(workflow_id, root_domain, stage, status, checkpoint_json, error, max_attempts)
 VALUES(%s,%s,%s,%s,%s::jsonb,%s,%s)
@@ -895,7 +920,7 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
   updated_at_utc=NOW();
 """,
                     (
-                        definition["workflow_key"],
+                        workflow_scope_id,
                         root_domain,
                         step["plugin_key"],
                         initial_status,
@@ -903,27 +928,29 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
                         initial_blocked_reason,
                         step_max_attempts,
                     ),
-                )
+                    )
         conn.commit()
     # File/artifact and plugin prerequisite evaluation happens here and on
     # every worker poll/completion. This makes newly-created runs immediately
     # claimable when their first ready step has no unmet prerequisite.
     try:
-        store.refresh_stage_task_readiness(root_domain=root_domain, workflow_id=definition["workflow_key"], limit=5000)
+        for wid in (run_scope_ids or [str(definition["workflow_key"])]):
+            store.refresh_stage_task_readiness(root_domain=root_domain, workflow_id=wid, limit=5000)
     except Exception:
         pass
 
     persisted_stage_task_rows = 0
     if hasattr(store, "count_stage_tasks"):
         try:
-            persisted_stage_task_rows = int(
-                store.count_stage_tasks(
-                    workflow_id=definition["workflow_key"],
-                    root_domains=[root_domain],
-                    plugins=[],
+            for wid in (run_scope_ids or [str(definition["workflow_key"])]):
+                persisted_stage_task_rows += int(
+                    store.count_stage_tasks(
+                        workflow_id=wid,
+                        root_domains=[root_domain],
+                        plugins=[],
+                    )
+                    or 0
                 )
-                or 0
-            )
         except Exception:
             persisted_stage_task_rows = 0
     else:

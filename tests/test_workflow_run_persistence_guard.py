@@ -142,3 +142,36 @@ def test_create_workflow_run_inserts_no_prerequisite_steps_as_ready(monkeypatch)
     assert coordinator_stage_params
     assert coordinator_stage_params[0][3] == "ready"
     assert coordinator_stage_params[0][5] == ""
+
+
+def test_create_workflow_run_iteration_mode_fans_out_stage_rows(monkeypatch):
+    monkeypatch.setattr(workflow_store, "ensure_workflow_schema", lambda store: None)
+    definition = _workflow_definition()
+    definition["ui_schema"] = {"workflow_type": "iteration_over_list_file"}
+    monkeypatch.setattr(workflow_store, "get_workflow_definition", lambda store, workflow_key: definition)
+
+    store = _FakeStore(persisted_rows=1)
+    workflow_store.create_workflow_run(
+        store,
+        {
+            "workflow_key": "run-recon",
+            "root_domain": "example.com",
+            "input": {"iteration_items": ["one", "two"]},
+        },
+        actor="test",
+    )
+
+    coordinator_stage_params = [
+        params
+        for sql, params in store.connection.cursor_instance.executed
+        if sql.startswith("INSERT INTO coordinator_stage_tasks(")
+    ]
+    workflow_step_params = [
+        params
+        for sql, params in store.connection.cursor_instance.executed
+        if sql.startswith("INSERT INTO workflow_step_runs(")
+    ]
+    assert len(coordinator_stage_params) == 2
+    assert len(workflow_step_params) == 2
+    workflow_ids = [str(params[0]) for params in coordinator_stage_params]
+    assert all(".iter." in value for value in workflow_ids)

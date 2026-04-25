@@ -4089,8 +4089,18 @@ RETURNING command;
         prerequisites so ad-hoc/manual tasks remain runnable.
         """
         wid = self._normalize_workflow_token(workflow_id, default="default")
+        workflow_lookup_tokens: list[str] = [wid]
+        if ".run." in wid:
+            workflow_lookup_tokens.append(wid.split(".run.", 1)[0])
+        if ".iter." in wid:
+            workflow_lookup_tokens.append(wid.split(".iter.", 1)[0])
+        unique_tokens: list[str] = []
+        for token in workflow_lookup_tokens:
+            value = self._normalize_workflow_token(token, default="")
+            if value and value not in unique_tokens:
+                unique_tokens.append(value)
         stg = str(stage or "").strip().lower()
-        if not wid or not stg:
+        if not unique_tokens or not stg:
             return {}
         def _read_file_preconditions() -> tuple[bool, dict[str, Any]]:
             candidates: list[Path] = []
@@ -4109,7 +4119,7 @@ RETURNING command;
                     continue
                 payload = normalize_workflow_payload(payload)
                 payload_id = self._normalize_workflow_token(payload.get("workflow_id"), default=path.name.replace(".workflow.json", ""))
-                if payload_id != wid:
+                if payload_id not in unique_tokens:
                     continue
                 plugins = payload.get("plugins")
                 if not isinstance(plugins, list):
@@ -4144,7 +4154,7 @@ RETURNING command;
         # For built-in recon workflows, treat the workflow file as source of
         # truth so first-stage bootstrap rules are not stranded by stale DB
         # definitions.
-        if wid in {"run-recon", "recon-workflow"} and file_found:
+        if any(token in {"run-recon", "recon-workflow"} for token in unique_tokens) and file_found:
             return file_prereq
 
         # For builder-authored workflows, DB definitions remain authoritative.
@@ -4160,7 +4170,7 @@ WHERE w.workflow_key = %s AND s.plugin_key = %s
 ORDER BY w.updated_at_utc DESC, s.ordinal ASC
 LIMIT 1;
 """,
-                        (wid, stg),
+                        (unique_tokens[0], stg),
                     )
                     row = cur.fetchone()
                 conn.commit()
