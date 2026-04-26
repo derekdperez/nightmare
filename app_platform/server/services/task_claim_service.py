@@ -19,7 +19,7 @@ class TaskClaimService:
         touch_worker_presence: Callable[[Any, str, str], None],
         cleanup_orphaned_leases_cur: Callable[[Any], None],
         stage_prerequisites_satisfied: Callable[[Any, str, str, str], tuple[bool, str]],
-        sync_step_run_status: Callable[[Any, str, str, str, str, Optional[str]], None],
+        sync_workflow_step_run: Callable[[Any, str, str, str, str, str, str], None],
         stage_lease_key: Callable[[dict[str, Any]], str],
         resource_conflict_exists: Callable[[Any, str, str, str, int], bool],
         record_system_event: Callable[[str, str, dict[str, Any]], None],
@@ -31,7 +31,7 @@ class TaskClaimService:
         self._touch_worker_presence = touch_worker_presence
         self._cleanup_orphaned_leases_cur = cleanup_orphaned_leases_cur
         self._stage_prerequisites_satisfied = stage_prerequisites_satisfied
-        self._sync_step_run_status = sync_step_run_status
+        self._sync_workflow_step_run = sync_workflow_step_run
         self._stage_lease_key = stage_lease_key
         self._resource_conflict_exists = resource_conflict_exists
         self._record_system_event = record_system_event
@@ -55,6 +55,9 @@ class TaskClaimService:
             if str(item or "").strip()
         ]
         self._refresh_stage_task_readiness(limit=1000)
+        # Target-domain lock: skip collision check for workflow-run tasks (checkpoint
+        # carries workflow_run_id) so ready steps are not starved by a legacy running
+        # coordinator_targets lease on the same root_domain.
         candidates_sql = """
 SELECT workflow_id, root_domain, stage, status, worker_id, attempt_count, lease_expires_at,
        checkpoint_json, progress_json, progress_artifact_type, resume_mode,
@@ -75,6 +78,7 @@ WHERE (
   AND (
       stage = 'recon_subdomain_enumeration'
       OR (COALESCE(checkpoint_json, '{}'::jsonb) ? 'force_run_override')
+      OR (COALESCE(checkpoint_json, '{}'::jsonb) ? 'workflow_run_id')
       OR NOT EXISTS (
           SELECT 1
           FROM coordinator_targets q
@@ -155,13 +159,14 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
 """,
                             (blocked_reason[:2000], row_map["workflow_id"], row_map["root_domain"], row_map["stage"]),
                         )
-                        self._sync_step_run_status(
+                        self._sync_workflow_step_run(
                             cur,
                             row_map["workflow_id"],
                             row_map["root_domain"],
                             row_map["stage"],
                             "pending",
-                            blocked_reason,
+                            str(blocked_reason)[:2000],
+                            "",
                         )
                         continue
                     lease_key = self._stage_lease_key(row_map)
@@ -178,13 +183,14 @@ WHERE workflow_id = %s AND root_domain = %s AND stage = %s;
                     updated = cur.fetchone()
                     if updated is None:
                         continue
-                    self._sync_step_run_status(
+                    self._sync_workflow_step_run(
                         cur,
                         row_map["workflow_id"],
                         row_map["root_domain"],
                         row_map["stage"],
                         "running",
-                        None,
+                        "",
+                        wid,
                     )
                     cur.execute(
                         """

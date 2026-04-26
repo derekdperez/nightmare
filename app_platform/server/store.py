@@ -485,13 +485,14 @@ class CoordinatorStore:
                     root_domain=root_domain,
                     stage=stage,
                 ),
-                sync_step_run_status=lambda cur, workflow_id, root_domain, stage, status, error: self._sync_workflow_step_runs_for_stage_cur(
+                sync_workflow_step_run=lambda cur, workflow_id, root_domain, stage, status, error, worker_id: self._sync_workflow_step_runs_for_stage_cur(
                     cur,
                     workflow_id=workflow_id,
                     root_domain=root_domain,
                     stage=stage,
                     status=status,
                     error=error,
+                    worker_id=worker_id,
                 ),
                 stage_lease_key=self._stage_lease_key,
                 resource_conflict_exists=lambda cur, root_domain, lease_key, access_mode, max_parallelism: self._resource_conflict_exists(
