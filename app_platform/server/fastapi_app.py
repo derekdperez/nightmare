@@ -813,6 +813,7 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
         retry_counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
         requeue_attempted = False
+        persisted_stage_task_rows_any_workflow = 0
         plugin_names = sorted(
             {
                 str(plugin.get("name") or plugin.get("plugin_name") or plugin.get("stage") or "").strip().lower()
@@ -878,6 +879,11 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
                 root_domains=root_domains,
                 plugins=[],
             )
+            persisted_stage_task_rows_any_workflow = store.count_stage_tasks(
+                workflow_id="",
+                root_domains=root_domains,
+                plugins=plugin_names,
+            )
             if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
                 requeue_attempted = True
                 for root_domain in root_domains:
@@ -927,6 +933,13 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
                     root_domains=root_domains,
                     plugins=[],
                 )
+                persisted_stage_task_rows_any_workflow = store.count_stage_tasks(
+                    workflow_id="",
+                    root_domains=root_domains,
+                    plugins=plugin_names,
+                )
+        if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0 and persisted_stage_task_rows_any_workflow > 0:
+            persisted_stage_task_rows = int(persisted_stage_task_rows_any_workflow)
         if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
             raise HTTPException(
                 status_code=500,
@@ -939,12 +952,15 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
                     "requeue_counts": retry_counts,
                     "persisted_stage_task_rows_plugin_filtered": int(persisted_stage_task_rows_plugin_filtered),
                     "persisted_stage_task_rows_root_workflow": int(persisted_stage_task_rows),
+                    "persisted_stage_task_rows_any_workflow": int(persisted_stage_task_rows_any_workflow),
                     "recent_stage_task_events": store.recent_stage_task_events(workflow_id=workflow_id, limit=20),
                 },
             )
 
         try:
             store.refresh_stage_task_readiness(workflow_id=workflow_id, limit=5000)
+            for domain in root_domains:
+                store.refresh_stage_task_readiness(root_domain=domain, workflow_id="", limit=5000)
         except Exception:
             pass
 

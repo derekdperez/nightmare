@@ -6944,6 +6944,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
             retry_counts = {"scheduled": 0, "already_pending": 0, "already_running": 0, "already_completed": 0, "failed": 0, "other": 0}
             requeue_attempted = False
+            persisted_stage_task_rows_any_workflow = 0
             with self.coordinator_store.workflow_stage_task_scope(workflow_id):
                 for root_domain in root_domains:
                     for plugin in runnable_plugins:
@@ -7017,6 +7018,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     root_domains=root_domains,
                     plugins=[],
                 )
+                persisted_stage_task_rows_any_workflow = self.coordinator_store.count_stage_tasks(
+                    workflow_id="",
+                    root_domains=root_domains,
+                    plugins=runnable_plugin_names,
+                )
                 if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
                     requeue_attempted = True
                     for root_domain in root_domains:
@@ -7066,6 +7072,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         root_domains=root_domains,
                         plugins=[],
                     )
+                    persisted_stage_task_rows_any_workflow = self.coordinator_store.count_stage_tasks(
+                        workflow_id="",
+                        root_domains=root_domains,
+                        plugins=runnable_plugin_names,
+                    )
+            if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0 and persisted_stage_task_rows_any_workflow > 0:
+                persisted_stage_task_rows = int(persisted_stage_task_rows_any_workflow)
             if counts["scheduled"] > 0 and persisted_stage_task_rows <= 0:
                 self._write_json(
                     {
@@ -7077,6 +7090,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "requeue_counts": retry_counts,
                         "persisted_stage_task_rows_plugin_filtered": int(persisted_stage_task_rows_plugin_filtered),
                         "persisted_stage_task_rows_root_workflow": int(persisted_stage_task_rows),
+                        "persisted_stage_task_rows_any_workflow": int(persisted_stage_task_rows_any_workflow),
                         "recent_stage_task_events": self.coordinator_store.recent_stage_task_events(workflow_id=workflow_id, limit=20),
                     },
                     status=500,
@@ -7084,6 +7098,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self.coordinator_store.refresh_stage_task_readiness(workflow_id=workflow_id, limit=5000)
+                for domain in root_domains:
+                    self.coordinator_store.refresh_stage_task_readiness(root_domain=domain, workflow_id="", limit=5000)
             except Exception:
                 pass
 
