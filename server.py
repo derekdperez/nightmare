@@ -5282,6 +5282,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json(payload)
             return
 
+        if path == "/api/coord/event-log":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            limit = max(1, min(5000, _safe_int((query.get("limit") or [250])[0], 250)))
+            after_sequence = max(0, _safe_int((query.get("after_sequence") or [0])[0], 0))
+            try:
+                rows = self.coordinator_store.list_event_log(limit=limit, after_sequence=after_sequence)
+            except Exception as exc:
+                self.log_message("list_event_log failed: %r", exc)
+                self._write_json({"error": "event log query failed", "detail": str(exc)}, status=500)
+                return
+            self._write_json({"ok": True, "after_sequence": after_sequence, "events": rows})
+            return
+
         if path == "/api/coord/state":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)

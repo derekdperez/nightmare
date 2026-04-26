@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 
 def _iso_now() -> str:
@@ -59,7 +60,7 @@ class EventRecord:
     event_type: str
     aggregate_key: str
     schema_version: int = 1
-    event_id: str = ""
+    event_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: str = field(default_factory=_iso_now)
     idempotency_key: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
