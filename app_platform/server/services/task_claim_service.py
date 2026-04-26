@@ -49,15 +49,11 @@ class TaskClaimService:
         if not wid:
             raise ValueError("worker_id is required")
         lease = max(15, int(lease_seconds or self._default_lease_seconds))
-        allowlist_set: set[str] = set()
-        for item in (plugin_allowlist or []):
-            raw = str(item or "").strip().lower()
-            if not raw:
-                continue
-            allowlist_set.add(raw)
-            allowlist_set.add(raw.replace("-", "_"))
-            allowlist_set.add(raw.replace("_", "-"))
-        allowlist = sorted(allowlist_set)
+        allowlist = [
+            str(item or "").strip().lower()
+            for item in (plugin_allowlist or [])
+            if str(item or "").strip()
+        ]
         self._refresh_stage_task_readiness(limit=1000)
         # Target-domain lock: skip collision check for workflow-run tasks (checkpoint
         # carries workflow_run_id) so ready steps are not starved by a legacy running
@@ -145,9 +141,9 @@ RETURNING workflow_id, root_domain, stage, status, worker_id, attempt_count, lea
                     else:
                         still_ready, blocked_reason = self._stage_prerequisites_satisfied(
                             cur,
-                            row_map["workflow_id"],
-                            row_map["root_domain"],
-                            row_map["stage"],
+                            workflow_id=row_map["workflow_id"],
+                            root_domain=row_map["root_domain"],
+                            stage=row_map["stage"],
                         )
                     if not still_ready:
                         cur.execute(

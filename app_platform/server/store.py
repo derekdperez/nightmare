@@ -4360,7 +4360,7 @@ RETURNING command;
 
 
     def _workflow_catalog_dir(self) -> Path:
-        return Path(__file__).resolve().parent.parent / "workflows"
+        return Path(__file__).resolve().parents[2] / "workflows"
 
     def _normalize_workflow_token(self, value: Any, *, default: str = "") -> str:
         raw = str(value or "").strip().lower()

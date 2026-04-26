@@ -89,9 +89,9 @@ class CoordinatorPlugin:
 
     def flush_checkpoint(self, context: PluginExecutionContext, checkpoint: dict[str, Any]) -> None:
         context.coordinator.client.update_stage_progress(
-            context.root_domain,
-            context.plugin_name,
-            context.worker_id,
+            worker_id=context.worker_id,
+            root_domain=context.root_domain,
+            stage=context.plugin_name,
             workflow_id=context.workflow_id,
             checkpoint=checkpoint,
             progress={"last_milestone": "checkpoint"},

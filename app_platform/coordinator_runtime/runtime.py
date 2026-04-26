@@ -321,7 +321,7 @@ class CoordinatorClient:
             {
                 "root_domain": root_domain,
                 "stage": stage,
-                "workflow_id": "",
+                "workflow_id": str(workflow_id or "default").strip().lower() or "default",
                 "checkpoint": (dict(checkpoint) if isinstance(checkpoint, dict) else None),
                 "progress": (dict(progress) if isinstance(progress, dict) else None),
                 "progress_artifact_type": str(progress_artifact_type or "").strip().lower(),
