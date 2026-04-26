@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -875,6 +876,7 @@ def create_workflow_run(store: Any, payload: dict[str, Any], *, actor: str = "")
     if not root_domain:
         raise ValueError("root_domain is required")
     input_json = _json(payload.get("input_json", payload.get("input")), {})
+    force_requested = bool(payload.get("force_ready") or payload.get("force_run"))
     workflow_type = str((definition.get("ui_schema") or {}).get("workflow_type") or "single_run").strip().lower() or "single_run"
     runtime_variables = (definition.get("ui_schema") or {}).get("tailor_runtime_variables")
     runtime_variables = runtime_variables if isinstance(runtime_variables, dict) else {}
@@ -894,8 +896,8 @@ VALUES(%s,%s,%s,%s,%s,'queued',%s,%s::jsonb,%s);
             preconditions = step.get("preconditions_json") or {}
             plugin_key = str(step.get("plugin_key") or "").strip().lower()
             has_prerequisites = _preconditions_require_wait(preconditions, plugin_key=plugin_key)
-            initial_status = "pending" if has_prerequisites else "ready"
-            initial_blocked_reason = "Waiting for Prerequisites..." if has_prerequisites else ""
+            initial_status = "ready" if (force_requested or not has_prerequisites) else "pending"
+            initial_blocked_reason = "Waiting for Prerequisites..." if (has_prerequisites and not force_requested) else ""
             units: list[dict[str, Any]]
             if is_iteration:
                 units = [
@@ -954,6 +956,9 @@ ON CONFLICT(workflow_run_id, step_key) DO UPDATE SET
                         "runtime_variables": runtime_variables,
                         "workflow_definition_key": definition["workflow_key"],
                     }
+                    if force_requested:
+                        checkpoint["force_run_override"] = True
+                        checkpoint["force_run_requested_at_utc"] = datetime.now(timezone.utc).isoformat()
                     if unit_index > 0:
                         checkpoint["iteration_mode"] = workflow_type
                         checkpoint["iteration_index"] = unit_index
@@ -983,6 +988,37 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
                         step_max_attempts,
                     ),
                     )
+                    if hasattr(store, "record_system_event"):
+                        try:
+                            store.record_system_event(
+                                "workflow.task.created",
+                                f"workflow_task:{workflow_scope_id}:{root_domain}:{step['plugin_key']}",
+                                {
+                                    "source": "workflow_app.store.create_workflow_run",
+                                    "workflow_id": workflow_scope_id,
+                                    "workflow_run_id": run_id,
+                                    "root_domain": root_domain,
+                                    "stage": step["plugin_key"],
+                                    "plugin_id": step["plugin_key"],
+                                    "status": initial_status,
+                                },
+                            )
+                            store.record_system_event(
+                                "workflow.task.ready" if initial_status == "ready" else "workflow.task.pending",
+                                f"workflow_task:{workflow_scope_id}:{root_domain}:{step['plugin_key']}",
+                                {
+                                    "source": "workflow_app.store.create_workflow_run",
+                                    "workflow_id": workflow_scope_id,
+                                    "workflow_run_id": run_id,
+                                    "root_domain": root_domain,
+                                    "stage": step["plugin_key"],
+                                    "plugin_id": step["plugin_key"],
+                                    "status": initial_status,
+                                    "blocked_reason": initial_blocked_reason,
+                                },
+                            )
+                        except Exception:
+                            pass
         conn.commit()
     # File/artifact and plugin prerequisite evaluation happens here and on
     # every worker poll/completion. This makes newly-created runs immediately
@@ -1019,6 +1055,7 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
         "root_domain": root_domain,
         "status": "queued",
         "persisted_stage_task_rows": persisted_stage_task_rows,
+        "force_requested": force_requested,
     }
     if hasattr(store, "record_system_event"):
         try:
@@ -1054,6 +1091,30 @@ ON CONFLICT(workflow_id, root_domain, stage) DO UPDATE SET
                         "root_domain": root_domain,
                         "status": "queued",
                         "message": "Run initialized and tasks enqueued.",
+                    },
+                )
+        except Exception:
+            pass
+    if hasattr(store, "worker_statuses") and hasattr(store, "queue_worker_command"):
+        try:
+            worker_snapshot = store.worker_statuses(stale_after_seconds=120)
+            workers = worker_snapshot.get("workers") if isinstance(worker_snapshot, dict) else []
+            for row in workers if isinstance(workers, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                worker_id = str(row.get("worker_id") or "").strip()
+                if not worker_id or "-plugin-" not in worker_id.lower():
+                    continue
+                state = str(row.get("status") or "").strip().lower()
+                if state in {"running"}:
+                    continue
+                store.queue_worker_command(
+                    worker_id,
+                    "start",
+                    payload={
+                        "source": "workflow_app.store.create_workflow_run",
+                        "workflow_run_id": run_id,
+                        "reason": "run_initialized_and_tasks_enqueued",
                     },
                 )
         except Exception:
