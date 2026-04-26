@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -639,6 +640,45 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             "after_sequence": after_sequence,
             "events": store.list_event_log(limit=limit, after_sequence=after_sequence),
         }
+
+    @app.get("/api/coord/event-log/stream")
+    async def event_log_stream(
+        after_sequence: int = Query(default=0, ge=0),
+        poll_interval_ms: int = Query(default=1000, ge=250, le=10000),
+        _auth: None = Depends(require_auth),
+        store: CoordinatorStore = Depends(get_store),
+    ):
+        """Stream append-only event-log rows as server-sent events."""
+
+        async def _iter_sse():
+            cursor = int(after_sequence or 0)
+            keepalive_ticks = 0
+            while True:
+                batch = store.list_event_log(limit=500, after_sequence=cursor)
+                if batch:
+                    keepalive_ticks = 0
+                    for item in batch:
+                        seq = int(item.get("sequence") or 0)
+                        if seq > cursor:
+                            cursor = seq
+                        data = json.dumps(item, ensure_ascii=False)
+                        yield f"id: {seq}\nevent: coordinator_event\ndata: {data}\n\n"
+                else:
+                    keepalive_ticks += 1
+                    if keepalive_ticks >= 10:
+                        keepalive_ticks = 0
+                        yield "event: keepalive\ndata: {}\n\n"
+                await asyncio.sleep(float(poll_interval_ms) / 1000.0)
+
+        return StreamingResponse(
+            _iter_sse(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/api/coord/fleet-settings")
     def fleet_settings(
