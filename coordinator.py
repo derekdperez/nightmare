@@ -3397,7 +3397,8 @@ class DistributedCoordinator:
                     name=f"{scheduler_worker_id}-thread",
                 )
             )
-        plugin_worker_count = max(0, int(self.cfg.plugin_workers or 0))
+        # Keep at least one plugin worker alive so ready tasks can always be claimed.
+        plugin_worker_count = max(1, int(self.cfg.plugin_workers or 0))
         for idx in range(1, plugin_worker_count + 1):
             worker_id = f"{self.worker_prefix}-plugin-{idx}"
             t = threading.Thread(
@@ -3465,7 +3466,7 @@ def main(argv: Optional[list[str] ] = None) -> int:
         workflow_config=str(cfg.workflow_config),
         workflow_scheduler_enabled=bool(cfg.workflow_scheduler_enabled),
         workflow_scheduler_interval_seconds=float(cfg.workflow_scheduler_interval_seconds),
-        plugin_workers=max(0, int(cfg.plugin_workers or 0)),
+        plugin_workers=max(1, int(cfg.plugin_workers or 0)),
         plugin_allowlist=cfg.plugin_allowlist,
         legacy_workers_disabled=True,
     )

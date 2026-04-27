@@ -889,7 +889,8 @@ def load_config(args: argparse.Namespace) -> CoordinatorConfig:
         if isinstance(settings.plugin_allowlist, list)
         else []
     )
-    plugin_workers_value = max(0, safe_int(settings.plugin_workers, 0))
+    # Never allow a zero-plugin-worker runtime; otherwise ready tasks cannot be claimed.
+    plugin_workers_value = max(1, safe_int(settings.plugin_workers, 0))
     output_root = Path(settings.output_root).expanduser()
     if not output_root.is_absolute():
         output_root = (BASE_DIR / output_root).resolve()
