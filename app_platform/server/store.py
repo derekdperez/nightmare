@@ -4668,6 +4668,15 @@ SET status = %s,
     blocked_reason = %s,
     worker_id = CASE WHEN %s <> '' THEN %s ELSE worker_id END,
     error = CASE WHEN %s <> '' THEN %s ELSE error END,
+    attempt_count = GREATEST(wr.attempt_count, COALESCE(ct.attempt_count, wr.attempt_count)),
+    checkpoint_json = COALESCE(ct.checkpoint_json, wr.checkpoint_json),
+    output_json = CASE
+      WHEN %s IN ('completed','failed') AND COALESCE(ct.checkpoint_json, '{}'::jsonb) ? 'output_json'
+        THEN ct.checkpoint_json->'output_json'
+      WHEN %s IN ('completed','failed') AND COALESCE(ct.progress_json, '{}'::jsonb) ? 'output_json'
+        THEN ct.progress_json->'output_json'
+      ELSE wr.output_json
+    END,
     started_at_utc = CASE WHEN %s = 'running' THEN COALESCE(started_at_utc, NOW()) ELSE started_at_utc END,
     completed_at_utc = CASE WHEN %s IN ('completed','failed') THEN NOW() ELSE completed_at_utc END,
     updated_at_utc = NOW()
@@ -4687,6 +4696,8 @@ WHERE ct.workflow_id = %s
                     str(worker_id or ""),
                     str(error or ""),
                     str(error or "")[:2000],
+                    mapped_status,
+                    mapped_status,
                     mapped_status,
                     mapped_status,
                     wid,

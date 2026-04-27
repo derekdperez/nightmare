@@ -2635,8 +2635,13 @@ class DistributedCoordinator:
             return
         checkpoint = dict(entry.get("checkpoint") or {}) if isinstance(entry.get("checkpoint"), dict) else {}
         progress = dict(entry.get("progress") or {}) if isinstance(entry.get("progress"), dict) else {}
+        entry["checkpoint"] = checkpoint
+        entry["progress"] = progress
         checkpoint.update({"status": "running", "started_at_utc": _now_iso(), "plugin_name": plugin_name})
         progress.update({"status": "running", "plugin_name": plugin_name, "root_domain": root_domain})
+        task_config = checkpoint.get("resolved_config_json") or checkpoint.get("resolved_config") or checkpoint.get("parameters")
+        if isinstance(task_config, dict):
+            entry["runtime_config"] = dict(task_config)
         self._begin_job()
         heartbeat = LeaseHeartbeat(
             tick_fn=lambda: self.client.heartbeat_stage(
@@ -2678,6 +2683,10 @@ class DistributedCoordinator:
                     )
                 )
 
+            output_payload = entry.get("plugin_output") if isinstance(entry, dict) else None
+            if isinstance(output_payload, dict):
+                checkpoint["output_json"] = output_payload
+                progress["output_keys"] = sorted(str(key) for key in output_payload.keys())
             checkpoint["completed_at_utc"] = _now_iso()
             checkpoint["status"] = "completed" if int(exit_code) == 0 else "failed"
             progress["status"] = checkpoint["status"]

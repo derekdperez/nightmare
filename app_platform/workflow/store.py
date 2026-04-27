@@ -955,6 +955,14 @@ ON CONFLICT(workflow_run_id, step_key) DO UPDATE SET
                         "workflow_type": workflow_type,
                         "runtime_variables": runtime_variables,
                         "workflow_definition_key": definition["workflow_key"],
+                        # Compatibility bridge payload consumed by coordinator plugin workers.
+                        # workflow_step_runs.resolved_config_json is not read by workers; keep a
+                        # copy on the claimable coordinator task so DB-authored/builder runs use
+                        # their per-run bindings instead of stale file-catalog defaults.
+                        "input_json": unit_input,
+                        "resolved_config_json": resolved_config,
+                        "resolved_config": resolved_config,
+                        "parameters": resolved_config,
                     }
                     if force_requested:
                         checkpoint["force_run_override"] = True

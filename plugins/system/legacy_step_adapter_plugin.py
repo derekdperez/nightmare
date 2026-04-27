@@ -23,6 +23,17 @@ class LegacyStepAdapterPlugin(CoordinatorPlugin):
         params = context.coordinator._workflow_stage_parameters(action_name)
         kwargs = dict(params or {}) if isinstance(params, dict) else {}
 
+        checkpoint = context.entry.get("checkpoint") if isinstance(context.entry, dict) else {}
+        checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+        task_config: dict[str, Any] = {}
+        for key in ("resolved_config_json", "resolved_config", "parameters", "config_json", "config"):
+            value = checkpoint.get(key)
+            if isinstance(value, dict):
+                task_config.update(value)
+        if task_config:
+            # Per-run DB/builder config wins over static file-catalog parameters.
+            kwargs.update(task_config)
+
         # Add common runtime context for actions that need task metadata.
         kwargs.setdefault("root_domain", context.root_domain)
         kwargs.setdefault("workflow_id", context.workflow_id)
@@ -34,13 +45,16 @@ class LegacyStepAdapterPlugin(CoordinatorPlugin):
             accepted = set(signature.parameters.keys())
             filtered = {k: v for k, v in kwargs.items() if k in accepted}
             result = action(**filtered)
+            output_payload = result if isinstance(result, dict) else {"result": result}
+            if isinstance(context.entry, dict):
+                context.entry["plugin_output"] = output_payload
             context.coordinator.logger.info(
                 "legacy_system_action_executed",
                 worker_id=context.worker_id,
                 workflow_id=context.workflow_id,
                 root_domain=context.root_domain,
                 stage=action_name,
-                output=result if isinstance(result, dict) else {"result": str(result)},
+                output=output_payload,
             )
             return 0, ""
         except Exception as exc:
