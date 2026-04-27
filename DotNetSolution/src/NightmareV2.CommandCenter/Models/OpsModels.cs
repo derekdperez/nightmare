@@ -12,13 +12,12 @@ public sealed record AssetGridRowDto(
     Guid Id,
     Guid TargetId,
     string Kind,
-    string LifecycleStatus,
     string CanonicalKey,
     string RawValue,
     int Depth,
     string DiscoveredBy,
     DateTimeOffset DiscoveredAtUtc,
-    bool HasDetails);
+    string LifecycleStatus);
 
 public sealed record WorkerSwitchDto(string WorkerKey, bool IsEnabled, DateTimeOffset UpdatedAtUtc);
 
