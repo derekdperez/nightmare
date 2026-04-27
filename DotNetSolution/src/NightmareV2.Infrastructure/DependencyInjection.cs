@@ -21,8 +21,10 @@ public static class DependencyInjection
 
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConn));
 
-        services.AddDbContext<NightmareDbContext>(options =>
-            options.UseNpgsql(pgConn));
+        void ConfigureNpgsql(DbContextOptionsBuilder options) => options.UseNpgsql(pgConn);
+
+        services.AddDbContext<NightmareDbContext>(ConfigureNpgsql);
+        services.AddDbContextFactory<NightmareDbContext>(ConfigureNpgsql);
 
         services.AddSingleton<IAssetCanonicalizer, DefaultAssetCanonicalizer>();
         services.AddSingleton<IAssetDeduplicator, RedisAssetDeduplicator>();

@@ -4,14 +4,18 @@
 
 .DESCRIPTION
   Brings up Postgres, Redis, RabbitMQ, Command Center, Gatekeeper, Spider, Enum, and PortScan
-  using deploy/docker-compose.yml. Requires Docker Desktop (Windows) with Compose V2, or
-  docker-compose v1 on PATH.
+  using deploy/docker-compose.yml. Re-runnable: each "up" rebuilds from the current repo tree
+  and recreates containers so running code matches your working copy.
 
 .PARAMETER Action
-  up    Build images and start containers detached (default).
+  up    Build images (with --pull) and start containers detached (default).
   down  Stop and remove containers.
   logs  Follow all service logs (blocks until Ctrl+C).
   ps    Show container status.
+
+  Optional environment:
+    NIGHTMARE_GIT_PULL=1   Run git pull --ff-only before build.
+    NIGHTMARE_NO_CACHE=1   docker compose build --no-cache
 
 .EXAMPLE
   .\deploy\run-local.ps1
@@ -41,6 +45,8 @@ if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand
 $ComposeFile = Join-Path $ScriptRoot "docker-compose.yml"
 $Root = (Resolve-Path (Join-Path $ScriptRoot "..")).Path
 Set-Location $Root
+
+. (Join-Path $ScriptRoot "lib-nightmare-compose.ps1")
 
 function Invoke-NightmareCompose {
   param(
@@ -91,10 +97,14 @@ switch ($Action) {
     Invoke-NightmareCompose -CommandArgs @("ps")
   }
   default {
-    Write-Host "Building and starting stack from: $Root"
-    Invoke-NightmareCompose -CommandArgs @("up", "-d", "--build", "--remove-orphans")
+    Invoke-NightmareGitPullIfRequested -Root $Root
+    Export-NightmareBuildStamp -Root $Root
+    Write-Host "Building images (with --pull) and recreating containers from: $Root"
+    $noCache = ($env:NIGHTMARE_NO_CACHE -eq "1")
+    Invoke-NightmareComposeBuildPull -DockerExe $dockerExe -ComposeFile $ComposeFile -NoCache:$noCache
+    Invoke-NightmareComposeUpRecreate -DockerExe $dockerExe -ComposeFile $ComposeFile
     Write-Host ""
-    Write-Host "Stack is up. URLs:"
+    Write-Host "Stack is up (images match current BUILD_SOURCE_STAMP). URLs:"
     Write-Host "  Command Center   http://localhost:8080/"
     Write-Host "  RabbitMQ UI    http://localhost:15672/  (nightmare / nightmare)"
     Write-Host "  Postgres       localhost:5432  db=nightmare_v2  user=nightmare"

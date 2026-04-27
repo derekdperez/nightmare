@@ -1,6 +1,6 @@
 using System.Text.Json;
 using MassTransit;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Domain.Entities;
 using NightmareV2.Infrastructure.Data;
@@ -8,10 +8,13 @@ using NightmareV2.Infrastructure.Data;
 namespace NightmareV2.Infrastructure.Messaging;
 
 /// <summary>
-/// Records publishes to <c>bus_journal</c>. Must not throw into MassTransit; scopes must live until <see cref="DbContext.SaveChangesAsync"/> completes.
+/// MassTransit publish/consume observers run highly concurrently. Writing each event to Postgres with a
+/// scoped <see cref="NightmareDbContext"/> in parallel caused Npgsql protocol errors (e.g. BindComplete vs
+/// ReadyForQuery) and disposed-context faults. All journal writes are serialized on one gate and use a
+/// factory-created context per write.
 /// </summary>
 public sealed class BusJournalPublishObserver(
-    IServiceScopeFactory scopeFactory,
+    IDbContextFactory<NightmareDbContext> dbFactory,
     ILogger<BusJournalPublishObserver> logger) : IPublishObserver
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
@@ -30,10 +33,10 @@ public sealed class BusJournalPublishObserver(
 
     private async Task WriteAsync(string direction, string messageType, string payloadJson, CancellationToken ct)
     {
+        await BusJournalWriteGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await using var scope = scopeFactory.CreateAsyncScope();
-            var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
+            await using var db = await dbFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
             db.BusJournal.Add(
                 new BusJournalEntry
                 {
@@ -49,6 +52,10 @@ public sealed class BusJournalPublishObserver(
         {
             logger.LogWarning(ex, "Bus journal skipped for {Direction} {MessageType}", direction, messageType);
         }
+        finally
+        {
+            BusJournalWriteGate.Release();
+        }
     }
 
     private static string Json<T>(T message) where T : class =>
@@ -58,11 +65,8 @@ public sealed class BusJournalPublishObserver(
         s.Length <= max ? s : s[..max] + "…";
 }
 
-/// <summary>
-/// Records consumes to <c>bus_journal</c>. Same lifetime rules as <see cref="BusJournalPublishObserver"/>.
-/// </summary>
 public sealed class BusJournalConsumeObserver(
-    IServiceScopeFactory scopeFactory,
+    IDbContextFactory<NightmareDbContext> dbFactory,
     ILogger<BusJournalConsumeObserver> logger) : IConsumeObserver
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
@@ -87,10 +91,10 @@ public sealed class BusJournalConsumeObserver(
 
     private async Task WriteAsync(string direction, string messageType, object message, string? consumerType, CancellationToken ct)
     {
+        await BusJournalWriteGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await using var scope = scopeFactory.CreateAsyncScope();
-            var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
+            await using var db = await dbFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
             db.BusJournal.Add(
                 new BusJournalEntry
                 {
@@ -106,6 +110,10 @@ public sealed class BusJournalConsumeObserver(
         {
             logger.LogWarning(ex, "Bus journal skipped for {Direction} {MessageType}", direction, messageType);
         }
+        finally
+        {
+            BusJournalWriteGate.Release();
+        }
     }
 
     private static string Json(object message) =>
@@ -113,4 +121,14 @@ public sealed class BusJournalConsumeObserver(
 
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
+}
+
+/// <summary>One in-flight journal insert per process so Npgsql never interleaves commands on shared pool state.</summary>
+internal static class BusJournalWriteGate
+{
+    internal static readonly SemaphoreSlim Semaphore = new(1, 1);
+
+    internal static Task WaitAsync(CancellationToken ct) => Semaphore.WaitAsync(ct);
+
+    internal static void Release() => Semaphore.Release();
 }

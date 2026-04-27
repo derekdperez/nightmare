@@ -1,5 +1,7 @@
 # Build context: DotNetSolution repository root (parent of this folder).
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG BUILD_SOURCE_STAMP=unknown
+LABEL org.opencontainers.image.revision="${BUILD_SOURCE_STAMP}"
 WORKDIR /src
 COPY Directory.Build.props ./
 COPY src ./src

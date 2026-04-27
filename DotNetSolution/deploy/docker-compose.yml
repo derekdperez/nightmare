@@ -2,6 +2,9 @@
 # Or: docker compose -f deploy/docker-compose.yml --project-directory . up -d --build
 name: nightmare-v2
 
+x-dotnet-build-args: &dotnet-build-args
+  BUILD_SOURCE_STAMP: ${BUILD_SOURCE_STAMP:-unknown}
+
 x-common-env: &common-env
   ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=nightmare_v2;Username=nightmare;Password=nightmare
   ConnectionStrings__Redis: redis:6379
@@ -57,6 +60,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.web
+      args:
+        <<: *dotnet-build-args
     environment:
       <<: *common-env
       ASPNETCORE_URLS: http://+:8080
@@ -75,6 +80,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.worker
       args:
+        <<: *dotnet-build-args
         PROJECT_DIR: NightmareV2.Gatekeeper
         APP_DLL: NightmareV2.Gatekeeper.dll
     environment:
@@ -92,6 +98,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.worker
       args:
+        <<: *dotnet-build-args
         PROJECT_DIR: NightmareV2.Workers.Spider
         APP_DLL: NightmareV2.Workers.Spider.dll
     environment:
@@ -109,6 +116,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.worker
       args:
+        <<: *dotnet-build-args
         PROJECT_DIR: NightmareV2.Workers.Enum
         APP_DLL: NightmareV2.Workers.Enum.dll
     environment:
@@ -126,6 +134,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.worker
       args:
+        <<: *dotnet-build-args
         PROJECT_DIR: NightmareV2.Workers.PortScan
         APP_DLL: NightmareV2.Workers.PortScan.dll
     environment:
