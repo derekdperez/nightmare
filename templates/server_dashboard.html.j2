@@ -441,6 +441,11 @@
     let dashboardRefreshInFlight = false;
     let dashboardAutoRefreshPaused = false;
     let dashboardAutoRefreshTimer = null;
+    function closeEventStream() {
+      if (!dashboardEventStream) return;
+      try { dashboardEventStream.close(); } catch (_) {}
+      dashboardEventStream = null;
+    }
     function getPerfStatsNode() {
       return document.getElementById("perfStats");
     }
@@ -468,6 +473,7 @@
       return rows;
     }
     function appendEventLogItem(e) {
+      if (dashboardAutoRefreshPaused) return;
       const tbody = document.getElementById("eventRows");
       if (!tbody) return;
       if (tbody.children.length === 1 && String(tbody.textContent || "").toLowerCase().includes("loading")) {
@@ -480,6 +486,7 @@
       applySearch();
     }
     function subscribeToEventStream() {
+      if (dashboardAutoRefreshPaused) return;
       if (dashboardEventStream) return;
       try {
         const es = new EventSource(buildEventLogStreamUrl(), { withCredentials: true });
@@ -498,6 +505,21 @@
       } catch (_) {
         dashboardEventStream = null;
       }
+    }
+    function setAutoRefreshPaused(paused) {
+      dashboardAutoRefreshPaused = Boolean(paused);
+      if (dashboardAutoRefreshPaused) {
+        closeEventStream();
+      } else {
+        subscribeToEventStream();
+      }
+      const btn = document.getElementById("toggleAutoRefreshBtn");
+      if (btn) {
+        btn.setAttribute("aria-pressed", String(dashboardAutoRefreshPaused));
+        btn.textContent = dashboardAutoRefreshPaused ? "Resume auto-refresh" : "Pause auto-refresh";
+      }
+      const status = document.getElementById("statusText");
+      if (status) status.textContent = dashboardAutoRefreshPaused ? "Auto-refresh paused." : "Auto-refresh resumed.";
     }
     async function refreshDashboard({ silent = false } = {}) {
       if (dashboardRefreshInFlight) return;
@@ -714,12 +736,8 @@
     document.getElementById("refreshBtn").addEventListener("click", () => refreshDashboard());
     document.getElementById("downloadDiagnosticsBtn").addEventListener("click", downloadDiagnosticsData);
     document.getElementById("toggleAutoRefreshBtn").addEventListener("click", (event) => {
-      dashboardAutoRefreshPaused = !dashboardAutoRefreshPaused;
-      const btn = event.currentTarget;
-      btn.setAttribute("aria-pressed", String(dashboardAutoRefreshPaused));
-      btn.textContent = dashboardAutoRefreshPaused ? "Resume auto-refresh" : "Pause auto-refresh";
-      const status = document.getElementById("statusText");
-      if (status) status.textContent = dashboardAutoRefreshPaused ? "Auto-refresh paused." : "Auto-refresh resumed.";
+      event.preventDefault();
+      setAutoRefreshPaused(!dashboardAutoRefreshPaused);
     });
     {
       const cacheStartedAt = performance.now();
