@@ -103,6 +103,8 @@ services:
         APP_DLL: NightmareV2.Workers.Spider.dll
     environment:
       <<: *common-env
+      # Local stack: accept TLS name mismatches (parked domains, CDN SNI). Set false for strict prod.
+      Spider__Http__AllowInsecureSsl: "true"
     depends_on:
       postgres:
         condition: service_healthy
