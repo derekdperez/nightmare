@@ -1,5 +1,6 @@
 .panel { margin-bottom: 2rem; }
 .panel h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+.panel h3.subhead { font-size: 0.95rem; margin: 1rem 0 0.35rem; font-weight: 600; }
 .grid { border-collapse: collapse; width: 100%; font-size: 12px; }
 .grid th, .grid td { border: 1px solid #ddd; padding: 4px 6px; vertical-align: top; }
 .clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

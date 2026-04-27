@@ -6,7 +6,8 @@ public sealed record BusJournalRowDto(
     string MessageType,
     string PayloadJson,
     DateTimeOffset OccurredAtUtc,
-    string? ConsumerType);
+    string? ConsumerType,
+    string HostName);
 
 public sealed record AssetGridRowDto(
     Guid Id,
@@ -22,3 +23,26 @@ public sealed record AssetGridRowDto(
 public sealed record WorkerSwitchDto(string WorkerKey, bool IsEnabled, DateTimeOffset UpdatedAtUtc);
 
 public sealed record WorkerPatchRequest(bool Enabled);
+
+/// <summary>Per process/container: last completed consume from the shared bus journal.</summary>
+public sealed record WorkerInstanceActivityDto(
+    string HostName,
+    string WorkerKind,
+    string ConsumerShortName,
+    bool? ToggleEnabled,
+    DateTimeOffset LastCompletedAtUtc,
+    string LastMessageType,
+    string LastPayloadPreview,
+    string ActivityLabel);
+
+/// <summary>Roll-up by logical worker (matches <c>worker_switches.worker_key</c>).</summary>
+public sealed record WorkerKindSummaryDto(
+    string WorkerKey,
+    bool ToggleEnabled,
+    int InstanceCount,
+    DateTimeOffset? LastActivityUtc,
+    string RollupActivityLabel);
+
+public sealed record WorkerActivitySnapshotDto(
+    IReadOnlyList<WorkerKindSummaryDto> Summaries,
+    IReadOnlyList<WorkerInstanceActivityDto> Instances);

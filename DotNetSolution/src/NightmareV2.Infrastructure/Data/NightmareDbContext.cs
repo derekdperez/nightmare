@@ -45,6 +45,7 @@ public sealed class NightmareDbContext(DbContextOptions<NightmareDbContext> opti
             e.Property(x => x.MessageType).HasMaxLength(256).IsRequired();
             e.Property(x => x.ConsumerType).HasMaxLength(256);
             e.Property(x => x.PayloadJson).IsRequired();
+            e.Property(x => x.HostName).HasMaxLength(256).IsRequired().HasColumnName("host_name");
             e.HasIndex(x => x.OccurredAtUtc);
         });
 

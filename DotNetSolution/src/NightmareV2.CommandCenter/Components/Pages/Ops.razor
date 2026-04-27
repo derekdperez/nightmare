@@ -10,6 +10,72 @@
 <p class="muted">Live bus shows recent publishes. History includes publishes and consumes as each host records them. Toggles are checked at the start of each message: disabling <strong>Gatekeeper</strong> skips Raw admissions (no Indexed fan-out); disabling <strong>Spider</strong> / <strong>Enum</strong> / <strong>PortScan</strong> skips that worker’s step for that message (already-running HTTP on one message may still finish).</p>
 
 <section class="panel">
+    <h2>Worker activity (from bus journal)</h2>
+    <p class="muted">Each container/process writes consumes to the shared journal with its hostname. <strong>Hot / Recently active</strong> means a message <em>completed</em> on that instance recently — not live in-flight work. <strong>Stale</strong> usually means the container is gone or idle. Unknown consumers appear under <code>Other</code>.</p>
+    @if (_workerActivity is null)
+    {
+        <p>Loading activity…</p>
+    }
+    else if (_workerActivity.Summaries.Count == 0 && _workerActivity.Instances.Count == 0)
+    {
+        <p>No consume activity recorded in the last 24 hours.</p>
+    }
+    else
+    {
+        <h3 class="subhead">By worker type</h3>
+        <table class="grid">
+            <thead>
+            <tr><th>Worker</th><th>Toggle</th><th>Instances (24h)</th><th>Last completed (UTC)</th><th>Roll-up status</th></tr>
+            </thead>
+            <tbody>
+            @foreach (var s in _workerActivity.Summaries)
+            {
+                <tr>
+                    <td><code>@s.WorkerKey</code></td>
+                    <td>@(s.ToggleEnabled ? "on" : "off")</td>
+                    <td>@s.InstanceCount</td>
+                    <td>@(s.LastActivityUtc is { } t ? t.UtcDateTime.ToString("O") : "—")</td>
+                    <td>@s.RollupActivityLabel</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+
+        <h3 class="subhead">By host &amp; consumer</h3>
+        @if (_workerActivity.Instances.Count == 0)
+        {
+            <p class="muted">No per-instance consume rows (journal may only have publishes).</p>
+        }
+        else
+        {
+            <table class="grid">
+                <thead>
+                <tr>
+                    <th>Host</th><th>Worker</th><th>Consumer</th><th>Toggle</th><th>Status</th>
+                    <th>Last completed (UTC)</th><th>Message type</th><th>Last payload (truncated)</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var i in _workerActivity.Instances)
+                {
+                    <tr>
+                        <td class="clip"><code>@i.HostName</code></td>
+                        <td><code>@i.WorkerKind</code></td>
+                        <td class="clip"><code>@i.ConsumerShortName</code></td>
+                        <td>@(i.ToggleEnabled is null ? "—" : (i.ToggleEnabled.Value ? "on" : "off"))</td>
+                        <td>@i.ActivityLabel</td>
+                        <td>@i.LastCompletedAtUtc.UtcDateTime.ToString("O")</td>
+                        <td>@i.LastMessageType</td>
+                        <td class="clip mono">@i.LastPayloadPreview</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+    }
+</section>
+
+<section class="panel">
     <h2>Workers</h2>
     @if (_workers.Count == 0)
     {
@@ -81,7 +147,7 @@
     <div class="scroll tall">
         <table class="grid">
             <thead>
-            <tr><th>Time (UTC)</th><th>Type</th><th>Payload (truncated)</th></tr>
+            <tr><th>Time (UTC)</th><th>Type</th><th>Host</th><th>Payload (truncated)</th></tr>
             </thead>
             <tbody>
             @foreach (var e in _liveBus)
@@ -89,6 +155,7 @@
                 <tr>
                     <td>@e.OccurredAtUtc.UtcDateTime.ToString("O")</td>
                     <td>@e.MessageType</td>
+                    <td class="clip"><code>@e.HostName</code></td>
                     <td class="clip mono">@e.PayloadJson</td>
                 </tr>
             }
@@ -102,7 +169,7 @@
     <div class="scroll tall">
         <table class="grid">
             <thead>
-            <tr><th>Id</th><th>Dir</th><th>Time (UTC)</th><th>Type</th><th>Consumer</th><th>Payload (truncated)</th></tr>
+            <tr><th>Id</th><th>Dir</th><th>Time (UTC)</th><th>Type</th><th>Consumer</th><th>Host</th><th>Payload (truncated)</th></tr>
             </thead>
             <tbody>
             @foreach (var e in _historyBus)
@@ -113,6 +180,7 @@
                     <td>@e.OccurredAtUtc.UtcDateTime.ToString("O")</td>
                     <td>@e.MessageType</td>
                     <td class="clip">@e.ConsumerType</td>
+                    <td class="clip"><code>@e.HostName</code></td>
                     <td class="clip mono">@e.PayloadJson</td>
                 </tr>
             }
@@ -128,6 +196,7 @@
     private readonly List<AssetGridRowDto> _assets = [];
     private readonly List<BusJournalRowDto> _liveBus = [];
     private readonly List<BusJournalRowDto> _historyBus = [];
+    private WorkerActivitySnapshotDto? _workerActivity;
     private string _targetFilter = "";
     private bool _busyWorkers;
 
@@ -172,6 +241,9 @@
             _workers.Clear();
             if (w is not null)
                 _workers.AddRange(w);
+
+            var act = await Http.GetFromJsonAsync<WorkerActivitySnapshotDto>("/api/workers/activity").ConfigureAwait(false);
+            _workerActivity = act;
         }
         catch
         {

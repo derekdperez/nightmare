@@ -16,6 +16,7 @@ using (var scope = host.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
     await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
+    await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db).ConfigureAwait(false);
     await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
 }
 

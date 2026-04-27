@@ -45,6 +45,7 @@ public sealed class BusJournalPublishObserver(
                     ConsumerType = null,
                     PayloadJson = Truncate(payloadJson, 24_000),
                     OccurredAtUtc = DateTimeOffset.UtcNow,
+                    HostName = Environment.MachineName,
                 });
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
@@ -103,6 +104,7 @@ public sealed class BusJournalConsumeObserver(
                     ConsumerType = consumerType,
                     PayloadJson = Truncate(Json(message), 24_000),
                     OccurredAtUtc = DateTimeOffset.UtcNow,
+                    HostName = Environment.MachineName,
                 });
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
         }

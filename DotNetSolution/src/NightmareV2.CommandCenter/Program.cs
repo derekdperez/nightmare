@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using NightmareV2.CommandCenter;
 using NightmareV2.CommandCenter.Components;
 using NightmareV2.CommandCenter.Hubs;
 using NightmareV2.CommandCenter.Models;
@@ -33,6 +34,7 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
     await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
+    await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db).ConfigureAwait(false);
     await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
 }
 
@@ -114,7 +116,7 @@ app.MapGet(
                 .Where(e => e.Direction == "Publish" && e.OccurredAtUtc >= since)
                 .OrderByDescending(e => e.OccurredAtUtc)
                 .Take(limit)
-                .Select(e => new BusJournalRowDto(e.Id, e.Direction, e.MessageType, e.PayloadJson, e.OccurredAtUtc, e.ConsumerType))
+                .Select(e => new BusJournalRowDto(e.Id, e.Direction, e.MessageType, e.PayloadJson, e.OccurredAtUtc, e.ConsumerType, e.HostName))
                 .ToListAsync(ct)
                 .ConfigureAwait(false);
             return Results.Ok(rows);
@@ -129,7 +131,7 @@ app.MapGet(
             var rows = await db.BusJournal.AsNoTracking()
                 .OrderByDescending(e => e.Id)
                 .Take(limit)
-                .Select(e => new BusJournalRowDto(e.Id, e.Direction, e.MessageType, e.PayloadJson, e.OccurredAtUtc, e.ConsumerType))
+                .Select(e => new BusJournalRowDto(e.Id, e.Direction, e.MessageType, e.PayloadJson, e.OccurredAtUtc, e.ConsumerType, e.HostName))
                 .ToListAsync(ct)
                 .ConfigureAwait(false);
             return Results.Ok(rows);
@@ -173,6 +175,15 @@ app.MapGet(
             return Results.Ok(rows);
         })
     .WithName("ListWorkers");
+
+app.MapGet(
+        "/api/workers/activity",
+        async (NightmareDbContext db, CancellationToken ct) =>
+        {
+            var snap = await WorkerActivityQuery.BuildSnapshotAsync(db, ct).ConfigureAwait(false);
+            return Results.Ok(snap);
+        })
+    .WithName("WorkerActivity");
 
 app.MapPut(
         "/api/workers/{key}",
