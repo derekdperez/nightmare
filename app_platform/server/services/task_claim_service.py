@@ -49,11 +49,49 @@ class TaskClaimService:
         if not wid:
             raise ValueError("worker_id is required")
         lease = max(15, int(lease_seconds or self._default_lease_seconds))
-        allowlist = [
-            str(item or "").strip().lower()
-            for item in (plugin_allowlist or [])
-            if str(item or "").strip()
-        ]
+        allowlist_set: set[str] = set()
+        for item in (plugin_allowlist or []):
+            raw = str(item or "").strip().lower()
+            if not raw:
+                continue
+            allowlist_set.add(raw)
+            allowlist_set.add(raw.replace("-", "_"))
+            allowlist_set.add(raw.replace("_", "-"))
+        allowlist = sorted(allowlist_set)
+        bypass_allowlist = False
+        if allowlist:
+            try:
+                with self._connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+SELECT
+  COUNT(*) FILTER (WHERE status = 'ready') AS ready_total,
+  COUNT(*) FILTER (WHERE status = 'ready' AND stage = ANY(%s)) AS ready_allowed
+FROM coordinator_stage_tasks;
+""",
+                            (allowlist,),
+                        )
+                        row = cur.fetchone() or (0, 0)
+                    conn.commit()
+                ready_total = int(row[0] or 0)
+                ready_allowed = int(row[1] or 0)
+                if ready_total > 0 and ready_allowed <= 0:
+                    bypass_allowlist = True
+                    self._record_system_event(
+                        "worker.claim_allowlist_bypassed",
+                        f"worker:{wid}",
+                        {
+                            "source": "coordinator_store.try_claim_stage_with_resources",
+                            "worker_id": wid,
+                            "ready_total": ready_total,
+                            "ready_allowed": ready_allowed,
+                            "allowlist": allowlist,
+                            "reason": "allowlist_excluded_all_ready_tasks",
+                        },
+                    )
+            except Exception:
+                bypass_allowlist = False
         self._refresh_stage_task_readiness(limit=1000)
         # Target-domain lock: skip collision check for workflow-run tasks (checkpoint
         # carries workflow_run_id) so ready steps are not starved by a legacy running
@@ -74,7 +112,7 @@ WHERE (
       AND attempt_count < GREATEST(COALESCE(max_attempts, 1), 1)
     )
 )
-  AND (%s::text[] IS NULL OR stage = ANY(%s))
+  AND ((%s::text[] IS NULL OR stage = ANY(%s)) OR %s)
   AND (
       stage = 'recon_subdomain_enumeration'
       OR (COALESCE(checkpoint_json, '{}'::jsonb) ? 'force_run_override')
@@ -120,7 +158,7 @@ RETURNING workflow_id, root_domain, stage, status, worker_id, attempt_count, lea
             with conn.cursor() as cur:
                 self._touch_worker_presence(cur, wid, "claim_stage")
                 self._cleanup_orphaned_leases_cur(cur)
-                cur.execute(candidates_sql, (allowlist or None, allowlist or None))
+                cur.execute(candidates_sql, (allowlist or None, allowlist or None, bool(bypass_allowlist)))
                 rows = cur.fetchall()
                 for row in rows:
                     checkpoint_json = row[7] if isinstance(row[7], dict) else {}
