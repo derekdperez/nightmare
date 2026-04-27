@@ -46,14 +46,15 @@ def test_navbar_primary_links_match_reduced_page_set() -> None:
     assert 'href="/workers"' in template
     assert 'href="/dashboard"' in template
     assert 'href="/workflows"' in template
-    assert 'href="/crawl-progress"' in template
     assert 'href="/http-requests"' in template
-    assert 'href="/extractor-matches"' in template
-    assert 'href="/fuzzing"' in template
     assert 'href="/workflow-definitions"' in template
-    assert 'href="/database"' in template
-    assert 'href="/docker-status"' in template
     assert 'href="/view-logs"' in template
+
+    assert 'href="/crawl-progress"' not in template
+    assert 'href="/extractor-matches"' not in template
+    assert 'href="/fuzzing"' not in template
+    assert 'href="/database"' not in template
+    assert 'href="/docker-status"' not in template
 
     assert 'href="/operations"' not in template
     assert 'href="/plugin-definitions"' not in template

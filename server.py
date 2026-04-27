@@ -483,6 +483,16 @@ def _workflow_stage_prerequisites_satisfied(
     prereq = workflow_entry.get("preconditions", workflow_entry.get("prerequisites", {}))
     prereq = prereq if isinstance(prereq, dict) else {}
 
+    explicit_checks = prereq.get("all") if isinstance(prereq.get("all"), list) else []
+    for check in explicit_checks:
+        if not isinstance(check, dict):
+            continue
+        check_type = str(check.get("type") or "").strip().lower()
+        if check_type == "file_exists":
+            file_path = Path(str(check.get("path") or "").strip()).expanduser()
+            if str(file_path) and not file_path.exists():
+                return False
+
     required_all = {str(item or "").strip().lower() for item in (prereq.get("artifacts_all") or []) if str(item or "").strip()}
     required_any = {str(item or "").strip().lower() for item in (prereq.get("artifacts_any") or []) if str(item or "").strip()}
     required_plugins_all = {
@@ -4227,11 +4237,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return True
         authz = str(self.headers.get("Authorization", "") or "").strip()
         x_token = str(self.headers.get("X-Coordinator-Token", "") or "").strip()
+        query = getattr(self, "_request_query", None)
+        query_map = query if isinstance(query, dict) else {}
+        query_token = ""
+        try:
+            raw_query = query_map.get("coordinator_token") or query_map.get("token") or []
+            if isinstance(raw_query, list) and raw_query:
+                query_token = str(raw_query[0] or "").strip()
+        except Exception:
+            query_token = ""
         if authz.lower().startswith("bearer "):
             candidate = authz[7:].strip()
             if candidate == token:
                 return True
         if x_token == token:
+            return True
+        if query_token and query_token == token:
             return True
         cookie_token = self._read_cookie("nightmare_coord_token").strip()
         if cookie_token == token:
@@ -4349,6 +4370,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        # Preserve query params for auth helpers (SSE cannot send Authorization headers).
+        self._request_query = query
 
         if path == "/favicon.ico":
             self.send_response(204)
@@ -5401,6 +5424,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json({"ok": True, "after_sequence": after_sequence, "events": rows})
             return
+        if path == "/api/coord/event-log/stream":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            after_sequence = max(0, _safe_int((query.get("after_sequence") or [0])[0], 0))
+            poll_interval_ms = max(250, min(10000, _safe_int((query.get("poll_interval_ms") or [1000])[0], 1000)))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            cursor = int(after_sequence)
+            keepalive_ticks = 0
+            try:
+                while True:
+                    rows = self.coordinator_store.list_event_log(limit=500, after_sequence=cursor)
+                    if rows:
+                        keepalive_ticks = 0
+                        for item in rows:
+                            seq = int(item.get("sequence") or 0)
+                            if seq > cursor:
+                                cursor = seq
+                            data = json.dumps(item, ensure_ascii=False)
+                            payload = f"id: {seq}\nevent: coordinator_event\ndata: {data}\n\n"
+                            self.wfile.write(payload.encode("utf-8"))
+                            self.wfile.flush()
+                    else:
+                        keepalive_ticks += 1
+                        if keepalive_ticks >= 10:
+                            keepalive_ticks = 0
+                            self.wfile.write(b"event: keepalive\ndata: {}\n\n")
+                            self.wfile.flush()
+                    time.sleep(float(poll_interval_ms) / 1000.0)
+            except Exception:
+                return
 
         if path == "/api/coord/state":
             if self.coordinator_store is None:
@@ -6396,6 +6458,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
+        self._request_query = query
         if self._reject_cross_site_post():
             return
         body = self._read_json_body()

@@ -37,6 +37,7 @@
     <button onclick="downloadDiagnosticsData()">Download Diagnostics Data</button>
     <span id="statusText" class="muted"></span>
   </div>
+  <div class="meta" id="perfStats">Cache load: waiting. Database fetch: waiting.</div>
   <div id="cards" class="cards"></div>
 
   <main id="nightmare-dashboard-main">
@@ -181,6 +182,23 @@
       if (Number.isNaN(d.getTime())) return String(value || "");
       return d.toLocaleString("en-US", { timeZone: "Etc/GMT+5", hour12: false });
     }
+    const TOKEN_COOKIE_NAME = "nightmare_coord_token";
+    function readCookie(name) {
+      return document.cookie.split(";").map((p) => p.trim()).find((p) => p.startsWith(`${name}=`))?.slice(name.length + 1) || "";
+    }
+    function readAuthToken() {
+      const cookieToken = decodeURIComponent(readCookie(TOKEN_COOKIE_NAME) || "").trim();
+      if (cookieToken) return cookieToken;
+      try { return String(window.localStorage.getItem(TOKEN_COOKIE_NAME) || "").trim(); } catch { return ""; }
+    }
+    function buildEventLogStreamUrl() {
+      const params = new URLSearchParams();
+      params.set("after_sequence", "0");
+      params.set("poll_interval_ms", "1000");
+      const token = readAuthToken();
+      if (token) params.set("coordinator_token", token);
+      return `/api/coord/event-log/stream?${params.toString()}`;
+    }
     async function handleVmAction(action, instanceId) {
       if (!instanceId) return;
       if (!window.confirm(`${action} VM ${instanceId}?`)) return;
@@ -197,27 +215,70 @@
         showLoadError(error && error.message ? error.message : String(error));
       }
     }
-    async function refreshEventsAndDb() {
+    let dashboardEventStream = null;
+    function getPerfStatsNode() {
+      return document.getElementById("perfStats");
+    }
+    function setCacheTiming(ms, ageMs) {
+      const node = getPerfStatsNode();
+      if (!node) return;
+      const age = Number(ageMs || 0);
+      const cacheAgeLabel = age > 0 ? ` (cache age ${Math.round(age)} ms)` : "";
+      const existing = String(node.textContent || "");
+      const dbPart = existing.includes("Database fetch:") ? existing.split("Database fetch:")[1].trim() : "waiting.";
+      node.textContent = `Cache load: ${Math.round(Number(ms || 0))} ms${cacheAgeLabel}. Database fetch: ${dbPart}`;
+    }
+    function setDbTiming(ms) {
+      const node = getPerfStatsNode();
+      if (!node) return;
+      const existing = String(node.textContent || "");
+      const cachePart = existing.includes("Database fetch:") ? existing.split("Database fetch:")[0].trim() : "Cache load: waiting.";
+      node.textContent = `${cachePart} Database fetch: ${Math.round(Number(ms || 0))} ms.`;
+    }
+    function renderEventRows(eventList) {
+      const rows = asArray(eventList).map((e) =>
+        `<tr><td>${esc(est(e.created_at || e.created_at_utc || ""))}</td><td>${esc(e.event_type || "")}</td><td>${esc(e.source || "")}</td><td>${esc(e.aggregate_key || "")}</td><td>${esc(e.message || "")}</td></tr>`
+      ).join("");
+      setRows("eventRows", rows, 5);
+      return rows;
+    }
+    function appendEventLogItem(e) {
+      const tbody = document.getElementById("eventRows");
+      if (!tbody) return;
+      if (tbody.children.length === 1 && String(tbody.textContent || "").toLowerCase().includes("loading")) {
+        tbody.innerHTML = "";
+      }
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${esc(est(e.created_at || e.created_at_utc || ""))}</td><td>${esc(e.event_type || "")}</td><td>${esc(e.source || "")}</td><td>${esc(e.aggregate_key || "")}</td><td>${esc(e.message || "")}</td>`;
+      tbody.prepend(tr);
+      while (tbody.children.length > 1000) tbody.removeChild(tbody.lastChild);
+      applySearch();
+    }
+    function subscribeToEventStream() {
+      if (dashboardEventStream) return;
       try {
-        const [events, dbActivity] = await Promise.all([
-          authJson("/api/coord/events?limit=1000&offset=0&sort_dir=desc"),
-          authJson("/api/coord/database-activity?limit=1000"),
-        ]);
-        const eventList = firstArray(events.items, events.events);
-        setRows("eventRows", eventList.map((e) =>
-          `<tr><td>${esc(est(e.created_at || e.created_at_utc || ""))}</td><td>${esc(e.event_type || "")}</td><td>${esc(e.source || "")}</td><td>${esc(e.aggregate_key || "")}</td><td>${esc(e.message || "")}</td></tr>`
-        ).join(""), 5);
-        setRows("dbRows", asArray(dbActivity.tables).map((t) =>
-          `<tr><td>${esc(t.schema || "")}</td><td>${esc(t.name || "")}</td><td>${esc(t.row_count || 0)}</td><td>${esc(t.column_count || 0)}</td><td>${esc(est(t.last_update_utc || ""))}</td><td>${esc(t.table_size_mb || 0)}</td></tr>`
-        ).join(""), 6);
+        const es = new EventSource(buildEventLogStreamUrl(), { withCredentials: true });
+        es.addEventListener("coordinator_event", (event) => {
+          try {
+            const payload = JSON.parse(String(event && event.data || "{}"));
+            appendEventLogItem(payload);
+          } catch (_) {
+            // Ignore malformed SSE payloads and continue streaming.
+          }
+        });
+        es.onerror = () => {
+          // Keep the UI resilient if stream temporarily fails.
+        };
+        dashboardEventStream = es;
       } catch (_) {
-        // Keep background poll failures from breaking other panels.
+        dashboardEventStream = null;
       }
     }
     async function refreshDashboard() {
       const status = document.getElementById("statusText");
       status.textContent = "Loading...";
       try {
+        const startedAt = performance.now();
         const results = await Promise.allSettled([
           authJson("/api/coord/docker-status?include_logs=0&log_lines=100"),
           authJson("/api/coord/events?limit=1000&offset=0&sort_dir=desc"),
@@ -236,6 +297,7 @@
         const workflows = settledValue(results[5], {});
         const logSources = settledValue(results[6], {});
         const observability = settledValue(results[7], {});
+        setDbTiming(performance.now() - startedAt);
 
         const failedSources = [
           ["docker-status", settledError(results[0])],
@@ -281,10 +343,7 @@
         setRows("dockerRows", dockerRows, 7);
 
         const eventList = firstArray(events.items, events.events);
-        const eventRows = eventList.map((e) =>
-          `<tr><td>${esc(est(e.created_at || e.created_at_utc || ""))}</td><td>${esc(e.event_type || "")}</td><td>${esc(e.source || "")}</td><td>${esc(e.aggregate_key || "")}</td><td>${esc(e.message || "")}</td></tr>`
-        ).join("");
-        setRows("eventRows", eventRows, 5);
+        const eventRows = renderEventRows(eventList);
 
         const dbRows = asArray(db.tables).map((t) =>
           `<tr><td>${esc(t.schema || "")}</td><td>${esc(t.name || "")}</td><td>${esc(t.row_count || 0)}</td><td>${esc(t.column_count || 0)}</td><td>${esc(est(t.last_update_utc || ""))}</td><td>${esc(t.table_size_mb || 0)}</td></tr>`
@@ -413,10 +472,17 @@
       }
     }
     document.getElementById("globalSearch").addEventListener("input", applySearch);
-    _applyCachedDashboardSnapshot();
+    {
+      const cacheStartedAt = performance.now();
+      const hadCache = _applyCachedDashboardSnapshot();
+      const cacheDuration = performance.now() - cacheStartedAt;
+      const snapshot = _safeReadDashboardCache();
+      const ageMs = snapshot && snapshot.created_at_ms ? (Date.now() - Number(snapshot.created_at_ms || 0)) : 0;
+      setCacheTiming(cacheDuration, hadCache ? ageMs : 0);
+    }
     refreshDashboard();
     setInterval(refreshDashboard, 10000);
-    setInterval(refreshEventsAndDb, 2000);
+    subscribeToEventStream();
   </script>
 </body>
 </html>

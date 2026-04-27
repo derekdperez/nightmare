@@ -48,54 +48,294 @@
   </div>
 </div>
 <script>
-let plugins=[], current={steps:[]};
-const $=id=>document.getElementById(id);
-function pretty(v){return JSON.stringify(v,null,2)}
-function esc(v){return String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-async function api(url, opts={}){
-  const headers={'content-type':'application/json',...(opts.headers||{})};
-  return window.NightmareAuth ? NightmareAuth.fetchJson(url,{...opts,headers}) : (async()=>{const r=await fetch(url,{headers,...opts}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(JSON.stringify(j)); return j})();
+let plugins = [], current = { steps: [] };
+const $ = (id) => document.getElementById(id);
+function pretty(v) { return JSON.stringify(v, null, 2); }
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-async function loadAll(){
-  plugins=(await api('/api/plugin-definitions')).items||[];
-  const data=await api('/api/workflow-definitions');
-  const items=data.items||[];
-  $('workflowList').innerHTML=items.map(w=>`<div class="item" onclick="loadWorkflow('${esc(w.workflow_key)}')"><b>${esc(w.name)}</b><div class="muted">${esc(w.workflow_key)} v${esc(w.version)} · ${esc(w.status)} · ${esc(w.step_count)} steps</div></div>`).join('');
+async function api(url, opts = {}) {
+  const headers = { "content-type": "application/json", ...(opts.headers || {}) };
+  return window.NightmareAuth
+    ? NightmareAuth.fetchJson(url, { ...opts, headers })
+    : (async () => {
+        const r = await fetch(url, { headers, ...opts });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(JSON.stringify(j));
+        return j;
+      })();
+}
+
+function asObject(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }
+
+function isOptionalProperty(prop) {
+  return Boolean(prop && (prop._optional || prop["x-optional"] || prop.optional));
+}
+
+function defaultFromSchemaNode(prop) {
+  if (prop == null) return null;
+  if (Object.prototype.hasOwnProperty.call(prop, "default")) return prop.default;
+  const t = String(prop.type || "").toLowerCase();
+  if (t === "string") return "";
+  if (t === "boolean") return false;
+  if (t === "integer" || t === "number") return 0;
+  if (t === "array") return [];
+  if (t === "object") return asObject(prop.default);
+  return null;
+}
+
+function buildConfigFromSchema(schema) {
+  const s = asObject(schema);
+  const out = {};
+  const props = asObject(s.properties);
+  const required = Array.isArray(s.required) ? s.required.map((x) => String(x)) : [];
+  for (const [key, def] of Object.entries(props)) {
+    const isReq = required.includes(key);
+    const optional = isOptionalProperty(def) || (!isReq && treatAsOptionalByHeuristic(def));
+    if (optional) {
+      if (treatAsObjectShell(def)) out[key] = buildOptionalObjectShell(def);
+      else if (treatAsArrayShell(def)) out[key] = [];
+      else if (treatAsEmptyStringOptional(def)) out[key] = "";
+      else out[key] = null;
+      continue;
+    }
+    out[key] = defaultFromSchemaNode(def);
+  }
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(out, key)) {
+      out[key] = defaultFromSchemaNode(props[key]);
+    }
+  }
+  return out;
+}
+
+function treatAsOptionalByHeuristic(def) {
+  if (!def || typeof def !== "object") return false;
+  if (isOptionalProperty(def)) return true;
+  const desc = String(def.description || def.title || "");
+  if (/\boptional\b/i.test(desc)) return true;
+  return false;
+}
+
+function treatAsObjectShell(def) {
+  const t = String(def.type || "").toLowerCase();
+  return t === "object" || (asObject(def.properties) && Object.keys(def.properties).length);
+}
+
+function treatAsArrayShell(def) {
+  return String(def.type || "").toLowerCase() === "array";
+}
+
+function treatAsEmptyStringOptional(def) {
+  const t = String(def.type || "").toLowerCase();
+  return t === "string";
+}
+
+function buildOptionalObjectShell(def) {
+  return {};
+}
+
+function findPluginByKey(pluginKey) {
+  const key = String(pluginKey || "").trim().toLowerCase();
+  return plugins.find((p) => String(p.plugin_key || "").toLowerCase() === key) || null;
+}
+
+function onPluginSelect(stepIndex) {
+  const el = document.getElementById(`plugin_select_${stepIndex}`);
+  if (!el) return;
+  const key = String(el.value || "").trim().toLowerCase();
+  if (!key) return;
+  current.steps[stepIndex].plugin_key = key;
+  const plugin = findPluginByKey(key);
+  const existingCfg = asObject(current.steps[stepIndex].config_json);
+  if (!Object.keys(existingCfg).length) {
+    current.steps[stepIndex].config_json = buildConfigFromSchema(plugin && plugin.config_schema ? plugin.config_schema : { type: "object", additionalProperties: true, properties: {} });
+  } else {
+    const merged = buildConfigFromSchema(plugin && plugin.config_schema ? plugin.config_schema : { type: "object", additionalProperties: true, properties: {} });
+    current.steps[stepIndex].config_json = { ...merged, ...existingCfg };
+  }
+  const preEl = document.getElementById(`precond_${stepIndex}`);
+  if (preEl && preEl.getAttribute("data-locked") !== "1") {
+    // Keep operator-authored preconditions; only backfill if empty
+    if (!Object.keys(asObject(current.steps[stepIndex].preconditions_json)).length) {
+      current.steps[stepIndex].preconditions_json = { all: [] };
+    }
+  }
+  renderSteps();
+}
+
+function onConfigTextareaChange(stepIndex, text) {
+  try {
+    current.steps[stepIndex].config_json = JSON.parse(String(text || "{}") || "{}");
+  } catch {
+    // leave invalid text for operator to fix
+  }
+}
+function onPrecondTextareaChange(stepIndex, text) {
+  try {
+    const el = document.getElementById(`precond_${stepIndex}`);
+    if (el) el.setAttribute("data-locked", "1");
+    current.steps[stepIndex].preconditions_json = JSON.parse(String(text || "{}") || "{}");
+  } catch {
+    // leave invalid
+  }
+}
+
+function applyPrecondPreset(stepIndex, preset) {
+  const s = (current.steps || [])[stepIndex] || {};
+  if (preset === "none") {
+    s.preconditions_json = {};
+  } else if (preset === "prev_step") {
+    const prior = (current.steps || [])[stepIndex - 1] || null;
+    const priorKey = prior && String(prior.plugin_key || "").trim();
+    s.preconditions_json = priorKey ? { requires_plugins_all: [priorKey] } : { all: [] };
+  } else if (preset === "wait_file") {
+    s.preconditions_json = { all: [{ type: "file_exists", path: "" }] };
+  }
+  current.steps[stepIndex] = s;
+  const el = document.getElementById(`precond_${stepIndex}`);
+  if (el) el.setAttribute("data-locked", "0");
+  renderSteps();
+  const next = document.getElementById(`precond_${stepIndex}`);
+  if (next) next.setAttribute("data-locked", "1");
+}
+
+async function loadAll() {
+  plugins = (await api("/api/plugin-definitions")).items || [];
+  const data = await api("/api/workflow-definitions");
+  const items = data.items || [];
+  $("workflowList").innerHTML = items
+    .map(
+      (w) =>
+        `<div class="item" onclick="loadWorkflow('${esc(w.workflow_key)}')"><b>${esc(w.name)}</b><div class="muted">${esc(w.workflow_key)} v${esc(w.version)} · ${esc(w.status)} · ${esc(w.step_count)} steps</div></div>`,
+    )
+    .join("");
   return items;
 }
-function newWorkflow(){current={workflow_key:'',name:'',description:'',status:'draft',trigger_mode:'manual',input_schema:{type:'object',additionalProperties:true},steps:[]}; render();}
-async function loadWorkflow(key){current=(await api('/api/workflow-definitions/'+encodeURIComponent(key))).item; render();}
-function render(){['workflow_key','name','description','status','trigger_mode'].forEach(id=>$(id).value=current[id]||''); $('input_schema').value=pretty(current.input_schema||{}); renderSteps();}
-function renderSteps(){
-  $('steps').innerHTML=(current.steps||[]).map((s,i)=>`<div class="step"><div class="row"><label>Step key<input onchange="current.steps[${i}].step_key=this.value" value="${esc(s.step_key||'')}"></label><label>Plugin<select onchange="current.steps[${i}].plugin_key=this.value">${plugins.map(p=>`<option value="${esc(p.plugin_key)}" ${p.plugin_key==s.plugin_key?'selected':''}>${esc(p.display_name||p.plugin_key)}</option>`).join('')}</select></label></div><label>Config JSON<textarea onchange="current.steps[${i}].config_json=JSON.parse(this.value||'{}')">${esc(pretty(s.config_json||{}))}</textarea></label><label>Preconditions JSON<textarea onchange="current.steps[${i}].preconditions_json=JSON.parse(this.value||'{}')">${esc(pretty(s.preconditions_json||{}))}</textarea></label><button onclick="current.steps.splice(${i},1);renderSteps()">Remove</button></div>`).join('');
+function newWorkflow() {
+  current = { workflow_key: "", name: "", description: "", status: "draft", trigger_mode: "manual", input_schema: { type: "object", additionalProperties: true }, steps: [] };
+  render();
 }
-function addStep(){current.steps=current.steps||[]; const p=plugins[0]||{plugin_key:''}; current.steps.push({step_key:'step_'+(current.steps.length+1),display_name:'Step '+(current.steps.length+1),plugin_key:p.plugin_key,ordinal:current.steps.length+1,enabled:true,config_json:{},preconditions_json:{}}); renderSteps();}
-function collect(){return {workflow_key:$('workflow_key').value,name:$('name').value,description:$('description').value,status:$('status').value,trigger_mode:$('trigger_mode').value,input_schema:JSON.parse($('input_schema').value||'{}'),steps:(current.steps||[]).map((s,i)=>({...s,ordinal:i+1,display_name:s.display_name||s.step_key}))};}
-async function saveWorkflow(){try{current=collect(); $('result').textContent=pretty(await api('/api/workflow-definitions',{method:'POST',body:JSON.stringify(current)})); await loadAll();}catch(e){$('result').textContent=e.message}}
-async function publishWorkflow(){try{$('result').textContent=pretty(await api('/api/workflow-definitions/'+encodeURIComponent($('workflow_key').value)+'/publish',{method:'POST'})); await loadAll();}catch(e){$('result').textContent=e.message}}
-
-async function importReconWorkflow(){
-  if(!confirm('Re-import the built-in recon workflow from workflows/run-recon.workflow.json? This will overwrite the DB definition for run-recon.')) return;
-  try{
-    const res=await api('/api/workflow-definitions/import-builtin/run-recon',{method:'POST',body:JSON.stringify({status:'published'})});
-    $('result').textContent=pretty(res);
+async function loadWorkflow(key) {
+  current = (await api("/api/workflow-definitions/" + encodeURIComponent(key))).item;
+  render();
+}
+function render() {
+  ["workflow_key", "name", "description", "status", "trigger_mode"].forEach((id) => {
+    $(id).value = current[id] || "";
+  });
+  $("input_schema").value = pretty(current.input_schema || {});
+  renderSteps();
+}
+function renderSteps() {
+  const html = (current.steps || [])
+    .map(
+      (s, i) => `<div class="step">
+  <div class="row">
+    <label>Step key<input onchange="current.steps[${i}].step_key=this.value" value="${esc(s.step_key || "")}"></label>
+    <label>Plugin
+      <select id="plugin_select_${i}" onchange="onPluginSelect(${i})">
+        ${plugins.map((p) => `<option value="${esc(p.plugin_key)}" ${p.plugin_key == s.plugin_key ? "selected" : ""}>${esc(p.display_name || p.plugin_key)}</option>`).join("")}
+      </select>
+    </label>
+  </div>
+  <label>Config JSON<textarea onchange="onConfigTextareaChange(${i}, this.value)">${esc(pretty(s.config_json || {}))}</textarea></label>
+  <div class="row" style="align-items:flex-end">
+    <label>Preconditions JSON<textarea id="precond_${i}" data-locked="0" onchange="onPrecondTextareaChange(${i}, this.value)">${esc(pretty(s.preconditions_json || {}))}</textarea></label>
+    <div style="display:grid;gap:6px;align-self:stretch;min-width:200px">
+      <button type="button" onclick="applyPrecondPreset(${i}, 'none')">No Preconditions</button>
+      <button type="button" onclick="applyPrecondPreset(${i}, 'prev_step')">Previous Step Completion</button>
+      <button type="button" onclick="applyPrecondPreset(${i}, 'wait_file')">Wait for File</button>
+    </div>
+  </div>
+  <button onclick="current.steps.splice(${i},1);renderSteps()">Remove</button>
+</div>`,
+    )
+    .join("");
+  $("steps").innerHTML = html;
+}
+function addStep() {
+  current.steps = current.steps || [];
+  const p = plugins[0] || { plugin_key: "" };
+  const fresh = {
+    step_key: "step_" + (current.steps.length + 1),
+    display_name: "Step " + (current.steps.length + 1),
+    plugin_key: p.plugin_key,
+    ordinal: current.steps.length + 1,
+    enabled: true,
+    config_json: buildConfigFromSchema(p.config_schema || { type: "object", additionalProperties: true, properties: {} }),
+    preconditions_json: { all: [] },
+  };
+  current.steps.push(fresh);
+  renderSteps();
+  onPluginSelect(current.steps.length - 1);
+}
+function collect() {
+  return {
+    workflow_key: $("workflow_key").value,
+    name: $("name").value,
+    description: $("description").value,
+    status: $("status").value,
+    trigger_mode: $("trigger_mode").value,
+    input_schema: JSON.parse($("input_schema").value || "{}"),
+    steps: (current.steps || []).map((s, i) => ({ ...s, ordinal: i + 1, display_name: s.display_name || s.step_key })),
+  };
+}
+async function saveWorkflow() {
+  try {
+    current = collect();
+    $("result").textContent = pretty(await api("/api/workflow-definitions", { method: "POST", body: JSON.stringify(current) }));
     await loadAll();
-    await loadWorkflow('run-recon');
-  }catch(e){$('result').textContent=e.message}
+  } catch (e) {
+    $("result").textContent = e.message;
+  }
 }
-async function openReconWorkflow(){
-  try{
-    await loadWorkflow('run-recon');
-  }catch(e){
-    $('result').textContent='Recon workflow is not imported yet. Importing now...';
+async function publishWorkflow() {
+  try {
+    $("result").textContent = pretty(await api("/api/workflow-definitions/" + encodeURIComponent($("workflow_key").value) + "/publish", { method: "POST" }));
+    await loadAll();
+  } catch (e) {
+    $("result").textContent = e.message;
+  }
+}
+
+async function importReconWorkflow() {
+  if (!confirm("Re-import the built-in recon workflow from workflows/run-recon.workflow.json? This will overwrite the DB definition for run-recon.")) return;
+  try {
+    const res = await api("/api/workflow-definitions/import-builtin/run-recon", { method: "POST", body: JSON.stringify({ status: "published" }) });
+    $("result").textContent = pretty(res);
+    await loadAll();
+    await loadWorkflow("run-recon");
+  } catch (e) {
+    $("result").textContent = e.message;
+  }
+}
+async function openReconWorkflow() {
+  try {
+    await loadWorkflow("run-recon");
+  } catch (e) {
+    $("result").textContent = "Recon workflow is not imported yet. Importing now...";
     await importReconWorkflow();
   }
 }
 
-async function launchWorkflow(){const root_domain=prompt('Root domain/input target?')||''; try{$('result').textContent=pretty(await api('/api/workflow-runs',{method:'POST',body:JSON.stringify({workflow_key:$('workflow_key').value,root_domain,input:{root_domain}})}));}catch(e){$('result').textContent=e.message}}
-loadAll().then(items=>{
-  if((items||[]).some(w=>w.workflow_key==='run-recon')) return loadWorkflow('run-recon');
-  newWorkflow();
-}).catch(e=>{$('result').textContent=e.message});
+async function launchWorkflow() {
+  const root_domain = prompt("Root domain/input target?") || "";
+  try {
+    $("result").textContent = pretty(
+      await api("/api/workflow-runs", { method: "POST", body: JSON.stringify({ workflow_key: $("workflow_key").value, root_domain, input: { root_domain } }) }),
+    );
+  } catch (e) {
+    $("result").textContent = e.message;
+  }
+}
+loadAll()
+  .then((items) => {
+    if ((items || []).some((w) => w.workflow_key === "run-recon")) return loadWorkflow("run-recon");
+    newWorkflow();
+  })
+  .catch((e) => {
+    $("result").textContent = e.message;
+  });
 </script>
 </body></html>

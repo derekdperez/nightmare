@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Body, Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from app_platform.server.store import CoordinatorStore, DEFAULT_COORDINATOR_LEASE_SECONDS, _stream_file_chunks
@@ -146,13 +146,24 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
             raise HTTPException(status_code=503, detail="coordinator is not configured (database_url missing)")
         return store
 
-    def require_auth(authorization: str | None = Header(default=None)) -> None:
+    def require_auth(
+        authorization: str | None = Header(default=None),
+        coordinator_token: str | None = Query(default=None),
+        nightmare_coord_token: str | None = Cookie(default=None),
+    ) -> None:
         expected = str(app.state.coordinator_api_token or "").strip()
         if not expected:
             return
         provided = _bearer_token(authorization)
-        if provided != expected:
-            raise HTTPException(status_code=401, detail="unauthorized")
+        if provided == expected:
+            return
+        query_token = str(coordinator_token or "").strip()
+        if query_token and query_token == expected:
+            return
+        cookie_token = str(nightmare_coord_token or "").strip()
+        if cookie_token and cookie_token == expected:
+            return
+        raise HTTPException(status_code=401, detail="unauthorized")
 
     @app.get("/", response_class=HTMLResponse)
     def root() -> str:

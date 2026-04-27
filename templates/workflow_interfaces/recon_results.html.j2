@@ -51,6 +51,21 @@
     </div>
   </div>
 
+  <section class="panel" style="margin-top: 12px;">
+    <h2>Recon, crawl, and fuzzing data</h2>
+    <p class="muted" style="margin: 0 0 8px 0">
+      The standalone Crawl Progress, Extractor Matches, Fuzzing, and Database pages were removed from the global navigation.
+      Use the JSON APIs below (same data the old pages used) or open the <a href="/dashboard">Dashboard</a> for live Docker/VMs.
+    </p>
+    <div class="toolbar">
+      <a class="mono" href="/api/coord/crawl-progress?limit=2000" target="_blank" rel="noopener">/api/coord/crawl-progress</a>
+      <a class="mono" href="/api/coord/extractor-matches?limit=200" target="_blank" rel="noopener">/api/coord/extractor-matches</a>
+      <a class="mono" href="/api/coord/fuzzing?limit=200" target="_blank" rel="noopener">/api/coord/fuzzing</a>
+      <a class="mono" href="/api/coord/database-status" target="_blank" rel="noopener">/api/coord/database-status</a>
+      <a class="mono" href="/api/coord/database-activity?limit=500" target="_blank" rel="noopener">/api/coord/database-activity</a>
+    </div>
+  </section>
+
   <section class="panel">
     <div class="toolbar">
       <input id="token" type="password" placeholder="Coordinator token">

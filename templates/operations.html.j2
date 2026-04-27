@@ -506,13 +506,11 @@
           </div>
         </div>
         <div class="quick-links">
-          <a class="pill" href="/crawl-progress">Crawl Progress</a>
+          <a class="pill" href="/workflows">Recon Results</a>
           <a class="pill" href="/discovered-targets">Discovered Targets</a>
           <a class="pill" href="/discovered-files">Discovered Files</a>
-          <a class="pill" href="/extractor-matches">Extractor Matches</a>
-          <a class="pill" href="/fuzzing">Fuzzing</a>
           <a class="pill" href="/http-requests">HTTP Requests</a>
-          <a class="pill" href="/docker-status">Docker Status</a>
+          <a class="pill" href="/dashboard">Docker & Infrastructure</a>
           <a class="pill" href="/view-logs">View Logs</a>
           <a class="pill" href="/workflow-runs">Workflow Runs</a>
           <a class="pill" href="/workflow-definitions">Workflow Builder</a>
@@ -678,11 +676,11 @@
       const recentErrors = asArray(state.errors && (state.errors.items || state.errors.rows || state.errors.errors)).length;
       const rows = [];
 
-      if (!inferDbOk()) rows.push(["Database needs attention", "Open Database Status first; the rest of the cockpit depends on coordinator data.", "/database", "Open database"]);
+      if (!inferDbOk()) rows.push(["Database needs attention", "Open Dashboard for DB activity and coordinator health details.", "/dashboard", "Open dashboard"]);
       if (online === 0 && (pending > 0 || running > 0)) rows.push(["No online workers", "Start or debug workers before adding more work; queued/running targets cannot progress without capacity.", "/workers", "Manage workers"]);
       if (failed > 0) rows.push(["Failed targets exist", "Review failures and decide whether to retry workflow stages or inspect logs for a systemic cause.", "/errors", "Review errors"]);
       if (recentErrors > 0) rows.push(["Recent errors detected", "Inspect structured errors before launching large new batches.", "/errors", "Open errors"]);
-      if (pending > 0 && online > 0) rows.push(["Backlog is ready", "Workers are online and pending work exists. Monitor crawl progress and worker activity.", "/crawl-progress", "Track progress"]);
+      if (pending > 0 && online > 0) rows.push(["Backlog is ready", "Workers are online and pending work exists. Monitor target progress from Workflows/Recon Results.", "/workflows", "Track progress"]);
       if (pending === 0 && running === 0 && failed === 0) rows.push(["Ready for new input", "No queued or active target work is visible. Add targets or launch a workflow.", "#targetsInput", "Add targets"]);
       if (!rows.length) rows.push(["Monitor active run", "Work is in progress. Keep an eye on events and discovered artifacts.", "/events", "Open events"]);
 
