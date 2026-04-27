@@ -5023,6 +5023,108 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._write_json(payload)
             return
+        if path == "/api/coord/diagnostics/download":
+            if self.coordinator_store is None:
+                self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)
+                return
+            if not self._is_coordinator_authorized():
+                self._write_json({"error": "unauthorized"}, status=401)
+                return
+            events_limit = max(100, min(5000, _safe_int((query.get("events_limit") or [2000])[0], 2000)))
+            logs_limit = max(100, min(5000, _safe_int((query.get("logs_limit") or [1000])[0], 1000)))
+            workflow_limit = max(100, min(20000, _safe_int((query.get("workflow_limit") or [5000])[0], 5000)))
+            errors: list[str] = []
+
+            def _safe_collect(label: str, fn: Callable[[], Any], fallback: Any) -> Any:
+                try:
+                    return fn()
+                except Exception as exc:
+                    self.log_message("diagnostics bundle: %s failed: %r", label, exc)
+                    errors.append(f"{label}: {exc}")
+                    return fallback
+
+            database_status = _safe_collect("database_status", lambda: self.coordinator_store.database_status(), {})
+            observability = _safe_collect("observability_summary", lambda: self.coordinator_store.observability_summary(), {})
+            events_payload = _safe_collect(
+                "events",
+                lambda: self.coordinator_store.list_events(limit=events_limit, offset=0, sort_dir="desc"),
+                {"items": []},
+            )
+            event_log_rows = _safe_collect(
+                "event_log",
+                lambda: self.coordinator_store.list_event_log(limit=events_limit, after_sequence=0),
+                [],
+            )
+            database_activity = _safe_collect("database_activity", lambda: self.coordinator_store.database_activity(limit=2000), {"tables": []})
+            worker_statuses = _safe_collect(
+                "worker_statuses",
+                lambda: self.coordinator_store.worker_statuses(stale_after_seconds=DEFAULT_COORDINATOR_LEASE_SECONDS),
+                {"workers": []},
+            )
+            workflow_snapshot = _safe_collect(
+                "workflow_snapshot",
+                lambda: self.coordinator_store.workflow_scheduler_snapshot(limit=workflow_limit),
+                {"domains": []},
+            )
+            recent_stage_task_events = _safe_collect(
+                "recent_stage_task_events",
+                lambda: self.coordinator_store.recent_stage_task_events(workflow_id="", limit=events_limit),
+                [],
+            )
+            docker_status = _safe_collect(
+                "docker_status",
+                lambda: _collect_docker_status(self.app_root, include_logs=False, log_lines=100),
+                {},
+            )
+            log_sources = _safe_collect(
+                "log_sources",
+                lambda: _collect_view_log_sources_cached(self.app_root, self.output_root, force_refresh=True),
+                [],
+            )
+
+            recent_log_messages: list[dict[str, Any]] = []
+            if self.log_store is not None:
+                log_payload = _safe_collect(
+                    "log_store.query_events",
+                    lambda: self.log_store.query_events(
+                        source_id="",
+                        search="",
+                        severity="",
+                        machine="",
+                        limit=logs_limit,
+                        offset=0,
+                        sort_dir="desc",
+                    ),
+                    {"events": []},
+                )
+                recent_log_messages = list(log_payload.get("events") or [])
+
+            diagnostics = {
+                "ok": True,
+                "generated_at_utc": _iso_now(),
+                "limits": {
+                    "events_limit": events_limit,
+                    "logs_limit": logs_limit,
+                    "workflow_limit": workflow_limit,
+                },
+                "database_status": database_status,
+                "observability_summary": observability,
+                "events": events_payload,
+                "event_log": {
+                    "total": len(event_log_rows),
+                    "items": event_log_rows,
+                },
+                "database_activity": database_activity,
+                "worker_statuses": worker_statuses,
+                "workflow_snapshot": workflow_snapshot,
+                "recent_stage_task_events": recent_stage_task_events,
+                "docker_status": docker_status,
+                "recent_log_messages": recent_log_messages,
+                "log_sources": log_sources,
+                "errors": errors,
+            }
+            self._write_json(diagnostics)
+            return
         if path == "/api/coord/docker-status":
             if self.coordinator_store is None:
                 self._write_json({"error": "coordinator is not configured (database_url missing)"}, status=503)

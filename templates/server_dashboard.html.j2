@@ -34,6 +34,7 @@
   <div class="toolbar">
     <input id="globalSearch" type="text" placeholder="Search all dashboard tables">
     <button onclick="refreshDashboard()">Refresh</button>
+    <button onclick="downloadDiagnosticsData()">Download Diagnostics Data</button>
     <span id="statusText" class="muted"></span>
   </div>
   <div id="cards" class="cards"></div>
@@ -390,6 +391,25 @@
         applySearch();
       } catch (error) {
         showLoadError(error && error.message ? error.message : String(error || "request failed"));
+      }
+    }
+    async function downloadDiagnosticsData() {
+      const status = document.getElementById("statusText");
+      status.textContent = "Building diagnostics bundle...";
+      try {
+        const payload = await authJson("/api/coord/diagnostics/download?events_limit=3000&logs_limit=2000&workflow_limit=10000");
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const ts = new Date().toISOString().replace(/[:.]/g, "-");
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `nightmare-diagnostics-${ts}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
+        status.textContent = `Diagnostics download ready (${ts}).`;
+      } catch (error) {
+        showLoadError(error && error.message ? error.message : String(error || "diagnostics download failed"));
       }
     }
     document.getElementById("globalSearch").addEventListener("input", applySearch);

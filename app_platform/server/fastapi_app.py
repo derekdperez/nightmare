@@ -627,6 +627,59 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
         """Return coordinator observability counters for dashboard controls."""
         return store.observability_summary()
 
+    @app.get("/api/coord/diagnostics/download")
+    def diagnostics_download(
+        events_limit: int = Query(default=2000, ge=100, le=5000),
+        workflow_limit: int = Query(default=5000, ge=100, le=20000),
+        _auth: None = Depends(require_auth),
+        store: CoordinatorStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        """Return a single diagnostics bundle for dashboard export."""
+        errors: list[str] = []
+
+        def _safe_collect(label: str, fn, fallback):
+            try:
+                return fn()
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+                return fallback
+
+        return {
+            "ok": True,
+            "generated_at_utc": _iso_now(),
+            "limits": {
+                "events_limit": int(events_limit),
+                "workflow_limit": int(workflow_limit),
+            },
+            "database_status": _safe_collect("database_status", lambda: store.database_status(), {}),
+            "observability_summary": _safe_collect("observability_summary", lambda: store.observability_summary(), {}),
+            "events": _safe_collect(
+                "events",
+                lambda: store.list_events(limit=events_limit, offset=0, sort_dir="desc"),
+                {"items": []},
+            ),
+            "event_log": {
+                "items": _safe_collect("event_log", lambda: store.list_event_log(limit=events_limit, after_sequence=0), []),
+            },
+            "database_activity": _safe_collect("database_activity", lambda: store.database_activity(limit=2000), {"tables": []}),
+            "worker_statuses": _safe_collect(
+                "worker_statuses",
+                lambda: store.worker_statuses(stale_after_seconds=DEFAULT_COORDINATOR_LEASE_SECONDS),
+                {"workers": []},
+            ),
+            "workflow_snapshot": _safe_collect(
+                "workflow_snapshot",
+                lambda: store.workflow_scheduler_snapshot(limit=workflow_limit),
+                {"domains": []},
+            ),
+            "recent_stage_task_events": _safe_collect(
+                "recent_stage_task_events",
+                lambda: store.recent_stage_task_events(workflow_id="", limit=events_limit),
+                [],
+            ),
+            "errors": errors,
+        }
+
     @app.get("/api/coord/event-log")
     def event_log(
         limit: int = Query(default=250, ge=1, le=5000),

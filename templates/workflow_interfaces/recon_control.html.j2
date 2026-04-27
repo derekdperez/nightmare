@@ -173,6 +173,45 @@
         return Boolean(document.getElementById("allDomains").checked);
       }
 
+      function expandSelectedPluginsWithPrerequisites(selectedPlugins) {
+        const allPlugins = Array.isArray(state.plugins) ? state.plugins : [];
+        const pluginByName = new Map();
+        const artifactProducers = new Map();
+        for (const plugin of allPlugins) {
+          const name = pluginName(plugin);
+          if (!name) continue;
+          pluginByName.set(name, plugin);
+          const outputs = plugin && typeof plugin.outputs === "object" ? plugin.outputs : {};
+          const artifacts = Array.isArray(outputs.artifacts) ? outputs.artifacts : [];
+          for (const artifact of artifacts) {
+            const artifactName = String(artifact || "").trim().toLowerCase();
+            if (!artifactName) continue;
+            if (!artifactProducers.has(artifactName)) artifactProducers.set(artifactName, []);
+            artifactProducers.get(artifactName).push(name);
+          }
+        }
+        const expanded = new Set((Array.isArray(selectedPlugins) ? selectedPlugins : []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+        const queue = Array.from(expanded);
+        while (queue.length) {
+          const current = String(queue.shift() || "");
+          const plugin = pluginByName.get(current);
+          if (!plugin || typeof plugin !== "object") continue;
+          const pre = plugin && typeof plugin.preconditions === "object" ? plugin.preconditions : {};
+          const requiredArtifacts = Array.isArray(pre.artifacts_all) ? pre.artifacts_all : [];
+          for (const artifact of requiredArtifacts) {
+            const artifactName = String(artifact || "").trim().toLowerCase();
+            if (!artifactName) continue;
+            const producers = artifactProducers.get(artifactName) || [];
+            for (const producerName of producers) {
+              if (expanded.has(producerName)) continue;
+              expanded.add(producerName);
+              queue.push(producerName);
+            }
+          }
+        }
+        return Array.from(expanded).sort();
+      }
+
       function renderDomains() {
         const search = String(document.getElementById("domainSearch").value || "").trim().toLowerCase();
         const statusFilter = String(document.getElementById("domainStatusFilter").value || "").trim().toLowerCase();
@@ -284,6 +323,7 @@
       async function generateTasks() {
         const selectedPlugins = selectedPluginList();
         if (!selectedPlugins.length) throw new Error("Select at least one workflow step.");
+        const selectedWithDependencies = expandSelectedPluginsWithPrerequisites(selectedPlugins);
         const targetDomains = allDomainsSelected()
           ? Array.from(
               new Set(
@@ -296,7 +336,7 @@
         if (!targetDomains.length) throw new Error("Select one or more domains, or choose ALL domains.");
 
         const allWorkflowPlugins = Array.from(new Set(state.plugins.map((plugin) => pluginName(plugin)).filter(Boolean))).sort();
-        const selectedSet = new Set(selectedPlugins);
+        const selectedSet = new Set(selectedWithDependencies);
         const unselectedPlugins = allWorkflowPlugins.filter((name) => !selectedSet.has(name));
         const createdRuns = [];
 
@@ -352,8 +392,8 @@
         return {
           ok: true,
           domains_count: createdRuns.length,
-          selected_plugins: selectedPlugins,
-          selected_plugins_count: selectedPlugins.length,
+          selected_plugins: selectedWithDependencies,
+          selected_plugins_count: selectedWithDependencies.length,
           visible_tasks: visibleTasks,
         };
       }

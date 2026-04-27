@@ -1,15 +1,8 @@
-- The Recon Control and Recon Results pages are both appearing twice in the navigation buttons. They should only appear once each.
+Todo:
 
-- Remove the following pages: Operations, Plugins, Workflw Runs, Fuzzing, Events, Auth0r, and Errors
+- Remove obsolete navigation links - Crawl Progress, Extractor Matches, Fuzzing, Database, and Docker Status. Any functionality present on any of the screens being removed that has not yet been mvoed to another screen should be now. Docker Status features go on the dashboard in the docker area, the rest should probably go in the Recon Results page.
 
-- Move the Crawl Progress, Discovered Targets, Discovered Files, and Extractor Matches functionality to the Recon Results workflow output page, and then remove those pages as well.  
+- The dashboard should also contain performance stats - when it loads, have it display the data that was retrieved from the cache, and how long it took. Also display the data that was retrieved from the database, and how long that took as well. The dashboard should subscribe to all system events, and the System Events table should be updated in realtime as events are generated - it shouldn't poll or wait for periodic refreshes anymore.
 
-- The remaining pages should be: Workers, Workflows, any workflow-generated pages, Workflow Builder, Database, Docker Status, and View Logs.
+- On the workflow builder, whem a plugin is selected from the plugin dropdown for a step, the Config JSON and Preconditions JSON should both be automatically populated - the config json should be configured to contain all required variables with default values, and all optional values shown without any configured values. this should change as the user changes the plugins. The preconditions should have several buttons after the Preconditions JSON label - "No Preconditions", which automatically loads json for no preonditions, "Previous Step Completion", which configures the preconditions to be the prior step completing successfully, "Wait for File" which populates the JSON with the preconditions necessary for the user to just enter a file path, and the task will run when the file exists. 
 
-- Generating workflow tasks on the Recon Control page says it is generating tasks, but they do not appear on the Workflow Monitor page.
-
-- Remove the Enqueue Plugin Task and Reset Plugin Task sections from the Workflows page.
-
-- Remove the Monitor and Timeline buttons from the Workflow page.
-
-- In the Plugin Tasks section on the Workflows page, add the following to the Actions column: "Delete" - this deletes the task entirely. "Pause" - this sets the task to Paused, so no workers will pick it up for processing. "Run" - this causes a worker to pick the task up and begin processing, even if all prerequisites are not met.
