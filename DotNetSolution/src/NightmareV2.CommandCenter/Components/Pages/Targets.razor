@@ -1,0 +1,92 @@
+@page "/targets"
+@rendermode InteractiveServer
+@using NightmareV2.CommandCenter.Models
+@inject HttpClient Http
+
+<PageTitle>Targets · Nightmare v2</PageTitle>
+
+<h1>Recon targets</h1>
+
+<section style="margin-bottom:1.5rem">
+    <h2>Add target</h2>
+    <EditForm Model="_form" OnValidSubmit="CreateAsync">
+        <div>
+            <label>Root domain</label>
+            <InputText @bind-Value="_form.RootDomain" placeholder="example.com" />
+        </div>
+        <div>
+            <label>Max depth</label>
+            <InputNumber @bind-Value="_form.GlobalMaxDepth" />
+        </div>
+        <button type="submit">Publish TargetCreated</button>
+    </EditForm>
+    @if (!string.IsNullOrEmpty(_status))
+    {
+        <p role="status">@_status</p>
+    }
+</section>
+
+<h2>Recent targets (virtualized)</h2>
+@if (_rows.Count == 0)
+{
+    <p>No targets yet.</p>
+}
+else
+{
+    <div style="height:420px; overflow:auto; border:1px solid #ccc">
+        <Virtualize Items="_rows" Context="row">
+            <div style="padding:4px 8px; border-bottom:1px solid #eee">
+                <strong>@row.RootDomain</strong>
+                <span> — depth @row.GlobalMaxDepth — @row.CreatedAtUtc.UtcDateTime.ToString("u")</span>
+            </div>
+        </Virtualize>
+    </div>
+}
+
+@code {
+    private readonly TargetForm _form = new();
+    private readonly List<TargetSummary> _rows = new();
+    private string? _status;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        try
+        {
+            var list = await Http.GetFromJsonAsync<List<TargetSummary>>("/api/targets").ConfigureAwait(false);
+            _rows.Clear();
+            if (list is not null)
+                _rows.AddRange(list);
+        }
+        catch
+        {
+            _status = "Could not load targets (is the API running?)";
+        }
+    }
+
+    private async Task CreateAsync()
+    {
+        _status = null;
+        try
+        {
+            var response = await Http.PostAsJsonAsync("/api/targets", new CreateTargetRequest(_form.RootDomain, _form.GlobalMaxDepth)).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            _status = "Target queued.";
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _status = ex.Message;
+        }
+    }
+
+    private sealed class TargetForm
+    {
+        public string RootDomain { get; set; } = "example.com";
+        public int GlobalMaxDepth { get; set; } = 12;
+    }
+}

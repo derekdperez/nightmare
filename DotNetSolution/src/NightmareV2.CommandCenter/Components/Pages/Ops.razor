@@ -1,0 +1,233 @@
+@page "/ops"
+@rendermode InteractiveServer
+@using NightmareV2.CommandCenter.Models
+@implements IDisposable
+@inject HttpClient Http
+
+<PageTitle>Operations · Nightmare v2</PageTitle>
+
+<h1>Operations</h1>
+<p class="muted">Live bus shows recent publishes. History includes publishes and consumes as each host records them. Start/Stop toggles are read by workers between messages (in-flight work still completes).</p>
+
+<section class="panel">
+    <h2>Workers</h2>
+    @if (_workers.Count == 0)
+    {
+        <p>No worker switches (seed the database).</p>
+    }
+    else
+    {
+        <table class="grid">
+            <thead>
+            <tr><th>Key</th><th>Enabled</th><th>Updated (UTC)</th><th></th></tr>
+            </thead>
+            <tbody>
+            @foreach (var w in _workers)
+            {
+                <tr>
+                    <td><code>@w.WorkerKey</code></td>
+                    <td>@(w.IsEnabled ? "yes" : "no")</td>
+                    <td>@w.UpdatedAtUtc.UtcDateTime.ToString("u")</td>
+                    <td>
+                        <button type="button" disabled="@_busyWorkers" @onclick="() => SetWorkerAsync(w.WorkerKey, true)">Start</button>
+                        <button type="button" disabled="@_busyWorkers" @onclick="() => SetWorkerAsync(w.WorkerKey, false)">Stop</button>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    }
+</section>
+
+<section class="panel">
+    <h2>Assets</h2>
+    <div class="row">
+        <label>Target filter</label>
+        <select @bind="_targetFilter" @bind:after="ReloadAssetsAsync">
+            <option value="">All targets</option>
+            @foreach (var t in _targets)
+            {
+                <option value="@t.Id.ToString()">@t.RootDomain</option>
+            }
+        </select>
+        <button type="button" @onclick="ReloadAllAsync">Refresh now</button>
+    </div>
+    <div class="scroll">
+        <table class="grid">
+            <thead>
+            <tr>
+                <th>Discovered (UTC)</th><th>Kind</th><th>Status</th><th>Depth</th><th>Raw</th><th>By</th>
+            </tr>
+            </thead>
+            <tbody>
+            @foreach (var a in _assets)
+            {
+                <tr>
+                    <td>@a.DiscoveredAtUtc.UtcDateTime.ToString("u")</td>
+                    <td>@a.Kind</td>
+                    <td>@a.LifecycleStatus</td>
+                    <td>@a.Depth</td>
+                    <td class="clip">@a.RawValue</td>
+                    <td>@a.DiscoveredBy</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Event bus (live — recent publishes)</h2>
+    <div class="scroll tall">
+        <table class="grid">
+            <thead>
+            <tr><th>Time (UTC)</th><th>Type</th><th>Payload (truncated)</th></tr>
+            </thead>
+            <tbody>
+            @foreach (var e in _liveBus)
+            {
+                <tr>
+                    <td>@e.OccurredAtUtc.UtcDateTime.ToString("O")</td>
+                    <td>@e.MessageType</td>
+                    <td class="clip mono">@e.PayloadJson</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Historic bus journal</h2>
+    <div class="scroll tall">
+        <table class="grid">
+            <thead>
+            <tr><th>Id</th><th>Dir</th><th>Time (UTC)</th><th>Type</th><th>Consumer</th><th>Payload (truncated)</th></tr>
+            </thead>
+            <tbody>
+            @foreach (var e in _historyBus)
+            {
+                <tr>
+                    <td>@e.Id</td>
+                    <td>@e.Direction</td>
+                    <td>@e.OccurredAtUtc.UtcDateTime.ToString("O")</td>
+                    <td>@e.MessageType</td>
+                    <td class="clip">@e.ConsumerType</td>
+                    <td class="clip mono">@e.PayloadJson</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+@code {
+    private readonly CancellationTokenSource _pollCts = new();
+    private readonly List<TargetSummary> _targets = [];
+    private readonly List<WorkerSwitchDto> _workers = [];
+    private readonly List<AssetGridRowDto> _assets = [];
+    private readonly List<BusJournalRowDto> _liveBus = [];
+    private readonly List<BusJournalRowDto> _historyBus = [];
+    private string _targetFilter = "";
+    private bool _busyWorkers;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAllAsync().ConfigureAwait(false);
+        _ = PollAsync();
+    }
+
+    private async Task PollAsync()
+    {
+        try
+        {
+            while (!_pollCts.IsCancellationRequested)
+            {
+                await Task.Delay(2000, _pollCts.Token).ConfigureAwait(false);
+                await ReloadVolatileAsync().ConfigureAwait(false);
+                await InvokeAsync(StateHasChanged).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // shutdown
+        }
+    }
+
+    private async Task ReloadVolatileAsync()
+    {
+        try
+        {
+            var live = await Http.GetFromJsonAsync<List<BusJournalRowDto>>("/api/bus/live?minutes=3&take=120").ConfigureAwait(false);
+            _liveBus.Clear();
+            if (live is not null)
+                _liveBus.AddRange(live);
+
+            var hist = await Http.GetFromJsonAsync<List<BusJournalRowDto>>("/api/bus/history?take=350").ConfigureAwait(false);
+            _historyBus.Clear();
+            if (hist is not null)
+                _historyBus.AddRange(hist);
+
+            var w = await Http.GetFromJsonAsync<List<WorkerSwitchDto>>("/api/workers").ConfigureAwait(false);
+            _workers.Clear();
+            if (w is not null)
+                _workers.AddRange(w);
+        }
+        catch
+        {
+            // keep last good snapshot
+        }
+    }
+
+    private async Task ReloadAllAsync()
+    {
+        try
+        {
+            var targets = await Http.GetFromJsonAsync<List<TargetSummary>>("/api/targets").ConfigureAwait(false);
+            _targets.Clear();
+            if (targets is not null)
+                _targets.AddRange(targets);
+        }
+        catch
+        {
+            _targets.Clear();
+        }
+
+        await ReloadAssetsAsync().ConfigureAwait(false);
+        await ReloadVolatileAsync().ConfigureAwait(false);
+    }
+
+    private async Task ReloadAssetsAsync()
+    {
+        try
+        {
+            var qs = string.IsNullOrEmpty(_targetFilter) ? "?take=800" : $"?targetId={Uri.EscapeDataString(_targetFilter)}&take=800";
+            var list = await Http.GetFromJsonAsync<List<AssetGridRowDto>>($"/api/assets{qs}").ConfigureAwait(false);
+            _assets.Clear();
+            if (list is not null)
+                _assets.AddRange(list);
+        }
+        catch
+        {
+            _assets.Clear();
+        }
+    }
+
+    private async Task SetWorkerAsync(string key, bool enabled)
+    {
+        _busyWorkers = true;
+        try
+        {
+            var resp = await Http.PutAsJsonAsync($"/api/workers/{Uri.EscapeDataString(key)}", new WorkerPatchRequest(enabled)).ConfigureAwait(false);
+            resp.EnsureSuccessStatusCode();
+            await ReloadVolatileAsync().ConfigureAwait(false);
+            await InvokeAsync(StateHasChanged).ConfigureAwait(false);
+        }
+        finally
+        {
+            _busyWorkers = false;
+        }
+    }
+
+    public void Dispose() => _pollCts.Cancel();
+}

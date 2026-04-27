@@ -1,0 +1,47 @@
+using MassTransit;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
+namespace NightmareV2.Infrastructure.Messaging;
+
+/// <summary>
+/// Dev: RabbitMQ. Production: swap for MassTransit.AmazonSQS (design §3).
+/// </summary>
+public static class MassTransitRabbitExtensions
+{
+    public static IServiceCollection AddNightmareRabbitMq(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        Action<IBusRegistrationConfigurator> configureConsumers)
+    {
+        var host = configuration["RabbitMq:Host"] ?? "localhost";
+        var user = configuration["RabbitMq:Username"] ?? "guest";
+        var pass = configuration["RabbitMq:Password"] ?? "guest";
+        var vhost = string.IsNullOrWhiteSpace(configuration["RabbitMq:VirtualHost"])
+            ? "/"
+            : configuration["RabbitMq:VirtualHost"]!;
+
+        services.TryAddSingleton<BusJournalPublishObserver>();
+        services.TryAddSingleton<BusJournalConsumeObserver>();
+
+        services.AddMassTransit(x =>
+        {
+            configureConsumers(x);
+            x.SetKebabCaseEndpointNameFormatter();
+            x.UsingRabbitMq((context, cfg) =>
+            {
+                cfg.Host(host, vhost, h =>
+                {
+                    h.Username(user);
+                    h.Password(pass);
+                });
+                cfg.ConnectPublishObserver(context.GetRequiredService<BusJournalPublishObserver>());
+                cfg.ConnectConsumeObserver(context.GetRequiredService<BusJournalConsumeObserver>());
+                cfg.ConfigureEndpoints(context);
+            });
+        });
+
+        return services;
+    }
+}

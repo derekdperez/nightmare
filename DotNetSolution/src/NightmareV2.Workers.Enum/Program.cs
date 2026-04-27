@@ -1,0 +1,22 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using NightmareV2.Infrastructure;
+using NightmareV2.Infrastructure.Data;
+using NightmareV2.Infrastructure.Messaging;
+using NightmareV2.Workers.Enum.Consumers;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddNightmareInfrastructure(builder.Configuration);
+builder.Services.AddNightmareRabbitMq(builder.Configuration, x => x.AddConsumer<TargetCreatedConsumer>());
+
+var host = builder.Build();
+
+using (var scope = host.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
+    await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
+    await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
+}
+
+await host.RunAsync().ConfigureAwait(false);

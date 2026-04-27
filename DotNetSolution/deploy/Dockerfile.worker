@@ -1,0 +1,18 @@
+# Build context: DotNetSolution repository root. Pass PROJECT_DIR (folder under src/) and DLL name without .dll
+ARG PROJECT_DIR=NightmareV2.Gatekeeper
+ARG APP_DLL=NightmareV2.Gatekeeper.dll
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG PROJECT_DIR
+WORKDIR /src
+COPY Directory.Build.props ./
+COPY src ./src
+RUN dotnet publish "src/${PROJECT_DIR}/${PROJECT_DIR}.csproj" \
+    -c Release -o /app/publish
+
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final
+ARG APP_DLL
+ENV APP_DLL=${APP_DLL}
+WORKDIR /app
+COPY --from=build /app/publish .
+ENTRYPOINT ["sh", "-c", "exec dotnet /app/${APP_DLL}"]

@@ -1,0 +1,142 @@
+# Run from DotNetSolution: ./deploy/deploy.sh
+# Or: docker compose -f deploy/docker-compose.yml --project-directory . up -d --build
+name: nightmare-v2
+
+x-common-env: &common-env
+  ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=nightmare_v2;Username=nightmare;Password=nightmare
+  ConnectionStrings__Redis: redis:6379
+  RabbitMq__Host: rabbitmq
+  RabbitMq__Username: nightmare
+  RabbitMq__Password: nightmare
+  RabbitMq__VirtualHost: /
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nightmare
+      POSTGRES_PASSWORD: nightmare
+      POSTGRES_DB: nightmare_v2
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nightmare -d nightmare_v2"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: nightmare
+      RABBITMQ_DEFAULT_PASS: nightmare
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  command-center:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    environment:
+      <<: *common-env
+      ASPNETCORE_URLS: http://+:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  gatekeeper:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+      args:
+        PROJECT_DIR: NightmareV2.Gatekeeper
+        APP_DLL: NightmareV2.Gatekeeper.dll
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker-spider:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+      args:
+        PROJECT_DIR: NightmareV2.Workers.Spider
+        APP_DLL: NightmareV2.Workers.Spider.dll
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker-enum:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+      args:
+        PROJECT_DIR: NightmareV2.Workers.Enum
+        APP_DLL: NightmareV2.Workers.Enum.dll
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker-portscan:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+      args:
+        PROJECT_DIR: NightmareV2.Workers.PortScan
+        APP_DLL: NightmareV2.Workers.PortScan.dll
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  pgdata:

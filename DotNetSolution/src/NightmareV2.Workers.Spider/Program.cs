@@ -1,0 +1,25 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using NightmareV2.Infrastructure;
+using NightmareV2.Infrastructure.Data;
+using NightmareV2.Infrastructure.Messaging;
+using NightmareV2.Workers.Spider.Consumers;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddHttpClient("spider")
+    .AddPolicyHandler(SpiderAssetDiscoveredConsumer.RetryPolicy());
+
+builder.Services.AddNightmareInfrastructure(builder.Configuration);
+builder.Services.AddNightmareRabbitMq(builder.Configuration, x => x.AddConsumer<SpiderAssetDiscoveredConsumer>());
+
+var host = builder.Build();
+
+using (var scope = host.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
+    await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
+    await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
+}
+
+await host.RunAsync().ConfigureAwait(false);

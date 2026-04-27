@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NightmareV2.Contracts\NightmareV2.Contracts.csproj" />
+    <ProjectReference Include="..\NightmareV2.Domain\NightmareV2.Domain.csproj" />
+    <ProjectReference Include="..\NightmareV2.Infrastructure\NightmareV2.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

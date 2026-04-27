@@ -1,0 +1,5 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\NightmareV2.Contracts\NightmareV2.Contracts.csproj" />
+  </ItemGroup>
+</Project>

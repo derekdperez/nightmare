@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NightmareV2.Application/NightmareV2.Application.csproj" />
+    <Project Path="src/NightmareV2.CommandCenter/NightmareV2.CommandCenter.csproj" />
+    <Project Path="src/NightmareV2.Contracts/NightmareV2.Contracts.csproj" />
+    <Project Path="src/NightmareV2.Domain/NightmareV2.Domain.csproj" />
+    <Project Path="src/NightmareV2.Gatekeeper/NightmareV2.Gatekeeper.csproj" />
+    <Project Path="src/NightmareV2.Infrastructure/NightmareV2.Infrastructure.csproj" />
+    <Project Path="src/NightmareV2.Workers.Enum/NightmareV2.Workers.Enum.csproj" />
+    <Project Path="src/NightmareV2.Workers.PortScan/NightmareV2.Workers.PortScan.csproj" />
+    <Project Path="src/NightmareV2.Workers.Spider/NightmareV2.Workers.Spider.csproj" />
+  </Folder>
+</Solution>
