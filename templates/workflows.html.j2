@@ -90,6 +90,7 @@
       <option value="5000" selected>5000 domains</option>
     </select>
     <button class="primary" id="refreshButton">Refresh</button>
+    <button class="warn" id="forceClaimButton">Force workers to claim</button>
     <button id="pauseButton">Pause</button>
     <span id="statusPill" class="status-pill"><span class="status-dot"></span><span id="statusText">Idle</span></span>
   </div>
@@ -156,9 +157,32 @@
     </section>
   </div>
 
+  <section class="panel">
+    <h2>Global Task Queue</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Workflow</th>
+            <th>Domain</th>
+            <th>Plugin/Stage</th>
+            <th>Status</th>
+            <th>Worker</th>
+            <th>Attempts</th>
+            <th>Updated</th>
+            <th>Reason / Error</th>
+          </tr>
+        </thead>
+        <tbody id="globalTaskRows">
+          <tr><td colspan="8" class="muted">Loading task queue...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <script>
     const TOKEN_COOKIE_NAME = "nightmare_coord_token";
-    const state = { paused: false, timer: null, snapshot: null, selectedDomain: "" };
+    const state = { paused: false, timer: null, snapshot: null, selectedDomain: "", taskMonitor: null };
 
     function readCookie(name) {
       const needle = `${name}=`;
@@ -429,12 +453,67 @@
       if (!response.ok) throw new Error(String(payload.error || `HTTP ${response.status}`));
       state.snapshot = payload;
     }
+    async function fetchTaskMonitorData() {
+      const rsp = await fetch("/api/coord/stage-tasks?limit=1000", {
+        credentials: "same-origin",
+        headers: authHeaders(),
+      });
+      const payload = await rsp.json().catch(() => ({}));
+      if (!rsp.ok) throw new Error(String(payload.error || payload.detail || `HTTP ${rsp.status}`));
+      state.taskMonitor = payload;
+    }
+    function renderGlobalTaskRows() {
+      const body = document.getElementById("globalTaskRows");
+      const payload = state.taskMonitor || {};
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (!items.length) {
+        body.innerHTML = '<tr><td colspan="8" class="muted">No stage tasks found.</td></tr>';
+        return;
+      }
+      body.innerHTML = items.map((task) => `
+        <tr>
+          <td class="mono">${escapeHtml(task.workflow_id || "")}</td>
+          <td class="mono">${escapeHtml(task.root_domain || "")}</td>
+          <td class="mono">${escapeHtml(task.stage || "")}</td>
+          <td><span class="${badgeClass(task.status)}">${escapeHtml(statusLabel(task.status))}</span></td>
+          <td class="mono">${escapeHtml(task.worker_id || "")}</td>
+          <td>${Number(task.attempt_count || 0)}</td>
+          <td class="mono">${escapeHtml(formatStamp(task.updated_at_utc || task.heartbeat_at_utc || task.created_at_utc || ""))}</td>
+          <td>${escapeHtml(task.error || "")}</td>
+        </tr>
+      `).join("");
+    }
+    async function forceWorkersToClaimNow() {
+      const button = document.getElementById("forceClaimButton");
+      button.disabled = true;
+      try {
+        setStatus("loading", "Forcing workers to claim...");
+        const rsp = await fetch("/api/coord/workers/force-claim", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ lease_seconds: 60 }),
+        });
+        const payload = await rsp.json().catch(() => ({}));
+        if (!rsp.ok) throw new Error(String(payload.error || payload.detail || `HTTP ${rsp.status}`));
+        await refreshAllData();
+        setStatus(
+          "success",
+          `Force claim complete: ${Number(payload.claimed_total || 0)} claimed, ${Number(payload.workers_considered || 0)} workers checked.`
+        );
+      } catch (error) {
+        setStatus("error", String(error && error.message ? error.message : error));
+      } finally {
+        button.disabled = false;
+      }
+    }
     async function refreshAllData() {
       if (state.paused) return;
       setStatus("loading", "Refreshing...");
       try {
-        await fetchWorkflowSnapshotData();
+        await Promise.all([fetchWorkflowSnapshotData(), fetchTaskMonitorData()]);
         renderAll();
+        renderGlobalTaskRows();
         setStatus("success", `Live at ${new Date().toLocaleTimeString()}`);
       } catch (error) {
         setStatus("error", String(error && error.message ? error.message : error));
@@ -489,6 +568,7 @@
     }
 
     document.getElementById("refreshButton").addEventListener("click", refreshAllData);
+    document.getElementById("forceClaimButton").addEventListener("click", forceWorkersToClaimNow);
     document.getElementById("runWorkflowButton").addEventListener("click", runWorkflowNow);
     document.getElementById("pauseButton").addEventListener("click", () => {
       state.paused = !state.paused;
