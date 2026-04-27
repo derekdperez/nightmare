@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 from app_platform.server.store import CoordinatorStore, DEFAULT_COORDINATOR_LEASE_SECONDS, _stream_file_chunks
 from app_platform.workflow.tailor_adapter import normalize_workflow_payload, resolve_workflow_runtime_payload
 from shared.observability import get_telemetry
+from shared.runtime_common.api_debugger_catalog import build_api_debugger_catalog
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -182,6 +183,11 @@ def create_app(*, coordinator_store: CoordinatorStore | None = None, coordinator
     def coord_ping() -> dict[str, Any]:
         """Minimal JSON response without DB access; verifies HTTP routing is alive."""
         return {"ok": True, "route": "/api/coord/ping", "generated_at_utc": datetime.now(timezone.utc).isoformat()}
+
+    @app.get("/api/debugger/catalog")
+    def api_debugger_catalog() -> dict[str, Any]:
+        """Return discovered API endpoints for the in-app API Debugger."""
+        return build_api_debugger_catalog(BASE_DIR)
 
     @app.get("/api/coord/database-status")
     def database_status(

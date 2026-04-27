@@ -88,3 +88,7 @@ def render_workflow_runs_html() -> str:
 
 def render_plugin_definitions_html() -> str:
     return render_template("plugin_definitions.html.j2")
+
+
+def render_api_debugger_html() -> str:
+    return render_template("api_debugger.html.j2")

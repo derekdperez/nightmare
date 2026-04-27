@@ -54,7 +54,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from output_cleanup import clear_output_root_children
 from shared.runtime_common.templating import render_template
+from shared.runtime_common.api_debugger_catalog import build_api_debugger_catalog
 from reporting.server_pages import (
+    render_api_debugger_html,
     render_auth0r_html,
     render_crawl_progress_html,
     render_dashboard_html,
@@ -4383,6 +4385,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_json({"ok": True, "route": "/api/coord/ping", "generated_at_utc": _iso_now()})
             return
 
+        if path == "/api/debugger/catalog":
+            self._write_json(build_api_debugger_catalog(BASE_DIR))
+            return
+
         if path == "/":
             self._write_text(render_workers_html(), content_type="text/html; charset=utf-8")
             return
@@ -4395,6 +4401,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/dashboard":
             self._write_text(render_dashboard_html(), content_type="text/html; charset=utf-8")
+            return
+        if path == "/api-debugger":
+            self._write_text(render_api_debugger_html(), content_type="text/html; charset=utf-8")
             return
         if path == "/operations":
             self._write_text("Operations page removed.", status=404)
