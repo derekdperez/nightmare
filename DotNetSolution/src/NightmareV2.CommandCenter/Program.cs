@@ -55,14 +55,18 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
+var listenPlainHttp = app.Configuration.GetValue("Nightmare:ListenPlainHttp", false);
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
-    app.UseHsts();
+    if (!listenPlainHttp)
+        app.UseHsts();
 }
 
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
-app.UseHttpsRedirection();
+if (!listenPlainHttp)
+    app.UseHttpsRedirection();
 app.UseAntiforgery();
 
 app.MapStaticAssets();
