@@ -618,6 +618,69 @@ app.MapGet(
         })
     .WithName("OpsSnapshot");
 
+app.MapGet(
+        "/api/ops/overview",
+        async (NightmareDbContext db, CancellationToken ct) =>
+        {
+            var totalTargets = await db.Targets.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+            var totalAssets = await db.Assets.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+            var totalUrls = await db.Assets.AsNoTracking()
+                .LongCountAsync(a => a.Kind == AssetKind.Url, ct)
+                .ConfigureAwait(false);
+
+            var urlsFromFetchedPages = await db.Assets.AsNoTracking()
+                .LongCountAsync(
+                    a => a.Kind == AssetKind.Url
+                        && a.DiscoveredBy == "spider-worker"
+                        && a.DiscoveryContext.StartsWith("Spider: link extracted from fetched page ", StringComparison.Ordinal),
+                    ct)
+                .ConfigureAwait(false);
+
+            var urlsFromScripts = await db.Assets.AsNoTracking()
+                .LongCountAsync(
+                    a => a.Kind == AssetKind.Url
+                        && a.DiscoveredBy == "spider-worker"
+                        && (a.DiscoveryContext.Contains(".js", StringComparison.OrdinalIgnoreCase)
+                            || a.DiscoveryContext.Contains("javascript", StringComparison.OrdinalIgnoreCase)),
+                    ct)
+                .ConfigureAwait(false);
+
+            var urlsGuessedWithWordlist = await db.Assets.AsNoTracking()
+                .LongCountAsync(
+                    a => a.Kind == AssetKind.Url
+                        && a.DiscoveredBy.StartsWith("hvpath:", StringComparison.OrdinalIgnoreCase),
+                    ct)
+                .ConfigureAwait(false);
+
+            var domainCounts = await db.Assets.AsNoTracking()
+                .Join(db.Targets.AsNoTracking(), a => a.TargetId, t => t.Id, (_, t) => t.RootDomain)
+                .GroupBy(d => d)
+                .Select(g => new { RootDomain = g.Key, Count = g.LongCount() })
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+
+            var top = domainCounts
+                .OrderByDescending(x => x.Count)
+                .ThenBy(x => x.RootDomain, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+            var domains10OrMore = domainCounts.LongCount(x => x.Count >= 10);
+            var domains10OrFewer = domainCounts.LongCount(x => x.Count <= 10);
+
+            return Results.Ok(
+                new OpsOverviewDto(
+                    totalTargets,
+                    totalAssets,
+                    totalUrls,
+                    urlsFromFetchedPages,
+                    urlsFromScripts,
+                    urlsGuessedWithWordlist,
+                    top?.RootDomain,
+                    top?.Count ?? 0,
+                    domains10OrMore,
+                    domains10OrFewer));
+        })
+    .WithName("OpsOverview");
+
 app.MapPut(
         "/api/workers/{key}",
         async (string key, WorkerPatchRequest body, NightmareDbContext db, CancellationToken ct) =>

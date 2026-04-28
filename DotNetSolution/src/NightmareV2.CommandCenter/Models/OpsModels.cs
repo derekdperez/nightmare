@@ -124,3 +124,15 @@ public sealed record OpsSnapshotDto(
     IReadOnlyList<WorkerDetailStatsDto> WorkerMetrics,
     IReadOnlyList<RabbitQueueBriefDto> RabbitQueues,
     bool RabbitManagementAvailable);
+
+public sealed record OpsOverviewDto(
+    long TotalTargets,
+    long TotalAssetsDiscovered,
+    long TotalUrlAssets,
+    long UrlsFromFetchedPages,
+    long UrlsFromScripts,
+    long UrlsGuessedWithWordlist,
+    string? TopDomainByAssets,
+    long TopDomainAssetCount,
+    long DomainsWith10OrMoreAssets,
+    long DomainsWith10OrFewerAssets);
