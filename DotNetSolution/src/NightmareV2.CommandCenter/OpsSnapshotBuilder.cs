@@ -45,21 +45,18 @@ internal static class OpsSnapshotBuilder
         var h1 = now.AddHours(-1);
         var h24 = now.AddHours(-24);
 
-        var workersTask = db.WorkerSwitches.AsNoTracking()
-            .OrderBy(w => w.WorkerKey)
-            .Select(w => new WorkerSwitchDto(w.WorkerKey, w.IsEnabled, w.UpdatedAtUtc))
-            .ToListAsync(cancellationToken);
-        var activityTask = WorkerActivityQuery.BuildSnapshotAsync(db, cancellationToken);
-        var assetsTask = LoadAssetSummaryAsync(db, h1, h24, cancellationToken);
-        var busTask = LoadBusTrafficAsync(db, h1, h24, cancellationToken);
+        // Same NightmareDbContext must not run concurrent async queries (EF Core is not thread-safe).
         var rabbitTask = TryLoadRabbitQueuesAsync(httpFactory, configuration, cancellationToken);
 
-        await Task.WhenAll(workersTask, activityTask, assetsTask, busTask, rabbitTask).ConfigureAwait(false);
+        var workers = await db.WorkerSwitches.AsNoTracking()
+            .OrderBy(w => w.WorkerKey)
+            .Select(w => new WorkerSwitchDto(w.WorkerKey, w.IsEnabled, w.UpdatedAtUtc))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var activity = await WorkerActivityQuery.BuildSnapshotAsync(db, cancellationToken).ConfigureAwait(false);
+        var assets = await LoadAssetSummaryAsync(db, h1, h24, cancellationToken).ConfigureAwait(false);
+        var busTraffic = await LoadBusTrafficAsync(db, h1, h24, cancellationToken).ConfigureAwait(false);
 
-        var workers = await workersTask.ConfigureAwait(false);
-        var activity = await activityTask.ConfigureAwait(false);
-        var assets = await assetsTask.ConfigureAwait(false);
-        var busTraffic = await busTask.ConfigureAwait(false);
         var (queues, rabbitOk) = await rabbitTask.ConfigureAwait(false);
 
         var rabbitByWorker = AggregateRabbitByWorker(queues);
@@ -73,8 +70,13 @@ internal static class OpsSnapshotBuilder
             WorkerKeys.HighValueRegex,
             WorkerKeys.HighValuePaths,
         };
-        var metricTasks = order.Select(key => BuildOneWorkerDetailAsync(db, key, h1, h24, rabbitByWorker, cancellationToken));
-        var metrics = (await Task.WhenAll(metricTasks).ConfigureAwait(false)).ToList();
+        var metrics = new List<WorkerDetailStatsDto>(order.Length);
+        foreach (var key in order)
+        {
+            metrics.Add(
+                await BuildOneWorkerDetailAsync(db, key, h1, h24, rabbitByWorker, cancellationToken)
+                    .ConfigureAwait(false));
+        }
 
         return new OpsSnapshotDto(
             workers,
@@ -228,29 +230,25 @@ internal static class OpsSnapshotBuilder
     {
         var marker = WorkerConsumeMarkers.First(m => m.Key == workerKey).ConsumerSubstring;
 
-        var bus1Task = db.BusJournal.AsNoTracking()
+        var c1 = await db.BusJournal.AsNoTracking()
             .LongCountAsync(
                 e => e.Direction == "Consume" && e.ConsumerType != null && e.ConsumerType.Contains(marker)
                     && e.OccurredAtUtc >= h1,
-                ct);
-        var bus24Task = db.BusJournal.AsNoTracking()
+                ct)
+            .ConfigureAwait(false);
+        var c24 = await db.BusJournal.AsNoTracking()
             .LongCountAsync(
                 e => e.Direction == "Consume" && e.ConsumerType != null && e.ConsumerType.Contains(marker)
                     && e.OccurredAtUtc >= h24,
-                ct);
-        var lastTask = db.BusJournal.AsNoTracking()
+                ct)
+            .ConfigureAwait(false);
+        var last = await db.BusJournal.AsNoTracking()
             .Where(e => e.Direction == "Consume" && e.ConsumerType != null && e.ConsumerType.Contains(marker))
             .OrderByDescending(e => e.Id)
             .Select(e => (DateTimeOffset?)e.OccurredAtUtc)
-            .FirstOrDefaultAsync(ct);
-        var attrTask = LoadAttributedAssetsAsync(db, workerKey, h1, h24, ct);
-
-        await Task.WhenAll(bus1Task, bus24Task, lastTask, attrTask).ConfigureAwait(false);
-
-        var c1 = await bus1Task.ConfigureAwait(false);
-        var c24 = await bus24Task.ConfigureAwait(false);
-        var last = await lastTask.ConfigureAwait(false);
-        var (a1, a24) = await attrTask.ConfigureAwait(false);
+            .FirstOrDefaultAsync(ct)
+            .ConfigureAwait(false);
+        var (a1, a24) = await LoadAttributedAssetsAsync(db, workerKey, h1, h24, ct).ConfigureAwait(false);
 
         if (!rabbitByWorker.TryGetValue(workerKey, out var rb))
             rb = new RabbitAgg();

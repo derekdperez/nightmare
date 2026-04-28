@@ -89,7 +89,7 @@ public partial class Ops
             : _snapshot.Assets.AssetsByDiscoveredBy.AsQueryable().Where(r => Matches(r.DiscoveredBy, _filterDiscoveredBy));
 
     private IQueryable<WorkerDetailStatsDto> FilteredWorkerMetrics =>
-        _snapshot is null
+        _snapshot is null || _snapshot.WorkerMetrics is null
             ? Enumerable.Empty<WorkerDetailStatsDto>().AsQueryable()
             : _snapshot.WorkerMetrics.AsQueryable().Where(m =>
                 Matches(m.WorkerKey, _filterWorkerMetrics)
@@ -105,14 +105,14 @@ public partial class Ops
                 || Matches(q.LikelyWorkerKey, _filterRabbitQueues));
 
     private IQueryable<WorkerKindSummaryDto> FilteredWorkerSummaries =>
-        _snapshot is null
+        _snapshot is null || _snapshot.WorkerActivity is null
             ? Enumerable.Empty<WorkerKindSummaryDto>().AsQueryable()
             : _snapshot.WorkerActivity.Summaries.AsQueryable().Where(s =>
                 Matches(s.WorkerKey, _filterWorkerSummaries)
                 || Matches(s.RollupActivityLabel, _filterWorkerSummaries));
 
     private IQueryable<WorkerInstanceActivityDto> FilteredWorkerInstances =>
-        _snapshot is null
+        _snapshot is null || _snapshot.WorkerActivity is null
             ? Enumerable.Empty<WorkerInstanceActivityDto>().AsQueryable()
             : _snapshot.WorkerActivity.Instances.AsQueryable().Where(i =>
                 Matches(i.HostName, _filterWorkerInstances)
