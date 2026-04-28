@@ -96,8 +96,16 @@ services:
       ASPNETCORE_URLS: http://+:8080
       # Container only serves HTTP on 8080; skip HTTPS redirect/HSTS so browsers are not sent to https:// on this port.
       Nightmare__ListenPlainHttp: "true"
+      # GET /api/diagnostics/self (JSON). Set Nightmare__Diagnostics__ApiKey and send header X-Nightmare-Diagnostics-Key when exposing publicly.
+      Nightmare__Diagnostics__Enabled: "true"
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy

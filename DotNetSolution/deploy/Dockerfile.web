@@ -9,12 +9,17 @@ RUN dotnet publish "src/NightmareV2.CommandCenter/NightmareV2.CommandCenter.cspr
     -c Release -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+ARG BUILD_SOURCE_STAMP=unknown
+ENV NIGHTMARE_BUILD_STAMP=${BUILD_SOURCE_STAMP}
 # Npgsql can dlopen Kerberos for Postgres auth negotiation; slim runtime image omits it by default.
+# curl: Docker HEALTHCHECK + manual probes.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
 COPY --from=build /app/publish .
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1
 ENTRYPOINT ["dotnet", "NightmareV2.CommandCenter.dll"]

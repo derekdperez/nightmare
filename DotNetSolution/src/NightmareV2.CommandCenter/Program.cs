@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using NightmareV2.Application.FileStore;
 using NightmareV2.CommandCenter;
 using NightmareV2.CommandCenter.Components;
+using NightmareV2.CommandCenter.Diagnostics;
 using NightmareV2.CommandCenter.Hubs;
 using NightmareV2.CommandCenter.Models;
 using NightmareV2.Contracts.Events;
@@ -68,6 +69,8 @@ app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages:
 if (!listenPlainHttp)
     app.UseHttpsRedirection();
 app.UseAntiforgery();
+
+DiagnosticsEndpoints.Map(app);
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
