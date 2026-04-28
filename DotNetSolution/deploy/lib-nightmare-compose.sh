@@ -7,6 +7,15 @@
 # Optional:
 #   NIGHTMARE_GIT_PULL=1   Run git pull --ff-only in ROOT before build.
 #   NIGHTMARE_NO_CACHE=1   Add docker compose build --no-cache (slowest, strongest cache bust).
+#   NIGHTMARE_DOCKER_USE_SUDO=1   Prefix docker with sudo (set by lib-install-deps.sh when the daemon socket is not user-accessible).
+
+nightmare_docker() {
+  if [[ "${NIGHTMARE_DOCKER_USE_SUDO:-}" == "1" ]]; then
+    sudo docker "$@"
+  else
+    docker "$@"
+  fi
+}
 
 nightmare_export_build_stamp() {
   local root="${1:-}"
@@ -36,10 +45,14 @@ nightmare_maybe_git_pull() {
 compose() {
   : "${ROOT:?ROOT must point to DotNetSolution root}"
   local cf="$ROOT/deploy/docker-compose.yml"
-  if docker compose version >/dev/null 2>&1; then
-    docker compose -f "$cf" "$@"
+  if nightmare_docker compose version >/dev/null 2>&1; then
+    nightmare_docker compose -f "$cf" "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose -f "$cf" "$@"
+    if [[ "${NIGHTMARE_DOCKER_USE_SUDO:-}" == "1" ]]; then
+      sudo docker-compose -f "$cf" "$@"
+    else
+      docker-compose -f "$cf" "$@"
+    fi
   else
     echo "Docker Compose is not available (need 'docker compose' or docker-compose)." >&2
     exit 1

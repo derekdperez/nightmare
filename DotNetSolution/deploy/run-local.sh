@@ -13,8 +13,10 @@
 # Optional environment (for "up" only):
 #   NIGHTMARE_GIT_PULL=1   git pull --ff-only before build
 #   NIGHTMARE_NO_CACHE=1   docker compose build --no-cache
+#   NIGHTMARE_SKIP_INSTALL=1   Do not auto-install Docker; fail if missing
 #
 # Requires: Docker Engine + Compose V2 ("docker compose") or V1 ("docker-compose").
+# On Linux, missing Docker/Compose is installed automatically (see deploy/lib-install-deps.sh).
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,11 +25,10 @@ cd "$ROOT"
 
 # shellcheck source=deploy/lib-nightmare-compose.sh
 source "$DEPLOY_DIR/lib-nightmare-compose.sh"
+# shellcheck source=deploy/lib-install-deps.sh
+source "$DEPLOY_DIR/lib-install-deps.sh"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required. Install Docker Engine, then re-run." >&2
-  exit 1
-fi
+nightmare_ensure_runtime_dependencies
 
 case "${1:-up}" in
   down)
