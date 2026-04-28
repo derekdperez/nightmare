@@ -18,8 +18,21 @@ public static class NightmareDbSchemaPatches
 
         await db.Database.ExecuteSqlRawAsync(
                 """
-                ALTER TABLE bus_journal
-                    ALTER COLUMN consumer_type TYPE character varying(512);
+                DO $patch$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public' AND table_name = 'bus_journal' AND column_name = 'consumer_type'
+                    ) THEN
+                        ALTER TABLE bus_journal ALTER COLUMN consumer_type TYPE character varying(512);
+                    ELSIF EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = 'public' AND table_name = 'bus_journal'
+                    ) THEN
+                        ALTER TABLE bus_journal ADD COLUMN consumer_type character varying(512);
+                    END IF;
+                END
+                $patch$;
                 """,
                 cancellationToken)
             .ConfigureAwait(false);

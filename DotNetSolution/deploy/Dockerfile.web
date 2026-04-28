@@ -9,6 +9,10 @@ RUN dotnet publish "src/NightmareV2.CommandCenter/NightmareV2.CommandCenter.cspr
     -c Release -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+# Npgsql can dlopen Kerberos for Postgres auth negotiation; slim runtime image omits it by default.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
