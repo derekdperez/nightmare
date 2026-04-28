@@ -12,7 +12,6 @@
 <h1>Operations</h1>
 
 <section class="panel">
-    <h2>Data overview</h2>
     @if (_overview is null)
     {
         <p>Loading summary…</p>
@@ -25,8 +24,8 @@
                 <div class="stat-value">@_overview.TotalTargets</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Total assets discovered</div>
-                <div class="stat-value">@_overview.TotalAssetsDiscovered</div>
+                <div class="stat-label">Total assets confirmed</div>
+                <div class="stat-value">@_overview.TotalAssetsConfirmed</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Total URL assets</div>
@@ -102,7 +101,7 @@
                 <input type="text" class="ops-filter" style="min-width:10rem" @bind="_filterDeleteKind" />
             </div>
             <div>
-                <label>Status (Discovered/Queued/Confirmed)</label>
+                <label>Status (Queued/Confirmed/NonExistent)</label>
                 <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteStatus" />
             </div>
             <div>
@@ -132,6 +131,15 @@
         </select>
         <button type="button" @onclick="ReloadAllAsync">Refresh now</button>
     </div>
+    <div class="row">
+        <label>Column filters</label>
+        <input type="text" class="ops-filter" placeholder="Kind" @bind="_filterKindCol" />
+        <input type="text" class="ops-filter" placeholder="Status" @bind="_filterStatusCol" />
+        <input type="text" class="ops-filter" placeholder="Raw" @bind="_filterRawCol" />
+        <input type="text" class="ops-filter" placeholder="Pipeline" @bind="_filterPipelineCol" />
+        <input type="text" class="ops-filter" placeholder="How found" @bind="_filterHowFoundCol" />
+        <button type="button" @onclick="ClearAssetFilters">Clear all filters</button>
+    </div>
     <NightmareDataGrid TGridItem="AssetGridRowDto"
                        Items="FilteredAssets"
                        @bind-SearchText="_filterAssets"
@@ -146,11 +154,61 @@
         <PropertyColumn Title="Kind" Property="@(a => a.Kind)" Sortable="true" />
         <PropertyColumn Title="Status" Property="@(a => a.LifecycleStatus)" Sortable="true" />
         <PropertyColumn Title="Depth" Property="@(a => a.Depth)" Sortable="true" />
-        <PropertyColumn Title="Raw" Property="@(a => a.RawValue)" Sortable="true" />
+        <TemplateColumn Title="Raw" Context="a" SortBy="@(GridSort<AssetGridRowDto>.ByAscending(x => x.RawValue))">
+            @{
+                var href = ToLiveHref(a);
+            }
+            @if (string.IsNullOrEmpty(href))
+            {
+                <span>@a.RawValue</span>
+            }
+            else
+            {
+                <a href="@href" target="_blank" rel="noopener noreferrer">@a.RawValue</a>
+            }
+        </TemplateColumn>
         <PropertyColumn Title="Pipeline" Property="@(a => a.DiscoveredBy)" Sortable="true" />
         <TemplateColumn Title="How found" Context="a" SortBy="@SortAssetDiscoveryContext">
             <span title="@a.DiscoveryContext">@(string.IsNullOrWhiteSpace(a.DiscoveryContext) ? "—" : a.DiscoveryContext)</span>
         </TemplateColumn>
+    </NightmareDataGrid>
+</section>
+
+<section class="panel">
+    <h2>Request Queue</h2>
+    <div class="row">
+        <label>Queue column filters</label>
+        <input type="text" class="ops-filter" placeholder="Kind" @bind="_filterQueueKindCol" />
+        <input type="text" class="ops-filter" placeholder="Raw" @bind="_filterQueueRawCol" />
+        <input type="text" class="ops-filter" placeholder="Pipeline" @bind="_filterQueuePipelineCol" />
+        <button type="button" @onclick="ClearQueueFilters">Clear all filters</button>
+    </div>
+    <NightmareDataGrid TGridItem="AssetGridRowDto"
+                       Items="FilteredRequestQueue"
+                       @bind-SearchText="_filterQueueSearch"
+                       SearchPlaceholder="Filter queue rows…"
+                       ScrollPreset="NightmareDataGridScrollPreset.Medium"
+                       Virtualize="true"
+                       ItemSize="40"
+                       ItemKey="@(a => a.Id)"
+                       OverscanCount="6"
+                       HostTabIndex="@(-1)">
+        <PropertyColumn Title="Discovered (UTC)" Property="@(a => a.DiscoveredAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
+        <PropertyColumn Title="Asset Kind" Property="@(a => a.Kind)" Sortable="true" />
+        <TemplateColumn Title="Raw value" Context="a" SortBy="@(GridSort<AssetGridRowDto>.ByAscending(x => x.RawValue))">
+            @{
+                var href = ToLiveHref(a);
+            }
+            @if (string.IsNullOrEmpty(href))
+            {
+                <span>@a.RawValue</span>
+            }
+            else
+            {
+                <a href="@href" target="_blank" rel="noopener noreferrer">@a.RawValue</a>
+            }
+        </TemplateColumn>
+        <PropertyColumn Title="Pipeline" Property="@(a => a.DiscoveredBy)" Sortable="true" />
     </NightmareDataGrid>
 </section>
 
@@ -161,6 +219,15 @@
     private OpsOverviewDto? _overview;
     private string _targetFilter = "";
     private string _filterAssets = "";
+    private string _filterKindCol = "";
+    private string _filterStatusCol = "";
+    private string _filterRawCol = "";
+    private string _filterPipelineCol = "";
+    private string _filterHowFoundCol = "";
+    private string _filterQueueSearch = "";
+    private string _filterQueueKindCol = "";
+    private string _filterQueueRawCol = "";
+    private string _filterQueuePipelineCol = "";
     private MaintenanceStatusDto? _maintenanceStatus;
     private string _maintenanceApiKey = "";
     private string _phraseClearTargets = "";
@@ -251,6 +318,24 @@
         {
             _assets.Clear();
         }
+    }
+
+    private void ClearAssetFilters()
+    {
+        _filterAssets = "";
+        _filterKindCol = "";
+        _filterStatusCol = "";
+        _filterRawCol = "";
+        _filterPipelineCol = "";
+        _filterHowFoundCol = "";
+    }
+
+    private void ClearQueueFilters()
+    {
+        _filterQueueSearch = "";
+        _filterQueueKindCol = "";
+        _filterQueueRawCol = "";
+        _filterQueuePipelineCol = "";
     }
 
     private async Task<HttpResponseMessage> MaintenancePostAsync<T>(string relativeUri, T body)
