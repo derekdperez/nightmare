@@ -46,15 +46,13 @@
         </div>
 
         <h3 class="subhead">Bus journal traffic</h3>
-        <table class="grid tight">
-            <thead>
-            <tr><th></th><th>Last 1 hour</th><th>Last 24 hours</th></tr>
-            </thead>
-            <tbody>
-            <tr><td>Publishes</td><td>@_snapshot.BusTraffic.PublishesLast1Hour</td><td>@_snapshot.BusTraffic.PublishesLast24Hours</td></tr>
-            <tr><td>Consumes</td><td>@_snapshot.BusTraffic.ConsumesLast1Hour</td><td>@_snapshot.BusTraffic.ConsumesLast24Hours</td></tr>
-            </tbody>
-        </table>
+        <div class="ops-qg-host short" tabindex="-1">
+            <QuickGrid Items="BusTrafficRows" Class="nightmare-qg" Theme="default">
+                <PropertyColumn Title="" Property="@(r => r.Label)" Sortable="true" />
+                <PropertyColumn Title="Last 1 hour" Property="@(r => r.LastHour)" Sortable="true" />
+                <PropertyColumn Title="Last 24 hours" Property="@(r => r.Last24Hours)" Sortable="true" />
+            </QuickGrid>
+        </div>
 
         <h3 class="subhead">Assets by root domain (top @(_snapshot.Assets.TopDomainsByAssetCount.Count))</h3>
         @if (_snapshot.Assets.TopDomainsByAssetCount.Count == 0)
@@ -63,30 +61,30 @@
         }
         else
         {
-            <div class="scroll short">
-                <table class="grid">
-                    <thead><tr><th>Root domain</th><th>Assets</th></tr></thead>
-                    <tbody>
-                    @foreach (var row in _snapshot.Assets.TopDomainsByAssetCount)
-                    {
-                        <tr><td class="clip"><code>@row.RootDomain</code></td><td>@row.Count</td></tr>
-                    }
-                    </tbody>
-                </table>
+            <div class="ops-qg-toolbar">
+                <input type="search" class="ops-filter" placeholder="Filter by domain…" @bind="_filterTopDomains" @bind:event="oninput" />
+            </div>
+            <div class="ops-qg-host short" tabindex="-1">
+                <QuickGrid Items="FilteredTopDomains" Class="nightmare-qg" Theme="default">
+                    <TemplateColumn Title="Root domain" Context="r" SortBy="@SortTopDomainByRoot">
+                        <code class="mono">@r.RootDomain</code>
+                    </TemplateColumn>
+                    <PropertyColumn Title="Assets" Property="@(r => r.Count)" Sortable="true" />
+                </QuickGrid>
             </div>
         }
 
         <h3 class="subhead">Assets by <code>discovered_by</code></h3>
-        <div class="scroll short">
-            <table class="grid">
-                <thead><tr><th>Discovered by</th><th>Count</th></tr></thead>
-                <tbody>
-                @foreach (var row in _snapshot.Assets.AssetsByDiscoveredBy)
-                {
-                    <tr><td class="clip"><code>@row.DiscoveredBy</code></td><td>@row.Count</td></tr>
-                }
-                </tbody>
-            </table>
+        <div class="ops-qg-toolbar">
+            <input type="search" class="ops-filter" placeholder="Filter by pipeline key…" @bind="_filterDiscoveredBy" @bind:event="oninput" />
+        </div>
+        <div class="ops-qg-host short" tabindex="-1">
+            <QuickGrid Items="FilteredDiscoveredBy" Class="nightmare-qg" Theme="default">
+                <TemplateColumn Title="Discovered by" Context="r" SortBy="@SortDiscoveredByPipeline">
+                    <code class="mono">@r.DiscoveredBy</code>
+                </TemplateColumn>
+                <PropertyColumn Title="Count" Property="@(r => r.Count)" Sortable="true" />
+            </QuickGrid>
         </div>
     }
 </section>
@@ -100,63 +98,54 @@
     else
     {
         <p class="muted">Per-worker bus consumes (journal) correlate to the MassTransit <strong>consumer</strong> CLR type recorded on each consume row. DB “assets attributed” counts rows by <code>discovered_by</code> (Spider uses <code>spider-worker</code>; HighValue workers mostly emit findings or child URLs, so those columns may stay low). Rabbit columns sum queues whose names match that worker (heuristic). <strong>Ready + unacked</strong> approximates messages waiting to be processed (incl. in-flight unacked).</p>
-        <table class="grid">
-            <thead>
-            <tr>
-                <th>Worker</th>
-                <th>Bus consumes<br/><span class="th-sub">1h / 24h</span></th>
-                <th>Last consume (UTC)</th>
-                <th>DB assets attributed<br/><span class="th-sub">1h / 24h</span></th>
-                <th>Rabbit ready / unacked</th>
-                <th>Matched queues</th>
-            </tr>
-            </thead>
-            <tbody>
-            @foreach (var m in _snapshot.WorkerMetrics)
-            {
-                <tr>
-                    <td><code>@m.WorkerKey</code></td>
-                    <td>@m.BusConsumesLast1Hour / @m.BusConsumesLast24Hours</td>
-                    <td class="small">@(m.LastConsumeUtc is { } t ? t.UtcDateTime.ToString("O") : "—")</td>
-                    <td>@m.DbAssetsAttributedLast1Hour / @m.DbAssetsAttributedLast24Hours</td>
-                    <td>
-                        @if (_snapshot.RabbitManagementAvailable)
-                        {
-                            <span>@m.RabbitMessagesReady / @m.RabbitMessagesUnacked</span>
-                        }
-                        else
-                        {
-                            <span class="muted">n/a</span>
-                        }
-                    </td>
-                    <td class="clip small">@(m.MatchedRabbitQueueNames.Count == 0 ? "—" : string.Join(", ", m.MatchedRabbitQueueNames))</td>
-                </tr>
-            }
-            </tbody>
-        </table>
+        <div class="ops-qg-toolbar">
+            <input type="search" class="ops-filter" placeholder="Filter workers, queues, timestamps…" @bind="_filterWorkerMetrics" @bind:event="oninput" />
+        </div>
+        <div class="ops-qg-host mid" tabindex="-1">
+            <QuickGrid Items="FilteredWorkerMetrics" Class="nightmare-qg" Theme="default">
+                <PropertyColumn Title="Worker" Property="@(m => m.WorkerKey)" Sortable="true" />
+                <TemplateColumn Title="Bus consumes 1h / 24h" Context="m" SortBy="@SortWorkerBus1h">
+                    @m.BusConsumesLast1Hour / @m.BusConsumesLast24Hours
+                </TemplateColumn>
+                <TemplateColumn Title="Last consume (UTC)" Context="m" SortBy="@SortWorkerLastConsume">
+                    @(m.LastConsumeUtc is { } t ? t.UtcDateTime.ToString("O") : "—")
+                </TemplateColumn>
+                <TemplateColumn Title="DB assets 1h / 24h" Context="m" SortBy="@SortWorkerDbAssets1h">
+                    @m.DbAssetsAttributedLast1Hour / @m.DbAssetsAttributedLast24Hours
+                </TemplateColumn>
+                <TemplateColumn Title="Rabbit ready / unacked" Context="m" SortBy="@SortWorkerRabbitReady">
+                    @if (_snapshot.RabbitManagementAvailable)
+                    {
+                        <span>@m.RabbitMessagesReady / @m.RabbitMessagesUnacked</span>
+                    }
+                    else
+                    {
+                        <span class="muted">n/a</span>
+                    }
+                </TemplateColumn>
+                <TemplateColumn Title="Matched queues" Context="m">
+                    @(m.MatchedRabbitQueueNames.Count == 0 ? "—" : string.Join(", ", m.MatchedRabbitQueueNames))
+                </TemplateColumn>
+            </QuickGrid>
+        </div>
 
         @if (_snapshot.RabbitManagementAvailable && _snapshot.RabbitQueues.Count > 0)
         {
             <h3 class="subhead">All Rabbit queues (management API)</h3>
-            <div class="scroll short">
-                <table class="grid">
-                    <thead>
-                    <tr><th>Queue</th><th>Msgs</th><th>Ready</th><th>Unacked</th><th>Consumers</th><th>Guess worker</th></tr>
-                    </thead>
-                    <tbody>
-                    @foreach (var q in _snapshot.RabbitQueues)
-                    {
-                        <tr>
-                            <td class="clip"><code>@q.Name</code></td>
-                            <td>@q.Messages</td>
-                            <td>@q.MessagesReady</td>
-                            <td>@q.MessagesUnacknowledged</td>
-                            <td>@q.Consumers</td>
-                            <td>@(q.LikelyWorkerKey ?? "—")</td>
-                        </tr>
-                    }
-                    </tbody>
-                </table>
+            <div class="ops-qg-toolbar">
+                <input type="search" class="ops-filter" placeholder="Filter queue name or worker…" @bind="_filterRabbitQueues" @bind:event="oninput" />
+            </div>
+            <div class="ops-qg-host vq mid" tabindex="-1">
+                <QuickGrid Items="FilteredRabbitQueues" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(q => q.Name)" OverscanCount="5">
+                    <TemplateColumn Title="Queue" Context="q" SortBy="@SortRabbitQueueName">
+                        <code class="mono">@q.Name</code>
+                    </TemplateColumn>
+                    <PropertyColumn Title="Msgs" Property="@(q => q.Messages)" Sortable="true" />
+                    <PropertyColumn Title="Ready" Property="@(q => q.MessagesReady)" Sortable="true" />
+                    <PropertyColumn Title="Unacked" Property="@(q => q.MessagesUnacknowledged)" Sortable="true" />
+                    <PropertyColumn Title="Consumers" Property="@(q => q.Consumers)" Sortable="true" />
+                    <PropertyColumn Title="Guess worker" Property="@(q => q.LikelyWorkerKey ?? "")" Sortable="true" />
+                </QuickGrid>
             </div>
         }
         else if (!_snapshot.RabbitManagementAvailable)
@@ -180,23 +169,22 @@
     else
     {
         <h3 class="subhead">By worker type</h3>
-        <table class="grid">
-            <thead>
-            <tr><th>Worker</th><th>Toggle</th><th>Instances (24h)</th><th>Last completed (UTC)</th><th>Roll-up status</th></tr>
-            </thead>
-            <tbody>
-            @foreach (var s in _snapshot.WorkerActivity.Summaries)
-            {
-                <tr>
-                    <td><code>@s.WorkerKey</code></td>
-                    <td>@(s.ToggleEnabled ? "on" : "off")</td>
-                    <td>@s.InstanceCount</td>
-                    <td>@(s.LastActivityUtc is { } t ? t.UtcDateTime.ToString("O") : "—")</td>
-                    <td>@s.RollupActivityLabel</td>
-                </tr>
-            }
-            </tbody>
-        </table>
+        <div class="ops-qg-toolbar">
+            <input type="search" class="ops-filter" placeholder="Filter worker or status…" @bind="_filterWorkerSummaries" @bind:event="oninput" />
+        </div>
+        <div class="ops-qg-host short" tabindex="-1">
+            <QuickGrid Items="FilteredWorkerSummaries" Class="nightmare-qg" Theme="default">
+                <PropertyColumn Title="Worker" Property="@(s => s.WorkerKey)" Sortable="true" />
+                <TemplateColumn Title="Toggle" Context="s" SortBy="@GridSort<WorkerKindSummaryDto>.ByAscending(s => s.ToggleEnabled)">
+                    @(s.ToggleEnabled ? "on" : "off")
+                </TemplateColumn>
+                <PropertyColumn Title="Instances (24h)" Property="@(s => s.InstanceCount)" Sortable="true" />
+                <TemplateColumn Title="Last completed (UTC)" Context="s" SortBy="@GridSort<WorkerKindSummaryDto>.ByDescending(s => s.LastActivityUtc)">
+                    @(s.LastActivityUtc is { } t ? t.UtcDateTime.ToString("O") : "—")
+                </TemplateColumn>
+                <PropertyColumn Title="Roll-up status" Property="@(s => s.RollupActivityLabel)" Sortable="true" />
+            </QuickGrid>
+        </div>
 
         <h3 class="subhead">By host &amp; consumer</h3>
         @if (_snapshot.WorkerActivity.Instances.Count == 0)
@@ -205,29 +193,26 @@
         }
         else
         {
-            <table class="grid">
-                <thead>
-                <tr>
-                    <th>Host</th><th>Worker</th><th>Consumer</th><th>Toggle</th><th>Status</th>
-                    <th>Last completed (UTC)</th><th>Message type</th><th>Last payload (truncated)</th>
-                </tr>
-                </thead>
-                <tbody>
-                @foreach (var i in _snapshot.WorkerActivity.Instances)
-                {
-                    <tr>
-                        <td class="clip"><code>@i.HostName</code></td>
-                        <td><code>@i.WorkerKind</code></td>
-                        <td class="clip"><code>@i.ConsumerShortName</code></td>
-                        <td>@(i.ToggleEnabled is null ? "—" : (i.ToggleEnabled.Value ? "on" : "off"))</td>
-                        <td>@i.ActivityLabel</td>
-                        <td>@i.LastCompletedAtUtc.UtcDateTime.ToString("O")</td>
-                        <td>@i.LastMessageType</td>
-                        <td class="clip mono">@i.LastPayloadPreview</td>
-                    </tr>
-                }
-                </tbody>
-            </table>
+            <div class="ops-qg-toolbar">
+                <input type="search" class="ops-filter" placeholder="Filter host, consumer, payload…" @bind="_filterWorkerInstances" @bind:event="oninput" />
+            </div>
+            <div class="ops-qg-host vq tall" tabindex="-1">
+                <QuickGrid Items="FilteredWorkerInstances" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40"
+                           ItemKey="@(i => string.Concat(i.HostName, "|", i.ConsumerShortName, "|", i.LastCompletedAtUtc.Ticks.ToString(), "|", i.LastMessageType))" OverscanCount="5">
+                    <PropertyColumn Title="Host" Property="@(i => i.HostName)" Sortable="true" />
+                    <PropertyColumn Title="Worker" Property="@(i => i.WorkerKind)" Sortable="true" />
+                    <PropertyColumn Title="Consumer" Property="@(i => i.ConsumerShortName)" Sortable="true" />
+                    <TemplateColumn Title="Toggle" Context="i" SortBy="@GridSort<WorkerInstanceActivityDto>.ByAscending(i => i.ToggleEnabled)">
+                        @(i.ToggleEnabled is null ? "—" : (i.ToggleEnabled.Value ? "on" : "off"))
+                    </TemplateColumn>
+                    <PropertyColumn Title="Status" Property="@(i => i.ActivityLabel)" Sortable="true" />
+                    <PropertyColumn Title="Last completed (UTC)" Property="@(i => i.LastCompletedAtUtc)" Format="O" Sortable="true" />
+                    <PropertyColumn Title="Message type" Property="@(i => i.LastMessageType)" Sortable="true" />
+                    <TemplateColumn Title="Last payload (truncated)" Context="i" SortBy="@GridSort<WorkerInstanceActivityDto>.ByAscending(i => i.LastPayloadPreview)">
+                        <span class="mono">@i.LastPayloadPreview</span>
+                    </TemplateColumn>
+                </QuickGrid>
+            </div>
         }
     }
 </section>
@@ -244,25 +229,22 @@
     }
     else
     {
-        <table class="grid">
-            <thead>
-            <tr><th>Key</th><th>Enabled</th><th>Updated (UTC)</th><th></th></tr>
-            </thead>
-            <tbody>
-            @foreach (var w in _snapshot.Workers)
-            {
-                <tr>
-                    <td><code>@w.WorkerKey</code></td>
-                    <td>@(w.IsEnabled ? "yes" : "no")</td>
-                    <td>@w.UpdatedAtUtc.UtcDateTime.ToString("u")</td>
-                    <td>
-                        <button type="button" disabled="@_busyWorkers" @onclick="() => SetWorkerAsync(w.WorkerKey, true)">Start</button>
-                        <button type="button" disabled="@_busyWorkers" @onclick="() => SetWorkerAsync(w.WorkerKey, false)">Stop</button>
-                    </td>
-                </tr>
-            }
-            </tbody>
-        </table>
+        <div class="ops-qg-toolbar">
+            <input type="search" class="ops-filter" placeholder="Filter worker key…" @bind="_filterWorkers" @bind:event="oninput" />
+        </div>
+        <div class="ops-qg-host short" tabindex="-1">
+            <QuickGrid Items="FilteredWorkers" Class="nightmare-qg" Theme="default">
+                <PropertyColumn Title="Key" Property="@(w => w.WorkerKey)" Sortable="true" />
+                <TemplateColumn Title="Enabled" Context="w" SortBy="@GridSort<WorkerSwitchDto>.ByAscending(w => w.IsEnabled)">
+                    @(w.IsEnabled ? "yes" : "no")
+                </TemplateColumn>
+                <PropertyColumn Title="Updated (UTC)" Property="@(w => w.UpdatedAtUtc)" Format="u" Sortable="true" />
+                <TemplateColumn Title="Actions" Context="w">
+                    <button type="button" disabled="@_busyWorkers" @onclick="@(() => SetWorkerAsync(w.WorkerKey, true))">Start</button>
+                    <button type="button" disabled="@_busyWorkers" @onclick="@(() => SetWorkerAsync(w.WorkerKey, false))">Stop</button>
+                </TemplateColumn>
+            </QuickGrid>
+        </div>
     }
 </section>
 
@@ -279,75 +261,54 @@
         </select>
         <button type="button" @onclick="ReloadAllAsync">Refresh now</button>
     </div>
-    <div class="scroll">
-        <table class="grid">
-            <thead>
-            <tr>
-                <th>Discovered (UTC)</th><th>Kind</th><th>Status</th><th>Depth</th><th>Raw</th><th>Pipeline</th><th>How found</th>
-            </tr>
-            </thead>
-            <tbody>
-            @foreach (var a in _assets)
-            {
-                <tr>
-                    <td>@a.DiscoveredAtUtc.UtcDateTime.ToString("u")</td>
-                    <td>@a.Kind</td>
-                    <td>@a.LifecycleStatus</td>
-                    <td>@a.Depth</td>
-                    <td class="clip">@a.RawValue</td>
-                    <td><code>@a.DiscoveredBy</code></td>
-                    <td class="clip small" title="@a.DiscoveryContext">@(string.IsNullOrWhiteSpace(a.DiscoveryContext) ? "—" : a.DiscoveryContext)</td>
-                </tr>
-            }
-            </tbody>
-        </table>
+    <div class="ops-qg-toolbar">
+        <input type="search" class="ops-filter" placeholder="Filter kind, status, raw URL, pipeline, how found…" @bind="_filterAssets" @bind:event="oninput" />
+    </div>
+    <div class="ops-qg-host vq tall" tabindex="-1">
+        <QuickGrid Items="FilteredAssets" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(a => a.Id)" OverscanCount="6">
+            <PropertyColumn Title="Discovered (UTC)" Property="@(a => a.DiscoveredAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="SortDirection.Descending" />
+            <PropertyColumn Title="Kind" Property="@(a => a.Kind)" Sortable="true" />
+            <PropertyColumn Title="Status" Property="@(a => a.LifecycleStatus)" Sortable="true" />
+            <PropertyColumn Title="Depth" Property="@(a => a.Depth)" Sortable="true" />
+            <PropertyColumn Title="Raw" Property="@(a => a.RawValue)" Sortable="true" />
+            <PropertyColumn Title="Pipeline" Property="@(a => a.DiscoveredBy)" Sortable="true" />
+            <TemplateColumn Title="How found" Context="a" SortBy="@GridSort<AssetGridRowDto>.ByAscending(a => a.DiscoveryContext)">
+                <span title="@a.DiscoveryContext">@(string.IsNullOrWhiteSpace(a.DiscoveryContext) ? "—" : a.DiscoveryContext)</span>
+            </TemplateColumn>
+        </QuickGrid>
     </div>
 </section>
 
 <section class="panel">
     <h2>Event bus (live — recent publishes)</h2>
-    <div class="scroll tall">
-        <table class="grid">
-            <thead>
-            <tr><th>Time (UTC)</th><th>Type</th><th>Host</th><th>Payload (truncated)</th></tr>
-            </thead>
-            <tbody>
-            @foreach (var e in _liveBus)
-            {
-                <tr>
-                    <td>@e.OccurredAtUtc.UtcDateTime.ToString("O")</td>
-                    <td>@e.MessageType</td>
-                    <td class="clip"><code>@e.HostName</code></td>
-                    <td class="clip mono">@e.PayloadJson</td>
-                </tr>
-            }
-            </tbody>
-        </table>
+    <div class="ops-qg-toolbar">
+        <input type="search" class="ops-filter" placeholder="Filter type, host, payload…" @bind="_filterLiveBus" @bind:event="oninput" />
+    </div>
+    <div class="ops-qg-host vq tall" tabindex="-1">
+        <QuickGrid Items="FilteredLiveBus" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(e => e.Id)" OverscanCount="5">
+            <PropertyColumn Title="Time (UTC)" Property="@(e => e.OccurredAtUtc)" Format="O" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="SortDirection.Descending" />
+            <PropertyColumn Title="Type" Property="@(e => e.MessageType)" Sortable="true" />
+            <PropertyColumn Title="Host" Property="@(e => e.HostName)" Sortable="true" />
+            <PropertyColumn Title="Payload (truncated)" Property="@(e => e.PayloadJson)" Sortable="true" />
+        </QuickGrid>
     </div>
 </section>
 
 <section class="panel">
     <h2>Historic bus journal</h2>
-    <div class="scroll tall">
-        <table class="grid">
-            <thead>
-            <tr><th>Id</th><th>Dir</th><th>Time (UTC)</th><th>Type</th><th>Consumer</th><th>Host</th><th>Payload (truncated)</th></tr>
-            </thead>
-            <tbody>
-            @foreach (var e in _historyBus)
-            {
-                <tr>
-                    <td>@e.Id</td>
-                    <td>@e.Direction</td>
-                    <td>@e.OccurredAtUtc.UtcDateTime.ToString("O")</td>
-                    <td>@e.MessageType</td>
-                    <td class="clip">@e.ConsumerType</td>
-                    <td class="clip"><code>@e.HostName</code></td>
-                    <td class="clip mono">@e.PayloadJson</td>
-                </tr>
-            }
-            </tbody>
-        </table>
+    <div class="ops-qg-toolbar">
+        <input type="search" class="ops-filter" placeholder="Filter id, direction, type, host, payload…" @bind="_filterHistoryBus" @bind:event="oninput" />
+    </div>
+    <div class="ops-qg-host vq tall" tabindex="-1">
+        <QuickGrid Items="FilteredHistoryBus" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(e => e.Id)" OverscanCount="5">
+            <PropertyColumn Title="Id" Property="@(e => e.Id)" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="SortDirection.Descending" />
+            <PropertyColumn Title="Dir" Property="@(e => e.Direction)" Sortable="true" />
+            <PropertyColumn Title="Time (UTC)" Property="@(e => e.OccurredAtUtc)" Format="O" Sortable="true" />
+            <PropertyColumn Title="Type" Property="@(e => e.MessageType)" Sortable="true" />
+            <PropertyColumn Title="Consumer" Property="@(e => e.ConsumerType)" Sortable="true" />
+            <PropertyColumn Title="Host" Property="@(e => e.HostName)" Sortable="true" />
+            <PropertyColumn Title="Payload (truncated)" Property="@(e => e.PayloadJson)" Sortable="true" />
+        </QuickGrid>
     </div>
 </section>
 

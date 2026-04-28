@@ -1,10 +1,61 @@
+using System.Globalization;
 using System.Linq;
+using Microsoft.AspNetCore.Components.QuickGrid;
 using NightmareV2.CommandCenter.Models;
 
 namespace NightmareV2.CommandCenter.Components.Pages;
 
 public partial class Ops
 {
+    private static readonly GridSort<AssetCountByDomainDto> SortTopDomainByRoot =
+        GridSort<AssetCountByDomainDto>.ByAscending(static r => r.RootDomain);
+
+    private static readonly GridSort<DiscoveredByCountDto> SortDiscoveredByPipeline =
+        GridSort<DiscoveredByCountDto>.ByAscending(static r => r.DiscoveredBy);
+
+    private static readonly GridSort<WorkerDetailStatsDto> SortWorkerBus1h =
+        GridSort<WorkerDetailStatsDto>.ByDescending(static m => m.BusConsumesLast1Hour);
+
+    private static readonly GridSort<WorkerDetailStatsDto> SortWorkerLastConsume =
+        GridSort<WorkerDetailStatsDto>.ByDescending(static m => m.LastConsumeUtc);
+
+    private static readonly GridSort<WorkerDetailStatsDto> SortWorkerDbAssets1h =
+        GridSort<WorkerDetailStatsDto>.ByDescending(static m => m.DbAssetsAttributedLast1Hour);
+
+    private static readonly GridSort<WorkerDetailStatsDto> SortWorkerRabbitReady =
+        GridSort<WorkerDetailStatsDto>.ByDescending(static m => m.RabbitMessagesReady);
+
+    private static readonly GridSort<RabbitQueueBriefDto> SortRabbitQueueName =
+        GridSort<RabbitQueueBriefDto>.ByAscending(static q => q.Name);
+
+    private static readonly GridSort<WorkerKindSummaryDto> SortWorkerSummaryToggle =
+        GridSort<WorkerKindSummaryDto>.ByAscending(static s => s.ToggleEnabled);
+
+    private static readonly GridSort<WorkerKindSummaryDto> SortWorkerSummaryLastActivity =
+        GridSort<WorkerKindSummaryDto>.ByDescending(static s => s.LastActivityUtc);
+
+    private static readonly GridSort<WorkerInstanceActivityDto> SortInstanceToggle =
+        GridSort<WorkerInstanceActivityDto>.ByAscending(static i => i.ToggleEnabled);
+
+    private static readonly GridSort<WorkerInstanceActivityDto> SortInstancePayload =
+        GridSort<WorkerInstanceActivityDto>.ByAscending(static i => i.LastPayloadPreview);
+
+    private static readonly GridSort<WorkerSwitchDto> SortWorkerSwitchEnabled =
+        GridSort<WorkerSwitchDto>.ByAscending(static w => w.IsEnabled);
+
+    private static readonly GridSort<AssetGridRowDto> SortAssetDiscoveryContext =
+        GridSort<AssetGridRowDto>.ByAscending(static a => a.DiscoveryContext);
+
+    private static string InstanceRowKey(WorkerInstanceActivityDto i) =>
+        string.Concat(
+            i.HostName,
+            "|",
+            i.ConsumerShortName,
+            "|",
+            i.LastCompletedAtUtc.Ticks.ToString(CultureInfo.InvariantCulture),
+            "|",
+            i.LastMessageType);
+
     private sealed record TrafficRow(string Label, long LastHour, long Last24Hours);
 
     private string _filterTopDomains = "";
@@ -42,7 +93,8 @@ public partial class Ops
             ? Enumerable.Empty<WorkerDetailStatsDto>().AsQueryable()
             : _snapshot.WorkerMetrics.AsQueryable().Where(m =>
                 Matches(m.WorkerKey, _filterWorkerMetrics)
-                || Matches(m.LastConsumeUtc?.UtcDateTime.ToString("O"), _filterWorkerMetrics)
+                || (m.LastConsumeUtc != null
+                    && Matches(m.LastConsumeUtc.GetValueOrDefault().UtcDateTime.ToString("O", CultureInfo.InvariantCulture), _filterWorkerMetrics))
                 || Matches(string.Join(' ', m.MatchedRabbitQueueNames), _filterWorkerMetrics));
 
     private IQueryable<RabbitQueueBriefDto> FilteredRabbitQueues =>
@@ -97,7 +149,7 @@ public partial class Ops
             || Matches(e.ConsumerType, _filterHistoryBus)
             || Matches(e.HostName, _filterHistoryBus)
             || Matches(e.PayloadJson, _filterHistoryBus)
-            || e.Id.ToString().Contains(_filterHistoryBus, StringComparison.OrdinalIgnoreCase));
+            || e.Id.ToString(CultureInfo.InvariantCulture).Contains(_filterHistoryBus, StringComparison.OrdinalIgnoreCase));
 
     private static bool Matches(string? value, string filter)
     {
