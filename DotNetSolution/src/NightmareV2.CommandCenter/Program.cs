@@ -632,7 +632,7 @@ app.MapGet(
                 .LongCountAsync(
                     a => a.Kind == AssetKind.Url
                         && a.DiscoveredBy == "spider-worker"
-                        && a.DiscoveryContext.StartsWith("Spider: link extracted from fetched page ", StringComparison.Ordinal),
+                        && EF.Functions.Like(a.DiscoveryContext, "Spider: link extracted from fetched page %"),
                     ct)
                 .ConfigureAwait(false);
 
@@ -640,15 +640,15 @@ app.MapGet(
                 .LongCountAsync(
                     a => a.Kind == AssetKind.Url
                         && a.DiscoveredBy == "spider-worker"
-                        && (a.DiscoveryContext.Contains(".js", StringComparison.OrdinalIgnoreCase)
-                            || a.DiscoveryContext.Contains("javascript", StringComparison.OrdinalIgnoreCase)),
+                        && (EF.Functions.ILike(a.DiscoveryContext, "%.js%")
+                            || EF.Functions.ILike(a.DiscoveryContext, "%javascript%")),
                     ct)
                 .ConfigureAwait(false);
 
             var urlsGuessedWithWordlist = await db.Assets.AsNoTracking()
                 .LongCountAsync(
                     a => a.Kind == AssetKind.Url
-                        && a.DiscoveredBy.StartsWith("hvpath:", StringComparison.OrdinalIgnoreCase),
+                        && EF.Functions.ILike(a.DiscoveredBy, "hvpath:%"),
                     ct)
                 .ConfigureAwait(false);
 
