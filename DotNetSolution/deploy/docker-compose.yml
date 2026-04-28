@@ -15,6 +15,20 @@ x-common-env: &common-env
   RabbitMq__VirtualHost: /
   RabbitMq__ManagementUrl: http://rabbitmq:15672
 
+configs:
+  # Avoid bind-mounting ./deploy/postgres/*.sql into postgres (wrong CWD → Docker creates a directory
+  # at the mount path and Postgres init fails with exit 1). This job runs after Postgres is healthy.
+  filestore_db_init_sh:
+    content: |
+      #!/bin/sh
+      set -eu
+      COUNT="$(psql -h postgres -U nightmare -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = 'nightmare_v2_files'" | tr -d '[:space:]')"
+      if [ "${COUNT:-0}" -ge 1 ]; then
+        echo "nightmare_v2_files already exists; nothing to do."
+        exit 0
+      fi
+      psql -h postgres -U nightmare -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE nightmare_v2_files OWNER nightmare;"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -24,7 +38,6 @@ services:
       POSTGRES_DB: nightmare_v2
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/init-02-filestore-db.sql:/docker-entrypoint-initdb.d/02-filestore-db.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -33,6 +46,19 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  filestore-db-init:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: nightmare
+    configs:
+      - source: filestore_db_init_sh
+        target: /run/filestore-db-init.sh
+    entrypoint: ["/bin/sh", "/run/filestore-db-init.sh"]
+    restart: "no"
 
   redis:
     image: redis:7-alpine
@@ -73,6 +99,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      filestore-db-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       rabbitmq:
