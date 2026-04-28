@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using NightmareV2.Contracts;
 using NightmareV2.Domain.Entities;
 
 namespace NightmareV2.Infrastructure.Data;
@@ -68,16 +67,14 @@ public static class NightmareDbSchemaPatches
                 cancellationToken)
             .ConfigureAwait(false);
 
-        await BackfillWordlistUrlAssetsQueuedAsync(db, cancellationToken).ConfigureAwait(false);
+        await BackfillLegacyDiscoveredAssetsAsync(db, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Existing rows from high-value path wordlist used to be persisted as Discovered.</summary>
-    private static async Task BackfillWordlistUrlAssetsQueuedAsync(NightmareDbContext db, CancellationToken cancellationToken)
+    /// <summary>Normalize legacy statuses after introducing Queued as the default initial status.</summary>
+    private static async Task BackfillLegacyDiscoveredAssetsAsync(NightmareDbContext db, CancellationToken cancellationToken)
     {
         await db.Assets
-            .Where(a => a.Kind == AssetKind.Url
-                && a.LifecycleStatus == AssetLifecycleStatus.Discovered
-                && a.DiscoveredBy.ToLower().StartsWith("hvpath:"))
+            .Where(a => a.LifecycleStatus == "Discovered")
             .ExecuteUpdateAsync(
                 s => s.SetProperty(a => a.LifecycleStatus, AssetLifecycleStatus.Queued),
                 cancellationToken)

@@ -18,7 +18,7 @@ public class StoredAsset
     public DateTimeOffset DiscoveredAtUtc { get; set; }
 
     /// <summary><see cref="AssetLifecycleStatus"/> values.</summary>
-    public string LifecycleStatus { get; set; } = AssetLifecycleStatus.Discovered;
+    public string LifecycleStatus { get; set; } = AssetLifecycleStatus.Queued;
 
     /// <summary>Type-specific payload (URL fetch request/response, timings, etc.).</summary>
     public string? TypeDetailsJson { get; set; }

@@ -106,7 +106,7 @@ internal static class OpsSnapshotBuilder
             .FirstOrDefaultAsync(ct)
             .ConfigureAwait(false);
 
-        var discoveredCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Discovered, ct)
+        var discoveredCount = await assets.LongCountAsync(a => a.LifecycleStatus == "Discovered", ct)
             .ConfigureAwait(false);
         var queuedCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Queued, ct)
             .ConfigureAwait(false);
@@ -114,7 +114,7 @@ internal static class OpsSnapshotBuilder
             .ConfigureAwait(false);
 
         var fetchableDiscovered = await assets.LongCountAsync(
-                a => (a.LifecycleStatus == AssetLifecycleStatus.Discovered
+                a => (a.LifecycleStatus == "Discovered"
                         || a.LifecycleStatus == AssetLifecycleStatus.Queued)
                     && (a.Kind == AssetKind.Url
                         || a.Kind == AssetKind.ApiEndpoint
