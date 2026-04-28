@@ -18,7 +18,7 @@
     }
     else
     {
-        <p class="muted">Counts are from Postgres (<code>stored_assets</code>, <code>recon_targets</code>, <code>bus_journal</code>). Rabbit queue depth requires <code>RabbitMq:ManagementUrl</code> (set in Docker compose).</p>
+        <p class="muted">Counts are from Postgres (<code>stored_assets</code>, <code>recon_targets</code>, <code>bus_journal</code>, <code>high_value_findings</code>). Rabbit queue depth requires <code>RabbitMq:ManagementUrl</code> (set in Docker compose).</p>
         <div class="stat-grid">
             <div class="stat-card">
                 <div class="stat-label">Total assets</div>
@@ -43,6 +43,51 @@
             <div class="stat-card">
                 <div class="stat-label">Fetchable still “Discovered”</div>
                 <div class="stat-value" title="URL-like kinds not yet confirmed (often waiting on Spider / queue)">@_snapshot.Assets.FetchableAssetsStillDiscovered</div>
+            </div>
+        </div>
+
+        <h3 class="subhead">Asset inventory</h3>
+        <p class="muted">By <code>stored_assets.kind</code> and lifecycle. <strong>URLs</strong> = <code>AssetKind.Url</code> only. <strong>HTTP pipeline</strong> adds API, JS, and markdown URL assets Spider may fetch. <strong>HTTP snapshots saved</strong> = rows with non-empty <code>type_details_json</code> (captured request/response from confirmation).</p>
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-label">Subdomains</div>
+                <div class="stat-value">@_snapshot.Assets.SubdomainsTotal</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Root domains</div>
+                <div class="stat-value">@_snapshot.Assets.DomainsTotal</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">IP addresses</div>
+                <div class="stat-value">@_snapshot.Assets.IpAddressesTotal</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Open ports</div>
+                <div class="stat-value">@_snapshot.Assets.OpenPortsTotal</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">URLs discovered</div>
+                <div class="stat-value" title="AssetKind.Url">@_snapshot.Assets.UrlsTotal</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">URLs confirmed</div>
+                <div class="stat-value" title="AssetKind.Url with lifecycle Confirmed">@_snapshot.Assets.UrlsConfirmed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">HTTP pipeline (all)</div>
+                <div class="stat-value" title="Url, ApiEndpoint, JavaScriptFile, MarkdownBody">@_snapshot.Assets.HttpPipelineAssetsTotal</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">HTTP pipeline confirmed</div>
+                <div class="stat-value">@_snapshot.Assets.HttpPipelineAssetsConfirmed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">HTTP snapshots saved</div>
+                <div class="stat-value" title="Non-empty type_details_json (request/response capture)">@_snapshot.Assets.HttpSnapshotsSaved</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">High-value findings</div>
+                <div class="stat-value">@_snapshot.Assets.HighValueFindingsTotal</div>
             </div>
         </div>
 

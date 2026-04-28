@@ -61,6 +61,16 @@ public sealed record AssetOpsSummaryDto(
     long AssetsInDiscoveredState,
     long AssetsConfirmedState,
     long FetchableAssetsStillDiscovered,
+    long SubdomainsTotal,
+    long DomainsTotal,
+    long IpAddressesTotal,
+    long UrlsTotal,
+    long UrlsConfirmed,
+    long HttpPipelineAssetsTotal,
+    long HttpPipelineAssetsConfirmed,
+    long HttpSnapshotsSaved,
+    long OpenPortsTotal,
+    long HighValueFindingsTotal,
     IReadOnlyList<AssetCountByDomainDto> TopDomainsByAssetCount,
     IReadOnlyList<DiscoveredByCountDto> AssetsByDiscoveredBy);
 

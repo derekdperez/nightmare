@@ -92,25 +92,24 @@ internal static class OpsSnapshotBuilder
         DateTimeOffset h24,
         CancellationToken ct)
     {
-        var totalAssets = await db.Assets.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+        // Single DbContext: run queries sequentially (EF Core is not safe for concurrent ops on one context).
+        var assets = db.Assets.AsNoTracking();
+        var totalAssets = await assets.LongCountAsync(ct).ConfigureAwait(false);
         var totalTargets = await db.Targets.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
-        var assets1h = await db.Assets.AsNoTracking().LongCountAsync(a => a.DiscoveredAtUtc >= h1, ct).ConfigureAwait(false);
-        var assets24h = await db.Assets.AsNoTracking().LongCountAsync(a => a.DiscoveredAtUtc >= h24, ct).ConfigureAwait(false);
-        var lastAssetUtc = await db.Assets.AsNoTracking()
+        var assets1h = await assets.LongCountAsync(a => a.DiscoveredAtUtc >= h1, ct).ConfigureAwait(false);
+        var assets24h = await assets.LongCountAsync(a => a.DiscoveredAtUtc >= h24, ct).ConfigureAwait(false);
+        var lastAssetUtc = await assets
             .OrderByDescending(a => a.DiscoveredAtUtc)
             .Select(a => (DateTimeOffset?)a.DiscoveredAtUtc)
             .FirstOrDefaultAsync(ct)
             .ConfigureAwait(false);
 
-        var discoveredCount = await db.Assets.AsNoTracking()
-            .LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Discovered, ct)
+        var discoveredCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Discovered, ct)
             .ConfigureAwait(false);
-        var confirmedCount = await db.Assets.AsNoTracking()
-            .LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Confirmed, ct)
+        var confirmedCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Confirmed, ct)
             .ConfigureAwait(false);
 
-        var fetchableDiscovered = await db.Assets.AsNoTracking()
-            .LongCountAsync(
+        var fetchableDiscovered = await assets.LongCountAsync(
                 a => a.LifecycleStatus == AssetLifecycleStatus.Discovered
                     && (a.Kind == AssetKind.Url
                         || a.Kind == AssetKind.ApiEndpoint
@@ -121,7 +120,37 @@ internal static class OpsSnapshotBuilder
                 ct)
             .ConfigureAwait(false);
 
-        var topDomains = await db.Assets.AsNoTracking()
+        var subdomainsTotal = await assets.LongCountAsync(a => a.Kind == AssetKind.Subdomain, ct).ConfigureAwait(false);
+        var domainsTotal = await assets.LongCountAsync(a => a.Kind == AssetKind.Domain, ct).ConfigureAwait(false);
+        var ipAddressesTotal = await assets.LongCountAsync(a => a.Kind == AssetKind.IpAddress, ct).ConfigureAwait(false);
+        var urlsTotal = await assets.LongCountAsync(a => a.Kind == AssetKind.Url, ct).ConfigureAwait(false);
+        var urlsConfirmed = await assets.LongCountAsync(
+                a => a.Kind == AssetKind.Url && a.LifecycleStatus == AssetLifecycleStatus.Confirmed,
+                ct)
+            .ConfigureAwait(false);
+        var httpPipelineTotal = await assets.LongCountAsync(
+                a => a.Kind == AssetKind.Url
+                    || a.Kind == AssetKind.ApiEndpoint
+                    || a.Kind == AssetKind.JavaScriptFile
+                    || a.Kind == AssetKind.MarkdownBody,
+                ct)
+            .ConfigureAwait(false);
+        var httpPipelineConfirmed = await assets.LongCountAsync(
+                a => (a.Kind == AssetKind.Url
+                        || a.Kind == AssetKind.ApiEndpoint
+                        || a.Kind == AssetKind.JavaScriptFile
+                        || a.Kind == AssetKind.MarkdownBody)
+                    && a.LifecycleStatus == AssetLifecycleStatus.Confirmed,
+                ct)
+            .ConfigureAwait(false);
+        var httpSnapshotsSaved = await assets.LongCountAsync(
+                a => a.TypeDetailsJson != null && a.TypeDetailsJson != "",
+                ct)
+            .ConfigureAwait(false);
+        var openPortsTotal = await assets.LongCountAsync(a => a.Kind == AssetKind.OpenPort, ct).ConfigureAwait(false);
+        var highValueFindingsTotal = await db.HighValueFindings.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+
+        var topDomains = await assets
             .Join(
                 db.Targets.AsNoTracking(),
                 a => a.TargetId,
@@ -134,7 +163,7 @@ internal static class OpsSnapshotBuilder
             .ToListAsync(ct)
             .ConfigureAwait(false);
 
-        var byDiscoveredBy = await db.Assets.AsNoTracking()
+        var byDiscoveredBy = await assets
             .GroupBy(a => a.DiscoveredBy)
             .Select(g => new DiscoveredByCountDto(g.Key, g.LongCount()))
             .OrderByDescending(x => x.Count)
@@ -150,6 +179,16 @@ internal static class OpsSnapshotBuilder
             discoveredCount,
             confirmedCount,
             fetchableDiscovered,
+            subdomainsTotal,
+            domainsTotal,
+            ipAddressesTotal,
+            urlsTotal,
+            urlsConfirmed,
+            httpPipelineTotal,
+            httpPipelineConfirmed,
+            httpSnapshotsSaved,
+            openPortsTotal,
+            highValueFindingsTotal,
             topDomains,
             byDiscoveredBy);
     }
