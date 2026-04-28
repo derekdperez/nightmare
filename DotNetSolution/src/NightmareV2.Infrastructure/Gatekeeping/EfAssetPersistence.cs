@@ -91,7 +91,18 @@ public sealed class EfAssetPersistence(
     {
         var json = JsonSerializer.Serialize(snapshot, JsonOpts);
         var isHttpSuccess = snapshot.StatusCode is >= 200 and < 300;
-        if (isHttpSuccess)
+        var isSoft404 = isHttpSuccess && UrlFetchClassifier.LooksLikeSoft404(snapshot);
+
+        if (isSoft404)
+        {
+            logger.LogDebug(
+                "URL asset {AssetId} returned HTTP {StatusCode} but response body looks like a 404/not-found error; leaving unconfirmed.",
+                assetId,
+                snapshot.StatusCode);
+        }
+
+        var isConfirmedResponse = isHttpSuccess && !isSoft404;
+        if (isConfirmedResponse)
         {
             await db.Assets
                 .Where(a => a.Id == assetId)
@@ -118,7 +129,7 @@ public sealed class EfAssetPersistence(
         if (meta is null)
             return;
 
-        if (!isHttpSuccess)
+        if (!isConfirmedResponse)
             return;
 
         try

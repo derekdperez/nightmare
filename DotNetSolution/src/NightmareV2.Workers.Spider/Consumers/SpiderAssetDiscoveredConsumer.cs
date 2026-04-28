@@ -78,10 +78,12 @@ public sealed class SpiderAssetDiscoveredConsumer(
             DateTimeOffset.UtcNow,
             response.RequestMessage?.RequestUri?.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped));
 
+        var isSoft404 = UrlFetchClassifier.LooksLikeSoft404(snapshot);
+
         await persistence.ConfirmUrlAssetAsync(assetId, snapshot, m.CorrelationId, context.CancellationToken)
             .ConfigureAwait(false);
 
-        if (!response.IsSuccessStatusCode)
+        if (!response.IsSuccessStatusCode || isSoft404)
             return;
 
         var ct = contentType ?? "";

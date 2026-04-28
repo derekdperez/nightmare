@@ -1,6 +1,7 @@
 @page "/ops"
 @rendermode InteractiveServer
 @using System.Net.Http.Json
+@using NightmareV2.CommandCenter.DataMaintenance
 @using NightmareV2.CommandCenter.Models
 @using static Microsoft.AspNetCore.Components.QuickGrid.SortDirection
 @implements IDisposable
@@ -61,6 +62,65 @@
 
 <section class="panel">
     <h2>Assets</h2>
+    @if (_maintenanceStatus is { Enabled: true })
+    {
+        <div class="row" style="align-items:flex-end">
+            @if (_maintenanceStatus.ApiKeyConfigured)
+            {
+                <div>
+                    <label>Maintenance API key</label>
+                    <input type="password" class="ops-filter" style="min-width:16rem" @bind="_maintenanceApiKey" autocomplete="off" />
+                </div>
+            }
+            <div>
+                <label>Confirm all-target delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:16rem" @bind="_phraseClearTargets" placeholder="@DataMaintenanceEndpoints.PhraseClearAllTargets" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAllTargetsAsync">Delete all targets</button>
+        </div>
+        <div class="row" style="align-items:flex-end">
+            <div>
+                <label>Confirm all-assets delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:16rem" @bind="_phraseClearAssets" placeholder="@DataMaintenanceEndpoints.PhraseClearAllAssets" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAllAssetsAsync">Delete all assets</button>
+        </div>
+        <div class="row" style="align-items:flex-end">
+            <div>
+                <label>Domain root</label>
+                <input type="text" class="ops-filter" style="min-width:12rem" @bind="_phraseClearDomainRoot" placeholder="example.com" />
+            </div>
+            <div>
+                <label>Confirm domain delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:18rem" @bind="_phraseClearDomain" placeholder="@DataMaintenanceEndpoints.PhraseClearAssetsForDomain" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsForDomainAsync">Delete assets for domain</button>
+        </div>
+        <div class="row" style="align-items:flex-end">
+            <div>
+                <label>Asset kind (e.g. Url)</label>
+                <input type="text" class="ops-filter" style="min-width:10rem" @bind="_filterDeleteKind" />
+            </div>
+            <div>
+                <label>Status (Discovered/Queued/Confirmed)</label>
+                <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteStatus" />
+            </div>
+            <div>
+                <label>Found by contains</label>
+                <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteDiscoveredBy" />
+            </div>
+            <div>
+                <label>Confirm filtered delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:18rem" @bind="_phraseClearFiltered" placeholder="@DataMaintenanceEndpoints.PhraseClearAssetsFiltered" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsFilteredAsync">Delete filtered assets</button>
+        </div>
+        @if (!string.IsNullOrWhiteSpace(_maintenanceMessage))
+        {
+            <p class="muted">@_maintenanceMessage</p>
+        }
+    }
+
     <div class="row">
         <label>Target filter</label>
         <select @bind="_targetFilter" @bind:after="ReloadAssetsAsync">
@@ -101,6 +161,18 @@
     private OpsOverviewDto? _overview;
     private string _targetFilter = "";
     private string _filterAssets = "";
+    private MaintenanceStatusDto? _maintenanceStatus;
+    private string _maintenanceApiKey = "";
+    private string _phraseClearTargets = "";
+    private string _phraseClearAssets = "";
+    private string _phraseClearDomain = "";
+    private string _phraseClearDomainRoot = "";
+    private string _phraseClearFiltered = "";
+    private string _filterDeleteKind = "";
+    private string _filterDeleteStatus = "";
+    private string _filterDeleteDiscoveredBy = "";
+    private string _maintenanceMessage = "";
+    private bool _maintenanceBusy;
 
     protected override async Task OnInitializedAsync()
     {
@@ -155,6 +227,14 @@
 
         await ReloadAssetsAsync().ConfigureAwait(false);
         await ReloadVolatileAsync().ConfigureAwait(false);
+        try
+        {
+            _maintenanceStatus = await Http.GetFromJsonAsync<MaintenanceStatusDto>("/api/maintenance/status").ConfigureAwait(false);
+        }
+        catch
+        {
+            _maintenanceStatus = null;
+        }
     }
 
     private async Task ReloadAssetsAsync()
@@ -170,6 +250,99 @@
         catch
         {
             _assets.Clear();
+        }
+    }
+
+    private async Task<HttpResponseMessage> MaintenancePostAsync<T>(string relativeUri, T body)
+    {
+        using var msg = new HttpRequestMessage(HttpMethod.Post, relativeUri);
+        var key = _maintenanceApiKey.Trim();
+        if (!string.IsNullOrEmpty(key))
+            msg.Headers.TryAddWithoutValidation("X-Nightmare-Maintenance-Key", key);
+        msg.Content = JsonContent.Create(body);
+        return await Http.SendAsync(msg).ConfigureAwait(false);
+    }
+
+    private async Task ClearAllTargetsAsync()
+    {
+        _maintenanceBusy = true;
+        _maintenanceMessage = "";
+        try
+        {
+            var resp = await MaintenancePostAsync(
+                "/api/maintenance/clear-all-targets",
+                new MaintenancePhraseBody(_phraseClearTargets.Trim())).ConfigureAwait(false);
+            var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            _maintenanceMessage = resp.IsSuccessStatusCode ? $"Deleted targets: {txt}" : $"Delete targets failed ({(int)resp.StatusCode}): {txt}";
+            if (resp.IsSuccessStatusCode)
+                await ReloadAllAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _maintenanceBusy = false;
+        }
+    }
+
+    private async Task ClearAllAssetsAsync()
+    {
+        _maintenanceBusy = true;
+        _maintenanceMessage = "";
+        try
+        {
+            var resp = await MaintenancePostAsync(
+                "/api/maintenance/clear-all-assets",
+                new MaintenancePhraseBody(_phraseClearAssets.Trim())).ConfigureAwait(false);
+            var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            _maintenanceMessage = resp.IsSuccessStatusCode ? $"Deleted assets: {txt}" : $"Delete assets failed ({(int)resp.StatusCode}): {txt}";
+            if (resp.IsSuccessStatusCode)
+                await ReloadAllAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _maintenanceBusy = false;
+        }
+    }
+
+    private async Task ClearAssetsForDomainAsync()
+    {
+        _maintenanceBusy = true;
+        _maintenanceMessage = "";
+        try
+        {
+            var resp = await MaintenancePostAsync(
+                "/api/maintenance/clear-assets-for-domain",
+                new MaintenanceClearDomainBody(_phraseClearDomainRoot.Trim(), _phraseClearDomain.Trim())).ConfigureAwait(false);
+            var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            _maintenanceMessage = resp.IsSuccessStatusCode ? $"Deleted domain assets: {txt}" : $"Delete domain assets failed ({(int)resp.StatusCode}): {txt}";
+            if (resp.IsSuccessStatusCode)
+                await ReloadAllAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _maintenanceBusy = false;
+        }
+    }
+
+    private async Task ClearAssetsFilteredAsync()
+    {
+        _maintenanceBusy = true;
+        _maintenanceMessage = "";
+        try
+        {
+            var body = new MaintenanceClearAssetsFilteredBody(
+                _phraseClearFiltered.Trim(),
+                string.IsNullOrWhiteSpace(_filterDeleteKind) ? null : _filterDeleteKind.Trim(),
+                string.IsNullOrWhiteSpace(_filterDeleteStatus) ? null : _filterDeleteStatus.Trim(),
+                string.IsNullOrWhiteSpace(_filterDeleteDiscoveredBy) ? null : _filterDeleteDiscoveredBy.Trim());
+            var resp = await MaintenancePostAsync("/api/maintenance/clear-assets-filtered", body).ConfigureAwait(false);
+            var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            _maintenanceMessage = resp.IsSuccessStatusCode ? $"Deleted filtered assets: {txt}" : $"Delete filtered assets failed ({(int)resp.StatusCode}): {txt}";
+            if (resp.IsSuccessStatusCode)
+                await ReloadAllAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _maintenanceBusy = false;
         }
     }
 
