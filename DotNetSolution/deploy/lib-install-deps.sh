@@ -4,9 +4,11 @@
 # Environment:
 #   NIGHTMARE_SKIP_INSTALL=1   Do not install packages; only verify docker/compose (fail if missing).
 #
-# On Linux (Debian/Ubuntu, RHEL/Fedora/Amazon Linux), installs Docker Engine via https://get.docker.com
-# when the docker CLI is missing, ensures docker compose v2 (plugin) when needed, installs curl/git
-# for a minimal cloud image, and sets NIGHTMARE_DOCKER_USE_SUDO=1 when the daemon socket is root-only.
+# On Linux, installs Docker Engine when the docker CLI is missing:
+#   - Amazon Linux (ID=amzn): yum/dnf only — get.docker.com does NOT support amzn.
+#   - Debian/Ubuntu / other: https://get.docker.com
+# Ensures docker compose v2 (plugin or GitHub binary fallback on AL2), curl/git for minimal AMIs,
+# and sets NIGHTMARE_DOCKER_USE_SUDO=1 when the daemon socket is root-only.
 #
 # macOS / Windows: prints install hints (no silent auto-install).
 
@@ -111,9 +113,19 @@ nightmare_ensure_git() {
 }
 
 nightmare_start_docker_service_linux() {
-  command -v systemctl >/dev/null 2>&1 || return 0
-  nightmare_run_privileged systemctl enable docker >/dev/null 2>&1 || true
-  nightmare_run_privileged systemctl start docker
+  command -v docker >/dev/null 2>&1 || return 0
+
+  if command -v systemctl >/dev/null 2>&1; then
+    nightmare_run_privileged systemctl enable docker 2>/dev/null || true
+    if nightmare_run_privileged systemctl start docker 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  nightmare_run_privileged chkconfig docker on 2>/dev/null || true
+  if command -v service >/dev/null 2>&1; then
+    nightmare_run_privileged service docker start 2>/dev/null || true
+  fi
 }
 
 nightmare_install_compose_plugin_debian() {
@@ -131,7 +143,80 @@ nightmare_install_compose_plugin_rhel() {
   fi
 }
 
+# get.docker.com rejects ID=amzn; use Amazon Linux packages only.
+nightmare_install_docker_amazon_linux() {
+  [[ -f /etc/os-release ]] || return 1
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  local vid="${VERSION_ID:-}"
+  local plat="${PLATFORM_ID:-}"
+  echo "Installing Docker via yum/dnf (Amazon Linux VERSION_ID=${vid:-?} PLATFORM_ID=${plat:-?})…"
+
+  if [[ "${vid}" == 2023* ]] || [[ "${plat}" == platform:al2023* ]]; then
+    nightmare_run_privileged dnf install -y docker
+    return $?
+  fi
+
+  # Amazon Linux 2
+  if command -v amazon-linux-extras >/dev/null 2>&1; then
+    echo "Trying amazon-linux-extras install docker…"
+    if nightmare_run_privileged amazon-linux-extras install -y docker; then
+      return 0
+    fi
+  fi
+
+  echo "Installing docker package with yum…"
+  nightmare_run_privileged yum install -y docker
+}
+
+nightmare_install_compose_plugin_github_binary() {
+  nightmare_ensure_curl || return 1
+  local ver="${NIGHTMARE_COMPOSE_VERSION:-v2.29.7}"
+  local uname_s uname_m tmp
+  uname_s="$(uname -s)"
+  uname_m="$(uname -m)"
+  tmp="$(mktemp)"
+  echo "Installing docker compose CLI plugin (${ver}) from GitHub…"
+  curl -fsSL "https://github.com/docker/compose/releases/download/${ver}/docker-compose-${uname_s}-${uname_m}" -o "$tmp"
+  nightmare_run_privileged mkdir -p /usr/local/lib/docker/cli-plugins /usr/libexec/docker/cli-plugins
+  nightmare_run_privileged install -m0755 "$tmp" /usr/local/lib/docker/cli-plugins/docker-compose
+  nightmare_run_privileged install -m0755 "$tmp" /usr/libexec/docker/cli-plugins/docker-compose 2>/dev/null || true
+  rm -f "$tmp"
+}
+
+nightmare_install_compose_plugin_amazon() {
+  [[ -f /etc/os-release ]] || return 1
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  local vid="${VERSION_ID:-}"
+  local plat="${PLATFORM_ID:-}"
+
+  if [[ "${vid}" == 2023* ]] || [[ "${plat}" == platform:al2023* ]]; then
+    if nightmare_run_privileged dnf install -y docker-compose-plugin; then
+      return 0
+    fi
+  else
+    if nightmare_run_privileged yum install -y docker-compose-plugin; then
+      return 0
+    fi
+  fi
+
+  nightmare_install_compose_plugin_github_binary
+}
+
 nightmare_install_docker_engine_linux() {
+  [[ -f /etc/os-release ]] || {
+    echo "Cannot read /etc/os-release; cannot install Docker automatically." >&2
+    return 1
+  }
+  # shellcheck source=/dev/null
+  source /etc/os-release
+
+  if [[ "${ID:-}" == "amzn" ]]; then
+    nightmare_install_docker_amazon_linux
+    return $?
+  fi
+
   nightmare_ensure_curl || return 1
   echo "Downloading Docker install script (get.docker.com)…"
   local tmp
@@ -149,7 +234,10 @@ nightmare_install_compose_plugin_linux() {
     ubuntu | debian)
       nightmare_install_compose_plugin_debian
       ;;
-    amzn | rhel | centos | fedora | rocky | almalinux)
+    amzn)
+      nightmare_install_compose_plugin_amazon
+      ;;
+    rhel | centos | fedora | rocky | almalinux)
       nightmare_install_compose_plugin_rhel
       ;;
     *)
