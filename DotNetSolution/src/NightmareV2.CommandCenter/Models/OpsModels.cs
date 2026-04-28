@@ -59,6 +59,7 @@ public sealed record AssetOpsSummaryDto(
     long AssetsLast24Hours,
     DateTimeOffset? LastAssetDiscoveredUtc,
     long AssetsInDiscoveredState,
+    long AssetsInQueuedState,
     long AssetsConfirmedState,
     long FetchableAssetsStillDiscovered,
     long SubdomainsTotal,

@@ -14,6 +14,9 @@ public sealed class EfAssetPersistence(NightmareDbContext db, IPublishEndpoint p
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
+    /// <summary>DiscoveredBy prefix for high-value path wordlist URL probes (hvpath consumer).</summary>
+    private const string HighValuePathWordlistPrefix = "hvpath:";
+
     public async Task<(Guid AssetId, bool Inserted)> PersistNewAssetAsync(
         AssetDiscovered message,
         CanonicalAsset canonical,
@@ -38,12 +41,20 @@ public sealed class EfAssetPersistence(NightmareDbContext db, IPublishEndpoint p
             DiscoveredBy = message.DiscoveredBy,
             DiscoveryContext = message.DiscoveryContext ?? "",
             DiscoveredAtUtc = message.OccurredAt,
-            LifecycleStatus = AssetLifecycleStatus.Discovered,
+            LifecycleStatus = ResolveInitialLifecycleStatus(message),
         };
 
         db.Assets.Add(entity);
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return (entity.Id, true);
+    }
+
+    private static string ResolveInitialLifecycleStatus(AssetDiscovered message)
+    {
+        if (message.Kind == AssetKind.Url
+            && message.DiscoveredBy.StartsWith(HighValuePathWordlistPrefix, StringComparison.OrdinalIgnoreCase))
+            return AssetLifecycleStatus.Queued;
+        return AssetLifecycleStatus.Discovered;
     }
 
     public async Task ConfirmUrlAssetAsync(

@@ -106,11 +106,14 @@ internal static class OpsSnapshotBuilder
 
         var discoveredCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Discovered, ct)
             .ConfigureAwait(false);
+        var queuedCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Queued, ct)
+            .ConfigureAwait(false);
         var confirmedCount = await assets.LongCountAsync(a => a.LifecycleStatus == AssetLifecycleStatus.Confirmed, ct)
             .ConfigureAwait(false);
 
         var fetchableDiscovered = await assets.LongCountAsync(
-                a => a.LifecycleStatus == AssetLifecycleStatus.Discovered
+                a => (a.LifecycleStatus == AssetLifecycleStatus.Discovered
+                        || a.LifecycleStatus == AssetLifecycleStatus.Queued)
                     && (a.Kind == AssetKind.Url
                         || a.Kind == AssetKind.ApiEndpoint
                         || a.Kind == AssetKind.JavaScriptFile
@@ -177,6 +180,7 @@ internal static class OpsSnapshotBuilder
             assets24h,
             lastAssetUtc,
             discoveredCount,
+            queuedCount,
             confirmedCount,
             fetchableDiscovered,
             subdomainsTotal,

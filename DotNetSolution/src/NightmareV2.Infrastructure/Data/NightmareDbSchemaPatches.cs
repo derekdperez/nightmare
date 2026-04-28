@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using NightmareV2.Contracts;
+using NightmareV2.Domain.Entities;
 
 namespace NightmareV2.Infrastructure.Data;
 
@@ -63,6 +65,21 @@ public static class NightmareDbSchemaPatches
                 CREATE INDEX IF NOT EXISTS ix_high_value_findings_target_id ON high_value_findings (target_id);
                 CREATE INDEX IF NOT EXISTS ix_high_value_findings_discovered_at ON high_value_findings (discovered_at_utc DESC);
                 """,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        await BackfillWordlistUrlAssetsQueuedAsync(db, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Existing rows from high-value path wordlist used to be persisted as Discovered.</summary>
+    private static async Task BackfillWordlistUrlAssetsQueuedAsync(NightmareDbContext db, CancellationToken cancellationToken)
+    {
+        await db.Assets
+            .Where(a => a.Kind == AssetKind.Url
+                && a.LifecycleStatus == AssetLifecycleStatus.Discovered
+                && a.DiscoveredBy.ToLower().StartsWith("hvpath:"))
+            .ExecuteUpdateAsync(
+                s => s.SetProperty(a => a.LifecycleStatus, AssetLifecycleStatus.Queued),
                 cancellationToken)
             .ConfigureAwait(false);
     }

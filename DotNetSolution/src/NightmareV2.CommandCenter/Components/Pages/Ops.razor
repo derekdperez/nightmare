@@ -37,17 +37,25 @@
                 <div class="stat-value small">@(_snapshot.Assets.LastAssetDiscoveredUtc is { } la ? la.UtcDateTime.ToString("O") : "—")</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Lifecycle: Discovered / Confirmed</div>
-                <div class="stat-value">@_snapshot.Assets.AssetsInDiscoveredState / @_snapshot.Assets.AssetsConfirmedState</div>
+                <div class="stat-label">Lifecycle · Discovered</div>
+                <div class="stat-value">@_snapshot.Assets.AssetsInDiscoveredState</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Fetchable still “Discovered”</div>
-                <div class="stat-value" title="URL-like kinds not yet confirmed (often waiting on Spider / queue)">@_snapshot.Assets.FetchableAssetsStillDiscovered</div>
+                <div class="stat-label">Lifecycle · Queued</div>
+                <div class="stat-value" title="Wordlist URL probes (hvpath) waiting on Spider / Gatekeeper">@_snapshot.Assets.AssetsInQueuedState</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Lifecycle · Confirmed</div>
+                <div class="stat-value">@_snapshot.Assets.AssetsConfirmedState</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Fetchable waiting</div>
+                <div class="stat-value" title="Discovered or Queued URL-like assets not yet Confirmed">@_snapshot.Assets.FetchableAssetsStillDiscovered</div>
             </div>
         </div>
 
         <h3 class="subhead">Asset inventory</h3>
-        <p class="muted">By <code>stored_assets.kind</code> and lifecycle. <strong>URLs</strong> = <code>AssetKind.Url</code> only. <strong>HTTP pipeline</strong> adds API, JS, and markdown URL assets Spider may fetch. <strong>HTTP snapshots saved</strong> = rows with non-empty <code>type_details_json</code> (captured request/response from confirmation).</p>
+        <p class="muted">By <code>stored_assets.kind</code> and lifecycle. <strong>Queued</strong> = high-value path wordlist URLs (<code>discovered_by</code> <code>hvpath:*</code>) awaiting Spider. <strong>URLs</strong> = <code>AssetKind.Url</code> only. <strong>HTTP pipeline</strong> adds API, JS, and markdown URL assets Spider may fetch. <strong>HTTP snapshots saved</strong> = rows with non-empty <code>type_details_json</code> (captured request/response from confirmation).</p>
         <div class="stat-grid">
             <div class="stat-card">
                 <div class="stat-label">Subdomains</div>
