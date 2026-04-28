@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using NightmareV2.Application.Gatekeeping;
 using NightmareV2.CommandCenter;
 using NightmareV2.CommandCenter.Models;
+using NightmareV2.Contracts;
 using NightmareV2.Infrastructure.Data;
 
 namespace NightmareV2.CommandCenter.DataMaintenance;
@@ -14,6 +15,7 @@ public static class DataMaintenanceEndpoints
     public const string PhraseClearAllTargets = "DELETE ALL TARGETS";
     public const string PhraseClearAllAssets = "DELETE ALL ASSETS";
     public const string PhraseClearAssetsForDomain = "DELETE ASSETS FOR DOMAIN";
+    public const string PhraseClearAssetsFiltered = "DELETE FILTERED ASSETS";
 
     public static void Map(WebApplication app)
     {
@@ -112,6 +114,81 @@ public static class DataMaintenanceEndpoints
             .WithName("MaintenanceClearAssetsForDomain")
             .DisableAntiforgery()
             .AllowAnonymous();
+
+        app.MapPost(
+                "/api/maintenance/clear-assets-filtered",
+                async (
+                    MaintenanceClearAssetsFilteredBody body,
+                    HttpRequest http,
+                    IConfiguration config,
+                    NightmareDbContext db,
+                    IAssetDeduplicator dedup,
+                    CancellationToken ct) =>
+                {
+                    if (!IsAllowed(config, http))
+                        return MaintenanceDenied(config);
+
+                    if (body is null || !string.Equals(body.ConfirmationPhrase?.Trim(), PhraseClearAssetsFiltered, StringComparison.Ordinal))
+                        return Results.BadRequest($"confirmationPhrase must be exactly: {PhraseClearAssetsFiltered}");
+
+                    var q = db.Assets.AsQueryable();
+                    var anyFilter = false;
+
+                    if (!string.IsNullOrWhiteSpace(body.Kind))
+                    {
+                        if (!TryParseAssetKind(body.Kind, out var kind))
+                            return Results.BadRequest("kind must be an AssetKind name (e.g. Url) or numeric value.");
+                        q = q.Where(a => a.Kind == kind);
+                        anyFilter = true;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(body.LifecycleStatus))
+                    {
+                        var status = body.LifecycleStatus.Trim();
+                        q = q.Where(a => a.LifecycleStatus == status);
+                        anyFilter = true;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(body.DiscoveredByContains))
+                    {
+                        var by = body.DiscoveredByContains.Trim();
+                        q = q.Where(a => EF.Functions.ILike(a.DiscoveredBy, $"%{by}%"));
+                        anyFilter = true;
+                    }
+
+                    if (!anyFilter)
+                        return Results.BadRequest("Provide at least one filter: kind, lifecycleStatus, discoveredByContains.");
+
+                    var targetIds = await q.Select(a => a.TargetId).Distinct().ToListAsync(ct).ConfigureAwait(false);
+                    var deleted = await q.ExecuteDeleteAsync(ct).ConfigureAwait(false);
+
+                    foreach (var targetId in targetIds)
+                        await dedup.ClearForTargetAsync(targetId, ct).ConfigureAwait(false);
+
+                    return Results.Ok(
+                        new MaintenanceDeleteResult(
+                            "clear-assets-filtered",
+                            deleted,
+                            $"Filters: kind={body.Kind ?? "*"}, status={body.LifecycleStatus ?? "*"}, discoveredByContains={body.DiscoveredByContains ?? "*"}"));
+                })
+            .WithName("MaintenanceClearAssetsFiltered")
+            .DisableAntiforgery()
+            .AllowAnonymous();
+    }
+
+    private static bool TryParseAssetKind(string raw, out AssetKind kind)
+    {
+        var trimmed = raw.Trim();
+        if (Enum.TryParse<AssetKind>(trimmed, ignoreCase: true, out kind))
+            return true;
+        if (int.TryParse(trimmed, out var n) && Enum.IsDefined(typeof(AssetKind), n))
+        {
+            kind = (AssetKind)n;
+            return true;
+        }
+
+        kind = default;
+        return false;
     }
 
     private static bool IsAllowed(IConfiguration config, HttpRequest http)
