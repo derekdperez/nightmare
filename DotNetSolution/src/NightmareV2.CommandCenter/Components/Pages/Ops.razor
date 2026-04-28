@@ -1,6 +1,7 @@
 @page "/ops"
 @rendermode InteractiveServer
 @using NightmareV2.CommandCenter.Models
+@using static Microsoft.AspNetCore.Components.QuickGrid.SortDirection
 @implements IDisposable
 @inject HttpClient Http
 
@@ -175,11 +176,11 @@
         <div class="ops-qg-host short" tabindex="-1">
             <QuickGrid Items="FilteredWorkerSummaries" Class="nightmare-qg" Theme="default">
                 <PropertyColumn Title="Worker" Property="@(s => s.WorkerKey)" Sortable="true" />
-                <TemplateColumn Title="Toggle" Context="s" SortBy="@GridSort<WorkerKindSummaryDto>.ByAscending(s => s.ToggleEnabled)">
+                <TemplateColumn Title="Toggle" Context="s" SortBy="@SortWorkerSummaryToggle">
                     @(s.ToggleEnabled ? "on" : "off")
                 </TemplateColumn>
                 <PropertyColumn Title="Instances (24h)" Property="@(s => s.InstanceCount)" Sortable="true" />
-                <TemplateColumn Title="Last completed (UTC)" Context="s" SortBy="@GridSort<WorkerKindSummaryDto>.ByDescending(s => s.LastActivityUtc)">
+                <TemplateColumn Title="Last completed (UTC)" Context="s" SortBy="@SortWorkerSummaryLastActivity">
                     @(s.LastActivityUtc is { } t ? t.UtcDateTime.ToString("O") : "—")
                 </TemplateColumn>
                 <PropertyColumn Title="Roll-up status" Property="@(s => s.RollupActivityLabel)" Sortable="true" />
@@ -198,17 +199,17 @@
             </div>
             <div class="ops-qg-host vq tall" tabindex="-1">
                 <QuickGrid Items="FilteredWorkerInstances" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40"
-                           ItemKey="@(i => string.Concat(i.HostName, "|", i.ConsumerShortName, "|", i.LastCompletedAtUtc.Ticks.ToString(), "|", i.LastMessageType))" OverscanCount="5">
+                           ItemKey="@InstanceRowKey" OverscanCount="5">
                     <PropertyColumn Title="Host" Property="@(i => i.HostName)" Sortable="true" />
                     <PropertyColumn Title="Worker" Property="@(i => i.WorkerKind)" Sortable="true" />
                     <PropertyColumn Title="Consumer" Property="@(i => i.ConsumerShortName)" Sortable="true" />
-                    <TemplateColumn Title="Toggle" Context="i" SortBy="@GridSort<WorkerInstanceActivityDto>.ByAscending(i => i.ToggleEnabled)">
+                    <TemplateColumn Title="Toggle" Context="i" SortBy="@SortInstanceToggle">
                         @(i.ToggleEnabled is null ? "—" : (i.ToggleEnabled.Value ? "on" : "off"))
                     </TemplateColumn>
                     <PropertyColumn Title="Status" Property="@(i => i.ActivityLabel)" Sortable="true" />
                     <PropertyColumn Title="Last completed (UTC)" Property="@(i => i.LastCompletedAtUtc)" Format="O" Sortable="true" />
                     <PropertyColumn Title="Message type" Property="@(i => i.LastMessageType)" Sortable="true" />
-                    <TemplateColumn Title="Last payload (truncated)" Context="i" SortBy="@GridSort<WorkerInstanceActivityDto>.ByAscending(i => i.LastPayloadPreview)">
+                    <TemplateColumn Title="Last payload (truncated)" Context="i" SortBy="@SortInstancePayload">
                         <span class="mono">@i.LastPayloadPreview</span>
                     </TemplateColumn>
                 </QuickGrid>
@@ -235,7 +236,7 @@
         <div class="ops-qg-host short" tabindex="-1">
             <QuickGrid Items="FilteredWorkers" Class="nightmare-qg" Theme="default">
                 <PropertyColumn Title="Key" Property="@(w => w.WorkerKey)" Sortable="true" />
-                <TemplateColumn Title="Enabled" Context="w" SortBy="@GridSort<WorkerSwitchDto>.ByAscending(w => w.IsEnabled)">
+                <TemplateColumn Title="Enabled" Context="w" SortBy="@SortWorkerSwitchEnabled">
                     @(w.IsEnabled ? "yes" : "no")
                 </TemplateColumn>
                 <PropertyColumn Title="Updated (UTC)" Property="@(w => w.UpdatedAtUtc)" Format="u" Sortable="true" />
@@ -266,13 +267,13 @@
     </div>
     <div class="ops-qg-host vq tall" tabindex="-1">
         <QuickGrid Items="FilteredAssets" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(a => a.Id)" OverscanCount="6">
-            <PropertyColumn Title="Discovered (UTC)" Property="@(a => a.DiscoveredAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="SortDirection.Descending" />
+            <PropertyColumn Title="Discovered (UTC)" Property="@(a => a.DiscoveredAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
             <PropertyColumn Title="Kind" Property="@(a => a.Kind)" Sortable="true" />
             <PropertyColumn Title="Status" Property="@(a => a.LifecycleStatus)" Sortable="true" />
             <PropertyColumn Title="Depth" Property="@(a => a.Depth)" Sortable="true" />
             <PropertyColumn Title="Raw" Property="@(a => a.RawValue)" Sortable="true" />
             <PropertyColumn Title="Pipeline" Property="@(a => a.DiscoveredBy)" Sortable="true" />
-            <TemplateColumn Title="How found" Context="a" SortBy="@GridSort<AssetGridRowDto>.ByAscending(a => a.DiscoveryContext)">
+            <TemplateColumn Title="How found" Context="a" SortBy="@SortAssetDiscoveryContext">
                 <span title="@a.DiscoveryContext">@(string.IsNullOrWhiteSpace(a.DiscoveryContext) ? "—" : a.DiscoveryContext)</span>
             </TemplateColumn>
         </QuickGrid>
@@ -286,7 +287,7 @@
     </div>
     <div class="ops-qg-host vq tall" tabindex="-1">
         <QuickGrid Items="FilteredLiveBus" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(e => e.Id)" OverscanCount="5">
-            <PropertyColumn Title="Time (UTC)" Property="@(e => e.OccurredAtUtc)" Format="O" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="SortDirection.Descending" />
+            <PropertyColumn Title="Time (UTC)" Property="@(e => e.OccurredAtUtc)" Format="O" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
             <PropertyColumn Title="Type" Property="@(e => e.MessageType)" Sortable="true" />
             <PropertyColumn Title="Host" Property="@(e => e.HostName)" Sortable="true" />
             <PropertyColumn Title="Payload (truncated)" Property="@(e => e.PayloadJson)" Sortable="true" />
@@ -301,7 +302,7 @@
     </div>
     <div class="ops-qg-host vq tall" tabindex="-1">
         <QuickGrid Items="FilteredHistoryBus" Class="nightmare-qg" Theme="default" Virtualize="true" ItemSize="40" ItemKey="@(e => e.Id)" OverscanCount="5">
-            <PropertyColumn Title="Id" Property="@(e => e.Id)" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="SortDirection.Descending" />
+            <PropertyColumn Title="Id" Property="@(e => e.Id)" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
             <PropertyColumn Title="Dir" Property="@(e => e.Direction)" Sortable="true" />
             <PropertyColumn Title="Time (UTC)" Property="@(e => e.OccurredAtUtc)" Format="O" Sortable="true" />
             <PropertyColumn Title="Type" Property="@(e => e.MessageType)" Sortable="true" />
