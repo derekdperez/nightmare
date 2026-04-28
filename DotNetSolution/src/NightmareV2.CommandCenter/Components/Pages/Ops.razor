@@ -122,7 +122,7 @@
 
     <div class="row">
         <label>Target filter</label>
-        <select @bind="_targetFilter" @bind:after="ReloadAssetsAsync">
+        <select @bind="_targetFilter" @bind:after="ReloadTargetScopedAsync">
             <option value="">All targets</option>
             @foreach (var t in _targets)
             {
@@ -175,40 +175,73 @@
 </section>
 
 <section class="panel">
-    <h2>Request Queue</h2>
+    <h2>HTTP Request Queue</h2>
+    @if (_queueSettings is not null)
+    {
+        <div class="row" style="align-items:flex-end">
+            <button type="button" disabled="@_queueSettingsBusy" @onclick="ToggleHttpQueueAsync">
+                @(_queueSettings.Enabled ? "Disable new requests" : "Enable new requests")
+            </button>
+            <div>
+                <label>Global req/min</label>
+                <input type="number" min="1" class="ops-filter" @bind="_queueGlobalRequestsPerMinute" />
+            </div>
+            <div>
+                <label>Per-domain req/min</label>
+                <input type="number" min="1" class="ops-filter" @bind="_queuePerDomainRequestsPerMinute" />
+            </div>
+            <div>
+                <label>Max concurrency</label>
+                <input type="number" min="1" class="ops-filter" @bind="_queueMaxConcurrency" />
+            </div>
+            <div>
+                <label>Timeout seconds</label>
+                <input type="number" min="5" max="300" class="ops-filter" @bind="_queueRequestTimeoutSeconds" />
+            </div>
+            <button type="button" disabled="@_queueSettingsBusy" @onclick="SaveHttpQueueSettingsAsync">Save queue settings</button>
+        </div>
+        <p class="muted">Queue is @(_queueSettings.Enabled ? "enabled" : "disabled"); updated @(_queueSettings.UpdatedAtUtc.ToString("u")). @_queueSettingsMessage</p>
+    }
     <div class="row">
         <label>Queue column filters</label>
         <input type="text" class="ops-filter" placeholder="Kind" @bind="_filterQueueKindCol" />
-        <input type="text" class="ops-filter" placeholder="Raw" @bind="_filterQueueRawCol" />
-        <input type="text" class="ops-filter" placeholder="Pipeline" @bind="_filterQueuePipelineCol" />
+        <input type="text" class="ops-filter" placeholder="URL/domain" @bind="_filterQueueRawCol" />
+        <input type="text" class="ops-filter" placeholder="State" @bind="_filterQueuePipelineCol" />
         <button type="button" @onclick="ClearQueueFilters">Clear all filters</button>
     </div>
-    <NightmareDataGrid TGridItem="AssetGridRowDto"
+    <NightmareDataGrid TGridItem="HttpRequestQueueRowDto"
                        Items="FilteredRequestQueue"
                        @bind-SearchText="_filterQueueSearch"
                        SearchPlaceholder="Filter queue rows…"
                        ScrollPreset="NightmareDataGridScrollPreset.Medium"
                        Virtualize="true"
                        ItemSize="40"
-                       ItemKey="@(a => a.Id)"
+                       ItemKey="@(q => q.Id)"
                        OverscanCount="6"
                        HostTabIndex="@(-1)">
-        <PropertyColumn Title="Discovered (UTC)" Property="@(a => a.DiscoveredAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
-        <PropertyColumn Title="Asset Kind" Property="@(a => a.Kind)" Sortable="true" />
-        <TemplateColumn Title="Raw value" Context="a" SortBy="@(GridSort<AssetGridRowDto>.ByAscending(x => x.RawValue))">
+        <PropertyColumn Title="Created (UTC)" Property="@(q => q.CreatedAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
+        <PropertyColumn Title="State" Property="@(q => q.State)" Sortable="true" />
+        <PropertyColumn Title="Kind" Property="@(q => q.AssetKind)" Sortable="true" />
+        <TemplateColumn Title="Request URL" Context="q" SortBy="@(GridSort<HttpRequestQueueRowDto>.ByAscending(x => x.RequestUrl))">
             @{
-                var href = ToLiveHref(a);
+                var href = ToLiveHref(q);
             }
             @if (string.IsNullOrEmpty(href))
             {
-                <span>@a.RawValue</span>
+                <span>@q.RequestUrl</span>
             }
             else
             {
-                <a href="@href" target="_blank" rel="noopener noreferrer">@a.RawValue</a>
+                <a href="@href" target="_blank" rel="noopener noreferrer">@q.RequestUrl</a>
             }
         </TemplateColumn>
-        <PropertyColumn Title="Pipeline" Property="@(a => a.DiscoveredBy)" Sortable="true" />
+        <PropertyColumn Title="Domain" Property="@(q => q.DomainKey)" Sortable="true" />
+        <PropertyColumn Title="Attempts" Property="@(q => q.AttemptCount)" Sortable="true" />
+        <PropertyColumn Title="HTTP" Property="@(q => q.LastHttpStatus)" Sortable="true" />
+        <PropertyColumn Title="Duration ms" Property="@(q => q.DurationMs)" Sortable="true" />
+        <TemplateColumn Title="Last error" Context="q">
+            <span title="@q.LastError">@(string.IsNullOrWhiteSpace(q.LastError) ? "—" : q.LastError)</span>
+        </TemplateColumn>
     </NightmareDataGrid>
 </section>
 
@@ -216,7 +249,9 @@
     private readonly CancellationTokenSource _pollCts = new();
     private readonly List<TargetSummary> _targets = [];
     private readonly List<AssetGridRowDto> _assets = [];
+    private readonly List<HttpRequestQueueRowDto> _requestQueue = [];
     private OpsOverviewDto? _overview;
+    private HttpRequestQueueSettingsDto? _queueSettings;
     private string _targetFilter = "";
     private string _filterAssets = "";
     private string _filterKindCol = "";
@@ -240,6 +275,12 @@
     private string _filterDeleteDiscoveredBy = "";
     private string _maintenanceMessage = "";
     private bool _maintenanceBusy;
+    private bool _queueSettingsBusy;
+    private string _queueSettingsMessage = "";
+    private int _queueGlobalRequestsPerMinute = 120;
+    private int _queuePerDomainRequestsPerMinute = 6;
+    private int _queueMaxConcurrency = 8;
+    private int _queueRequestTimeoutSeconds = 30;
 
     protected override async Task OnInitializedAsync()
     {
@@ -255,6 +296,7 @@
             {
                 await Task.Delay(2000, _pollCts.Token).ConfigureAwait(false);
                 await ReloadVolatileAsync().ConfigureAwait(false);
+                await ReloadHttpQueueAsync().ConfigureAwait(false);
                 await InvokeAsync(StateHasChanged).ConfigureAwait(false);
             }
         }
@@ -293,6 +335,8 @@
         }
 
         await ReloadAssetsAsync().ConfigureAwait(false);
+        await ReloadHttpQueueAsync().ConfigureAwait(false);
+        await ReloadHttpQueueSettingsAsync().ConfigureAwait(false);
         await ReloadVolatileAsync().ConfigureAwait(false);
         try
         {
@@ -302,6 +346,12 @@
         {
             _maintenanceStatus = null;
         }
+    }
+
+    private async Task ReloadTargetScopedAsync()
+    {
+        await ReloadAssetsAsync().ConfigureAwait(false);
+        await ReloadHttpQueueAsync().ConfigureAwait(false);
     }
 
     private async Task ReloadAssetsAsync()
@@ -317,6 +367,95 @@
         catch
         {
             _assets.Clear();
+        }
+    }
+
+    private async Task ReloadHttpQueueAsync()
+    {
+        try
+        {
+            var qs = string.IsNullOrEmpty(_targetFilter) ? "?take=800" : $"?targetId={Uri.EscapeDataString(_targetFilter)}&take=800";
+            var list = await Http.GetFromJsonAsync<List<HttpRequestQueueRowDto>>($"/api/http-request-queue{qs}").ConfigureAwait(false);
+            _requestQueue.Clear();
+            if (list is not null)
+                _requestQueue.AddRange(list);
+        }
+        catch
+        {
+            _requestQueue.Clear();
+        }
+    }
+
+    private async Task ReloadHttpQueueSettingsAsync()
+    {
+        try
+        {
+            _queueSettings = await Http.GetFromJsonAsync<HttpRequestQueueSettingsDto>("/api/http-request-queue/settings").ConfigureAwait(false);
+            if (_queueSettings is not null)
+            {
+                _queueGlobalRequestsPerMinute = _queueSettings.GlobalRequestsPerMinute;
+                _queuePerDomainRequestsPerMinute = _queueSettings.PerDomainRequestsPerMinute;
+                _queueMaxConcurrency = _queueSettings.MaxConcurrency;
+                _queueRequestTimeoutSeconds = _queueSettings.RequestTimeoutSeconds;
+            }
+        }
+        catch
+        {
+            _queueSettings = null;
+        }
+    }
+
+    private async Task ToggleHttpQueueAsync()
+    {
+        if (_queueSettings is null)
+            return;
+
+        _queueSettingsBusy = true;
+        try
+        {
+            await SaveHttpQueueSettingsCoreAsync(!_queueSettings.Enabled).ConfigureAwait(false);
+        }
+        finally
+        {
+            _queueSettingsBusy = false;
+        }
+    }
+
+    private async Task SaveHttpQueueSettingsAsync()
+    {
+        if (_queueSettings is null)
+            return;
+
+        _queueSettingsBusy = true;
+        try
+        {
+            await SaveHttpQueueSettingsCoreAsync(_queueSettings.Enabled).ConfigureAwait(false);
+        }
+        finally
+        {
+            _queueSettingsBusy = false;
+        }
+    }
+
+    private async Task SaveHttpQueueSettingsCoreAsync(bool enabled)
+    {
+        _queueSettingsMessage = "";
+        var body = new HttpRequestQueueSettingsPatch(
+            enabled,
+            _queueGlobalRequestsPerMinute,
+            _queuePerDomainRequestsPerMinute,
+            _queueMaxConcurrency,
+            _queueRequestTimeoutSeconds);
+        var resp = await Http.PutAsJsonAsync("/api/http-request-queue/settings", body).ConfigureAwait(false);
+        if (resp.IsSuccessStatusCode)
+        {
+            _queueSettingsMessage = "Saved.";
+            await ReloadHttpQueueSettingsAsync().ConfigureAwait(false);
+        }
+        else
+        {
+            var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            _queueSettingsMessage = $"Save failed ({(int)resp.StatusCode}): {txt}";
         }
     }
 

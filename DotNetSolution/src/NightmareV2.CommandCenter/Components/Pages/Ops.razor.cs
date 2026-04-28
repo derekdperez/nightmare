@@ -11,10 +11,9 @@ public partial class Ops
     private static readonly GridSort<AssetGridRowDto> SortAssetDiscoveryContext =
         GridSort<AssetGridRowDto>.ByAscending(static a => a.DiscoveryContext);
 
-    private IQueryable<AssetGridRowDto> RequestQueueRows =>
-        _assets.AsQueryable()
-            .Where(a => string.Equals(a.LifecycleStatus, "Queued", StringComparison.Ordinal))
-            .OrderByDescending(a => a.DiscoveredAtUtc);
+    private IQueryable<HttpRequestQueueRowDto> RequestQueueRows =>
+        _requestQueue.AsQueryable()
+            .OrderByDescending(q => q.CreatedAtUtc);
 
     private IQueryable<AssetGridRowDto> FilteredAssets =>
         _assets.AsQueryable().Where(a =>
@@ -30,19 +29,31 @@ public partial class Ops
             && GridTextFilter.Matches(a.DiscoveredBy, _filterPipelineCol)
             && GridTextFilter.Matches(a.DiscoveryContext, _filterHowFoundCol));
 
-    private IQueryable<AssetGridRowDto> FilteredRequestQueue =>
-        RequestQueueRows.Where(a =>
-            (GridTextFilter.Matches(a.Kind, _filterQueueSearch)
-             || GridTextFilter.Matches(a.RawValue, _filterQueueSearch)
-             || GridTextFilter.Matches(a.DiscoveredBy, _filterQueueSearch)
-             || GridTextFilter.Matches(a.DiscoveredAtUtc.ToString("u"), _filterQueueSearch))
-            && GridTextFilter.Matches(a.Kind, _filterQueueKindCol)
-            && GridTextFilter.Matches(a.RawValue, _filterQueueRawCol)
-            && GridTextFilter.Matches(a.DiscoveredBy, _filterQueuePipelineCol));
+    private IQueryable<HttpRequestQueueRowDto> FilteredRequestQueue =>
+        RequestQueueRows.Where(q =>
+            (GridTextFilter.Matches(q.AssetKind, _filterQueueSearch)
+             || GridTextFilter.Matches(q.RequestUrl, _filterQueueSearch)
+             || GridTextFilter.Matches(q.DomainKey, _filterQueueSearch)
+             || GridTextFilter.Matches(q.State, _filterQueueSearch)
+             || GridTextFilter.Matches(q.LastHttpStatus?.ToString(), _filterQueueSearch)
+             || GridTextFilter.Matches(q.LastError, _filterQueueSearch))
+            && GridTextFilter.Matches(q.AssetKind, _filterQueueKindCol)
+            && GridTextFilter.Matches(q.RequestUrl, _filterQueueRawCol)
+            && GridTextFilter.Matches(q.State, _filterQueuePipelineCol));
 
     private static bool IsUrlOrSubdomain(string kind) =>
         string.Equals(kind, "Url", StringComparison.OrdinalIgnoreCase)
         || string.Equals(kind, "Subdomain", StringComparison.OrdinalIgnoreCase);
+
+    private static string? ToLiveHref(HttpRequestQueueRowDto row)
+    {
+        var raw = row.FinalUrl ?? row.RequestUrl;
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+        if (Uri.TryCreate(raw.Trim(), UriKind.Absolute, out var absolute) && absolute.Scheme is "http" or "https")
+            return absolute.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
+        return null;
+    }
 
     private static string? ToLiveHref(AssetGridRowDto row)
     {

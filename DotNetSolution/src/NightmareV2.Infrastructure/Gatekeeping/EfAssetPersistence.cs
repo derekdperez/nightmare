@@ -69,12 +69,90 @@ public sealed class EfAssetPersistence(
             return (Guid.Empty, false);
         }
 
+        EnqueueHttpRequestIfNeeded(entity);
+
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg
+            && pg.SqlState == PostgresErrorCodes.UniqueViolation
+            && pg.ConstraintName?.Contains("http_request_queue", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            logger.LogDebug(ex, "HTTP request queue row already exists for asset {AssetId}.", entity.Id);
+        }
+
         return (entity.Id, true);
     }
 
     private static string ResolveInitialLifecycleStatus(AssetDiscovered message)
     {
         return AssetLifecycleStatus.Queued;
+    }
+
+    private void EnqueueHttpRequestIfNeeded(StoredAsset asset)
+    {
+        if (!ShouldRequest(asset.Kind))
+            return;
+
+        if (!TryResolveRequestUrl(asset, out var requestUrl, out var domainKey))
+            return;
+
+        db.HttpRequestQueue.Add(
+            new HttpRequestQueueItem
+            {
+                Id = Guid.NewGuid(),
+                AssetId = asset.Id,
+                TargetId = asset.TargetId,
+                AssetKind = asset.Kind,
+                Method = "GET",
+                RequestUrl = requestUrl,
+                DomainKey = domainKey,
+                State = HttpRequestQueueState.Queued,
+                Priority = ResolvePriority(asset.Kind),
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                UpdatedAtUtc = DateTimeOffset.UtcNow,
+                NextAttemptAtUtc = DateTimeOffset.UtcNow,
+            });
+    }
+
+    private static bool ShouldRequest(AssetKind kind) =>
+        kind is AssetKind.Url or AssetKind.ApiEndpoint or AssetKind.JavaScriptFile or AssetKind.MarkdownBody
+            or AssetKind.Subdomain or AssetKind.Domain;
+
+    private static int ResolvePriority(AssetKind kind) =>
+        kind is AssetKind.Subdomain or AssetKind.Domain ? 10 : 0;
+
+    private static bool TryResolveRequestUrl(StoredAsset asset, out string requestUrl, out string domainKey)
+    {
+        requestUrl = "";
+        domainKey = "";
+
+        if (asset.Kind is AssetKind.Subdomain or AssetKind.Domain)
+        {
+            var host = asset.RawValue.Trim().TrimEnd('/');
+            if (host.Length == 0)
+                return false;
+            if (!Uri.TryCreate($"https://{host}/", UriKind.Absolute, out var domainUri))
+                return false;
+            requestUrl = domainUri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
+            domainKey = domainUri.IdnHost.ToLowerInvariant();
+            return true;
+        }
+
+        var raw = asset.RawValue.Trim();
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri)
+            && !Uri.TryCreate("https://" + raw, UriKind.Absolute, out uri))
+        {
+            return false;
+        }
+
+        if (uri.Scheme is not ("http" or "https") || string.IsNullOrWhiteSpace(uri.Host))
+            return false;
+
+        requestUrl = uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
+        domainKey = uri.IdnHost.ToLowerInvariant();
+        return true;
     }
 
     public async Task ConfirmUrlAssetAsync(

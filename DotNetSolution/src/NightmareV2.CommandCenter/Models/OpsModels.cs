@@ -136,3 +136,43 @@ public sealed record OpsOverviewDto(
     long TopDomainAssetCount,
     long DomainsWith10OrMoreAssets,
     long DomainsWith10OrFewerAssets);
+
+
+public sealed record HttpRequestQueueSettingsDto(
+    bool Enabled,
+    int GlobalRequestsPerMinute,
+    int PerDomainRequestsPerMinute,
+    int MaxConcurrency,
+    int RequestTimeoutSeconds,
+    DateTimeOffset UpdatedAtUtc);
+
+public sealed record HttpRequestQueueSettingsPatch(
+    bool Enabled,
+    int GlobalRequestsPerMinute,
+    int PerDomainRequestsPerMinute,
+    int MaxConcurrency,
+    int RequestTimeoutSeconds);
+
+public sealed record HttpRequestQueueRowDto(
+    Guid Id,
+    Guid AssetId,
+    Guid TargetId,
+    string AssetKind,
+    string Method,
+    string RequestUrl,
+    string DomainKey,
+    string State,
+    int AttemptCount,
+    int MaxAttempts,
+    int Priority,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset NextAttemptAtUtc,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    int? LastHttpStatus,
+    string? LastError,
+    long? DurationMs,
+    string? ResponseContentType,
+    long? ResponseContentLength,
+    string? FinalUrl);

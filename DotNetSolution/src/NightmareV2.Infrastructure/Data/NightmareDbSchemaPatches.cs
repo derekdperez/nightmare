@@ -67,7 +67,126 @@ public static class NightmareDbSchemaPatches
                 cancellationToken)
             .ConfigureAwait(false);
 
+
+
+        await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS http_request_queue_settings (
+                    id integer NOT NULL PRIMARY KEY,
+                    enabled boolean NOT NULL DEFAULT true,
+                    global_requests_per_minute integer NOT NULL DEFAULT 120,
+                    per_domain_requests_per_minute integer NOT NULL DEFAULT 6,
+                    max_concurrency integer NOT NULL DEFAULT 8,
+                    request_timeout_seconds integer NOT NULL DEFAULT 30,
+                    updated_at_utc timestamp with time zone NOT NULL DEFAULT now()
+                );
+
+                INSERT INTO http_request_queue_settings (
+                    id,
+                    enabled,
+                    global_requests_per_minute,
+                    per_domain_requests_per_minute,
+                    max_concurrency,
+                    request_timeout_seconds,
+                    updated_at_utc
+                )
+                VALUES (1, true, 120, 6, 8, 30, now())
+                ON CONFLICT (id) DO NOTHING;
+
+                CREATE TABLE IF NOT EXISTS http_request_queue (
+                    id uuid NOT NULL PRIMARY KEY,
+                    asset_id uuid NOT NULL REFERENCES stored_assets(id) ON DELETE CASCADE,
+                    target_id uuid NOT NULL,
+                    asset_kind integer NOT NULL,
+                    method character varying(16) NOT NULL DEFAULT 'GET',
+                    request_url character varying(4096) NOT NULL,
+                    domain_key character varying(253) NOT NULL,
+                    state character varying(32) NOT NULL DEFAULT 'Queued',
+                    priority integer NOT NULL DEFAULT 0,
+                    attempt_count integer NOT NULL DEFAULT 0,
+                    max_attempts integer NOT NULL DEFAULT 3,
+                    created_at_utc timestamp with time zone NOT NULL DEFAULT now(),
+                    updated_at_utc timestamp with time zone NOT NULL DEFAULT now(),
+                    next_attempt_at_utc timestamp with time zone NOT NULL DEFAULT now(),
+                    locked_by character varying(256) NULL,
+                    locked_until_utc timestamp with time zone NULL,
+                    started_at_utc timestamp with time zone NULL,
+                    completed_at_utc timestamp with time zone NULL,
+                    duration_ms bigint NULL,
+                    last_http_status integer NULL,
+                    last_error character varying(2048) NULL,
+                    request_headers_json text NULL,
+                    request_body text NULL,
+                    response_headers_json text NULL,
+                    response_body text NULL,
+                    response_content_type character varying(256) NULL,
+                    response_content_length bigint NULL,
+                    final_url character varying(4096) NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_http_request_queue_asset_id ON http_request_queue (asset_id);
+                CREATE INDEX IF NOT EXISTS ix_http_request_queue_state_next_attempt ON http_request_queue (state, next_attempt_at_utc);
+                CREATE INDEX IF NOT EXISTS ix_http_request_queue_domain_started ON http_request_queue (domain_key, started_at_utc);
+                CREATE INDEX IF NOT EXISTS ix_http_request_queue_created_at ON http_request_queue (created_at_utc DESC);
+                """,
+                cancellationToken)
+            .ConfigureAwait(false);
+
         await BackfillLegacyDiscoveredAssetsAsync(db, cancellationToken).ConfigureAwait(false);
+        await BackfillHttpRequestQueueAsync(db, cancellationToken).ConfigureAwait(false);
+    }
+
+
+
+    private static async Task BackfillHttpRequestQueueAsync(NightmareDbContext db, CancellationToken cancellationToken)
+    {
+        await db.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO http_request_queue (
+                    id,
+                    asset_id,
+                    target_id,
+                    asset_kind,
+                    method,
+                    request_url,
+                    domain_key,
+                    state,
+                    priority,
+                    created_at_utc,
+                    updated_at_utc,
+                    next_attempt_at_utc
+                )
+                SELECT
+                    gen_random_uuid(),
+                    a.id,
+                    a.target_id,
+                    a.kind,
+                    'GET',
+                    CASE
+                        WHEN a.kind IN (0, 1) THEN 'https://' || trim(trailing '/' from a.raw_value) || '/'
+                        WHEN position('://' in a.raw_value) > 0 THEN a.raw_value
+                        ELSE 'https://' || a.raw_value
+                    END,
+                    lower(
+                        CASE
+                            WHEN a.kind IN (0, 1) THEN trim(trailing '/' from a.raw_value)
+                            ELSE regexp_replace(regexp_replace(a.raw_value, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '[:/].*$', '')
+                        END
+                    ),
+                    'Queued',
+                    0,
+                    COALESCE(a.discovered_at_utc, now()),
+                    now(),
+                    now()
+                FROM stored_assets a
+                WHERE a.lifecycle_status = 'Queued'
+                  AND a.kind IN (0, 1, 10, 11, 12, 33)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM http_request_queue q WHERE q.asset_id = a.id
+                  );
+                """,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>Normalize legacy statuses after introducing Queued as the default initial status.</summary>

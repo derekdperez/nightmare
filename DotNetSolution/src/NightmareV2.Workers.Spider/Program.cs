@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using NightmareV2.Infrastructure;
 using NightmareV2.Infrastructure.Data;
 using NightmareV2.Infrastructure.Messaging;
+using NightmareV2.Workers.Spider;
 using NightmareV2.Workers.Spider.Consumers;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -32,7 +33,8 @@ builder.Services.AddHttpClient("spider")
     .AddPolicyHandler(SpiderAssetDiscoveredConsumer.RetryPolicy());
 
 builder.Services.AddNightmareInfrastructure(builder.Configuration);
-builder.Services.AddNightmareRabbitMq(builder.Configuration, x => x.AddConsumer<SpiderAssetDiscoveredConsumer>());
+builder.Services.AddHostedService<HttpRequestQueueWorker>();
+builder.Services.AddNightmareRabbitMq(builder.Configuration, _ => { });
 
 var host = builder.Build();
 
