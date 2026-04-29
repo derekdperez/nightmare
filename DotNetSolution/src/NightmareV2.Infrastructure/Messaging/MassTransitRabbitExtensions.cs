@@ -29,9 +29,9 @@ public static class MassTransitRabbitExtensions
         {
             options.WaitUntilStarted = false;
             options.StartTimeout = TimeSpan.FromSeconds(
-                Math.Clamp(configuration.GetValue<int>("RabbitMq:StartTimeoutSeconds", 15), 1, 120));
+                GetClampedSeconds(configuration, "RabbitMq:StartTimeoutSeconds", 15, 1, 120));
             options.StopTimeout = TimeSpan.FromSeconds(
-                Math.Clamp(configuration.GetValue<int>("RabbitMq:StopTimeoutSeconds", 30), 1, 120));
+                GetClampedSeconds(configuration, "RabbitMq:StopTimeoutSeconds", 30, 1, 120));
         });
 
         services.AddMassTransit(x =>
@@ -52,5 +52,21 @@ public static class MassTransitRabbitExtensions
         });
 
         return services;
+    }
+
+    private static int GetClampedSeconds(
+        IConfiguration configuration,
+        string key,
+        int defaultValue,
+        int minValue,
+        int maxValue)
+    {
+        var configuredValue = configuration[key];
+        if (!int.TryParse(configuredValue, out var parsedValue))
+        {
+            parsedValue = defaultValue;
+        }
+
+        return Math.Clamp(parsedValue, minValue, maxValue);
     }
 }
