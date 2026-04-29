@@ -38,6 +38,11 @@ This **DotNetSolution** folder includes a **machine-run diagnostic harness** for
 - **Postgres `127.0.0.1` inside a standalone container**: published `appsettings.json` uses `localhost` for Postgres. Compose sets `ConnectionStrings__Postgres` to `Host=postgres`. Run through compose, or pass `-e ConnectionStrings__Postgres=…` pointing at a reachable host.
 - **Smoke test without DB** (not for production): `NIGHTMARE_SKIP_STARTUP_DATABASE=1` or config `Nightmare:SkipStartupDatabase` skips startup `EnsureCreated`; APIs that touch the DB will still fail until Postgres is configured.
 
+## Reading `debug_results.json`
+
+- **`dotnet_skip: not on PATH`**: many Linux deploy hosts only have Docker; the .NET SDK runs inside `Dockerfile.web` / `Dockerfile.worker` builds, not on the host. That line is informational, not a stack failure.
+- **Non-zero `exit_code` on a Docker line**: usually Docker not running, missing `docker compose` plugin, or permission denied on the socket (try the same command with `sudo` only if your ops policy allows it).
+
 ## Safety rules (agents)
 
 - No destructive commands (no `rm -rf`, `docker system prune`, database drops, etc.).

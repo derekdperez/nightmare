@@ -13,11 +13,11 @@
 # Harmless workflow validation:
 Get-Location
 if (Test-Path -LiteralPath 'deploy/docker-compose.yml') { 'compose_file_ok' }
-dotnet --version 2>&1
+if (Get-Command dotnet -ErrorAction SilentlyContinue) { dotnet --version } else { 'dotnet_skip: not on PATH (use Docker build images for SDK)' }
 
-# Docker (each line is its own process — set COMPOSE_BAKE per line; may fail if Docker is not running):
-$env:COMPOSE_BAKE = 'false'; docker compose -f deploy/docker-compose.yml version 2>&1
-$env:COMPOSE_BAKE = 'false'; docker compose -f deploy/docker-compose.yml config -q 2>&1; if ($LASTEXITCODE -eq 0) { 'compose_config_ok' }
+# Docker (each line is its own process — set COMPOSE_BAKE per line; non-zero exit if Docker is down):
+$env:COMPOSE_BAKE = 'false'; docker compose -f deploy/docker-compose.yml version
+$env:COMPOSE_BAKE = 'false'; docker compose -f deploy/docker-compose.yml config -q; if ($LASTEXITCODE -eq 0) { 'compose_config_ok' }
 
 # Examples (commented — uncomment or copy when needed):
 # git status -sb

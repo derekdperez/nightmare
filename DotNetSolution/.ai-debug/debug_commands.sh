@@ -13,11 +13,11 @@
 # Harmless workflow validation (paths + optional Docker Compose file check):
 pwd
 test -f deploy/docker-compose.yml && echo compose_file_ok
-dotnet --version 2>&1 || true
+if command -v dotnet >/dev/null 2>&1; then dotnet --version; else echo "dotnet_skip: not on PATH (common on Docker-only hosts; builds use the SDK inside Dockerfiles)"; fi
 
-# Docker (may fail if daemon missing or user lacks permission — still useful output):
-COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml version 2>&1 || true
-COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml config -q 2>&1 && echo compose_config_ok || true
+# Docker (real exit codes — may be non-zero if the daemon is down or the user lacks permission):
+COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml version
+COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml config -q && echo compose_config_ok
 
 # Examples (commented — uncomment or copy when needed):
 # git status -sb
