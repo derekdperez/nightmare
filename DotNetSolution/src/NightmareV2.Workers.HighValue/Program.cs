@@ -1,6 +1,4 @@
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using NightmareV2.Application.HighValue;
 using NightmareV2.Infrastructure;
 using NightmareV2.Infrastructure.Data;
@@ -29,13 +27,13 @@ builder.Services.AddNightmareRabbitMq(
     });
 
 var host = builder.Build();
-
-using (var scope = host.Services.CreateScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
-    await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
-    await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db).ConfigureAwait(false);
-    await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
-}
+var startupLog = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+await StartupDatabaseBootstrap.InitializeAsync(
+        host.Services,
+        host.Services.GetRequiredService<IConfiguration>(),
+        startupLog,
+        includeFileStore: false,
+        host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping)
+    .ConfigureAwait(false);
 
 await host.RunAsync().ConfigureAwait(false);

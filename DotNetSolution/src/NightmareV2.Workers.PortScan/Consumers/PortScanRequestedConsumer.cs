@@ -10,6 +10,7 @@ namespace NightmareV2.Workers.PortScan.Consumers;
 public sealed class PortScanRequestedConsumer(
     IWorkerToggleReader toggles,
     IPortScanService portScan,
+    IInboxDeduplicator inbox,
     IEventOutbox outbox,
     IConfiguration configuration,
     ILogger<PortScanRequestedConsumer> logger)
@@ -22,6 +23,9 @@ public sealed class PortScanRequestedConsumer(
 
     public async Task Consume(ConsumeContext<PortScanRequested> context)
     {
+        if (!await inbox.TryBeginProcessingAsync(context.Message, nameof(PortScanRequestedConsumer), context.CancellationToken).ConfigureAwait(false))
+            return;
+
         if (!await toggles.IsWorkerEnabledAsync(WorkerKeys.PortScan, context.CancellationToken).ConfigureAwait(false))
             return;
 

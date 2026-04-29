@@ -1026,23 +1026,13 @@ static async Task InitializeStartupDatabasesAsync(WebApplication app, bool skipS
     {
         try
         {
-            using var scope = app.Services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
-            await db.Database.EnsureCreatedAsync(app.Lifetime.ApplicationStopping).ConfigureAwait(false);
-            await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db, app.Lifetime.ApplicationStopping).ConfigureAwait(false);
-            await NightmareDbSeeder.SeedWorkerSwitchesAsync(db, app.Lifetime.ApplicationStopping).ConfigureAwait(false);
-
-            try
-            {
-                var fileStoreFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FileStoreDbContext>>();
-                await using var fs = await fileStoreFactory.CreateDbContextAsync(app.Lifetime.ApplicationStopping).ConfigureAwait(false);
-                await fs.Database.EnsureCreatedAsync(app.Lifetime.ApplicationStopping).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (!app.Lifetime.ApplicationStopping.IsCancellationRequested)
-            {
-                startupLog.LogWarning(ex, "File store database unavailable; create database nightmare_v2_files or set ConnectionStrings:FileStore.");
-            }
-
+            await StartupDatabaseBootstrap.InitializeAsync(
+                    app.Services,
+                    app.Configuration,
+                    startupLog,
+                    includeFileStore: true,
+                    app.Lifetime.ApplicationStopping)
+                .ConfigureAwait(false);
             startupLog.LogInformation("Startup database initialization completed.");
             return;
         }

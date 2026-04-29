@@ -13,11 +13,15 @@ public sealed class TargetCreatedConsumer(
     ILogger<TargetCreatedConsumer> logger,
     IWorkerToggleReader toggles,
     IEnumerationService enumeration,
+    IInboxDeduplicator inbox,
     IEventOutbox outbox)
     : IConsumer<TargetCreated>
 {
     public async Task Consume(ConsumeContext<TargetCreated> context)
     {
+        if (!await inbox.TryBeginProcessingAsync(context.Message, nameof(TargetCreatedConsumer), context.CancellationToken).ConfigureAwait(false))
+            return;
+
         if (!await toggles.IsWorkerEnabledAsync(WorkerKeys.Enumeration, context.CancellationToken).ConfigureAwait(false))
         {
             logger.LogDebug("Enumeration disabled; skipping target {TargetId}", context.Message.TargetId);

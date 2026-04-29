@@ -16,6 +16,7 @@ namespace NightmareV2.Workers.HighValue.Consumers;
 public sealed class HighValueRegexConsumer(
     NightmareDbContext db,
     IWorkerToggleReader toggles,
+    IInboxDeduplicator inbox,
     IHighValueFindingWriter writer,
     IEventOutbox outbox,
     IConfiguration configuration,
@@ -30,6 +31,9 @@ public sealed class HighValueRegexConsumer(
 
     public async Task Consume(ConsumeContext<ScannableContentAvailable> context)
     {
+        if (!await inbox.TryBeginProcessingAsync(context.Message, nameof(HighValueRegexConsumer), context.CancellationToken).ConfigureAwait(false))
+            return;
+
         var ct = context.CancellationToken;
         if (!await toggles.IsWorkerEnabledAsync(WorkerKeys.HighValueRegex, ct).ConfigureAwait(false))
             return;

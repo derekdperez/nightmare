@@ -13,6 +13,7 @@ namespace NightmareV2.Workers.HighValue.Consumers;
 /// </summary>
 public sealed class HighValuePathGuessConsumer(
     IWorkerToggleReader toggles,
+    IInboxDeduplicator inbox,
     IEventOutbox outbox,
     IConfiguration configuration,
     HighValueWordlistBootstrap wordlists,
@@ -20,6 +21,9 @@ public sealed class HighValuePathGuessConsumer(
 {
     public async Task Consume(ConsumeContext<AssetDiscovered> context)
     {
+        if (!await inbox.TryBeginProcessingAsync(context.Message, nameof(HighValuePathGuessConsumer), context.CancellationToken).ConfigureAwait(false))
+            return;
+
         var ct = context.CancellationToken;
         if (!await toggles.IsWorkerEnabledAsync(WorkerKeys.HighValuePaths, ct).ConfigureAwait(false))
             return;

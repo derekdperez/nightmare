@@ -52,6 +52,7 @@ public static class DependencyInjection
         services.AddSingleton<IEnumerationService, DefaultEnumerationService>();
         services.AddSingleton<IPortScanService, DefaultPortScanService>();
         services.AddScoped<IEventOutbox, EfEventOutbox>();
+        services.AddScoped<IInboxDeduplicator, EfInboxDeduplicator>();
         services.AddHostedService<OutboxDispatcherWorker>();
         services.AddSingleton<BusJournalBuffer>();
         services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<BusJournalBuffer>());

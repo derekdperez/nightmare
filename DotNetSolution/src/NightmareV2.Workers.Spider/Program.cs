@@ -1,13 +1,18 @@
 using System.Net.Http;
 using System.Net.Security;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using NightmareV2.Infrastructure;
 using NightmareV2.Infrastructure.Data;
 using NightmareV2.Infrastructure.Messaging;
 using NightmareV2.Workers.Spider;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddOptions<SpiderHttpOptions>()
+    .Bind(builder.Configuration.GetSection("Spider:Http"))
+    .Validate(
+        o => !o.AllowInsecureSsl || builder.Environment.IsDevelopment(),
+        "Spider:Http:AllowInsecureSsl=true is allowed only in Development environment.")
+    .ValidateOnStart();
 
 var allowInsecureSpiderSsl = builder.Configuration.GetValue("Spider:Http:AllowInsecureSsl", false);
 if (allowInsecureSpiderSsl)
@@ -36,13 +41,13 @@ builder.Services.AddHostedService<HttpRequestQueueWorker>();
 builder.Services.AddNightmareRabbitMq(builder.Configuration, _ => { });
 
 var host = builder.Build();
-
-using (var scope = host.Services.CreateScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
-    await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
-    await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db).ConfigureAwait(false);
-    await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
-}
+var startupLog = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+await StartupDatabaseBootstrap.InitializeAsync(
+        host.Services,
+        host.Services.GetRequiredService<IConfiguration>(),
+        startupLog,
+        includeFileStore: false,
+        host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping)
+    .ConfigureAwait(false);
 
 await host.RunAsync().ConfigureAwait(false);
