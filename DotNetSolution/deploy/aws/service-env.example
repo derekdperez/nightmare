@@ -1,0 +1,10 @@
+# Use these environment variables in ECS task definitions.
+ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=nightmare_v2;Username=nightmare;Password=nightmare
+ConnectionStrings__FileStore=Host=postgres;Port=5432;Database=nightmare_v2_files;Username=nightmare;Password=nightmare
+ConnectionStrings__Redis=redis:6379
+RabbitMq__Host=rabbitmq
+RabbitMq__Username=nightmare
+RabbitMq__Password=nightmare
+RabbitMq__VirtualHost=/
+RabbitMq__ManagementUrl=http://rabbitmq:15672
+Nightmare__ListenPlainHttp=true

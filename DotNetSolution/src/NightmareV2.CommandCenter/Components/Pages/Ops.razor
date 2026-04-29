@@ -12,133 +12,113 @@
 <h1>Operations</h1>
 
 <section class="panel">
-    <div class="ops-top-grid">
-        <div class="ops-stat-pane">
-            @if (_overview is null)
-            {
-                <p>Loading summary…</p>
-            }
-            else
-            {
-                <div class="stat-grid">
-                    <div class="stat-card">
-                        <div class="stat-label">Total targets</div>
-                        <div class="stat-value">@_overview.TotalTargets</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Total assets confirmed</div>
-                        <div class="stat-value">@_overview.TotalAssetsConfirmed</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Total URL assets</div>
-                        <div class="stat-value">@_overview.TotalUrlAssets</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">URLs from fetched pages</div>
-                        <div class="stat-value">@_overview.UrlsFromFetchedPages</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">URLs from scripts</div>
-                        <div class="stat-value">@_overview.UrlsFromScripts</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">URLs guessed via wordlist</div>
-                        <div class="stat-value">@_overview.UrlsGuessedWithWordlist</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Domain with most assets</div>
-                        <div class="stat-value small">@(_overview.TopDomainByAssets ?? "—") (@_overview.TopDomainAssetCount)</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Domains with 10+ assets</div>
-                        <div class="stat-value">@_overview.DomainsWith10OrMoreAssets</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Domains with 10 or fewer assets</div>
-                        <div class="stat-value">@_overview.DomainsWith10OrFewerAssets</div>
-                    </div>
-                </div>
-            }
-        </div>
-        <div class="ops-queue-pane">
-            <h2>HTTP request queue</h2>
-            @if (_queueSettings is not null)
-            {
-                <div class="row ops-queue-toolbar" style="align-items:flex-end">
-                    <button type="button" disabled="@_queueSettingsBusy" @onclick="ToggleHttpQueueAsync">
-                        @(_queueSettings.Enabled ? "Disable new requests" : "Enable new requests")
-                    </button>
-                    <div>
-                        <label>Global req/min</label>
-                        <input type="number" min="1" class="ops-filter" @bind="_queueGlobalRequestsPerMinute" />
-                    </div>
-                    <div>
-                        <label>Per-domain req/min</label>
-                        <input type="number" min="1" class="ops-filter" @bind="_queuePerDomainRequestsPerMinute" />
-                    </div>
-                    <div>
-                        <label>Max concurrency</label>
-                        <input type="number" min="1" class="ops-filter" @bind="_queueMaxConcurrency" />
-                    </div>
-                    <div>
-                        <label>Timeout seconds</label>
-                        <input type="number" min="5" max="300" class="ops-filter" @bind="_queueRequestTimeoutSeconds" />
-                    </div>
-                    <button type="button" disabled="@_queueSettingsBusy" @onclick="SaveHttpQueueSettingsAsync">Save queue settings</button>
-                </div>
-                <p class="muted">Queue is @(_queueSettings.Enabled ? "enabled" : "disabled"); updated @(_queueSettings.UpdatedAtUtc.ToString("u")). @_queueSettingsMessage</p>
-            }
-            else
-            {
-                <p class="muted">Queue settings unavailable.</p>
-            }
-            <div class="row">
-                <label>Queue column filters</label>
-                <input type="text" class="ops-filter" placeholder="Kind" @bind="_filterQueueKindCol" />
-                <input type="text" class="ops-filter" placeholder="URL/domain" @bind="_filterQueueRawCol" />
-                <input type="text" class="ops-filter" placeholder="State" @bind="_filterQueuePipelineCol" />
-                <button type="button" @onclick="ClearQueueFilters">Clear all filters</button>
+    @if (_overview is null)
+    {
+        <p>Loading summary…</p>
+    }
+    else
+    {
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total targets</div>
+                <div class="stat-value">@_overview.TotalTargets</div>
             </div>
-            <NightmareDataGrid TGridItem="HttpRequestQueueRowDto"
-                               Items="FilteredRequestQueue"
-                               @bind-SearchText="_filterQueueSearch"
-                               SearchPlaceholder="Filter queue rows…"
-                               ScrollPreset="NightmareDataGridScrollPreset.Medium"
-                               Virtualize="true"
-                               ItemSize="40"
-                               ItemKey="@(q => q.Id)"
-                               OverscanCount="6"
-                               HostTabIndex="@(-1)">
-                <PropertyColumn Title="Created (UTC)" Property="@(q => q.CreatedAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
-                <PropertyColumn Title="State" Property="@(q => q.State)" Sortable="true" />
-                <PropertyColumn Title="Kind" Property="@(q => q.AssetKind)" Sortable="true" />
-                <TemplateColumn Title="Request URL" Context="q" SortBy="@(GridSort<HttpRequestQueueRowDto>.ByAscending(x => x.RequestUrl))">
-                    @{
-                        var href = ToLiveHref(q);
-                    }
-                    @if (string.IsNullOrEmpty(href))
-                    {
-                        <span>@q.RequestUrl</span>
-                    }
-                    else
-                    {
-                        <a href="@href" target="_blank" rel="noopener noreferrer">@q.RequestUrl</a>
-                    }
-                </TemplateColumn>
-                <PropertyColumn Title="Domain" Property="@(q => q.DomainKey)" Sortable="true" />
-                <PropertyColumn Title="Attempts" Property="@(q => q.AttemptCount)" Sortable="true" />
-                <PropertyColumn Title="HTTP" Property="@(q => q.LastHttpStatus)" Sortable="true" />
-                <PropertyColumn Title="Duration ms" Property="@(q => q.DurationMs)" Sortable="true" />
-                <TemplateColumn Title="Last error" Context="q">
-                    <span title="@q.LastError">@(string.IsNullOrWhiteSpace(q.LastError) ? "—" : q.LastError)</span>
-                </TemplateColumn>
-            </NightmareDataGrid>
+            <div class="stat-card">
+                <div class="stat-label">Total assets confirmed</div>
+                <div class="stat-value">@_overview.TotalAssetsConfirmed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total URL assets</div>
+                <div class="stat-value">@_overview.TotalUrlAssets</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">URLs from fetched pages</div>
+                <div class="stat-value">@_overview.UrlsFromFetchedPages</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">URLs from scripts</div>
+                <div class="stat-value">@_overview.UrlsFromScripts</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">URLs guessed via wordlist</div>
+                <div class="stat-value">@_overview.UrlsGuessedWithWordlist</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Domain with most assets</div>
+                <div class="stat-value small">@(_overview.TopDomainByAssets ?? "—") (@_overview.TopDomainAssetCount)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Domains with 10+ assets</div>
+                <div class="stat-value">@_overview.DomainsWith10OrMoreAssets</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Domains with 10 or fewer assets</div>
+                <div class="stat-value">@_overview.DomainsWith10OrFewerAssets</div>
+            </div>
         </div>
-    </div>
+    }
 </section>
 
 <section class="panel">
     <h2>Assets</h2>
+    @if (_maintenanceStatus is { Enabled: true })
+    {
+        <div class="row" style="align-items:flex-end">
+            @if (_maintenanceStatus.ApiKeyConfigured)
+            {
+                <div>
+                    <label>Maintenance API key</label>
+                    <input type="password" class="ops-filter" style="min-width:16rem" @bind="_maintenanceApiKey" autocomplete="off" />
+                </div>
+            }
+            <div>
+                <label>Confirm all-target delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:16rem" @bind="_phraseClearTargets" placeholder="@DataMaintenanceEndpoints.PhraseClearAllTargets" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAllTargetsAsync">Delete all targets</button>
+        </div>
+        <div class="row" style="align-items:flex-end">
+            <div>
+                <label>Confirm all-assets delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:16rem" @bind="_phraseClearAssets" placeholder="@DataMaintenanceEndpoints.PhraseClearAllAssets" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAllAssetsAsync">Delete all assets</button>
+        </div>
+        <div class="row" style="align-items:flex-end">
+            <div>
+                <label>Domain root</label>
+                <input type="text" class="ops-filter" style="min-width:12rem" @bind="_phraseClearDomainRoot" placeholder="example.com" />
+            </div>
+            <div>
+                <label>Confirm domain delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:18rem" @bind="_phraseClearDomain" placeholder="@DataMaintenanceEndpoints.PhraseClearAssetsForDomain" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsForDomainAsync">Delete assets for domain</button>
+        </div>
+        <div class="row" style="align-items:flex-end">
+            <div>
+                <label>Asset kind (e.g. Url)</label>
+                <input type="text" class="ops-filter" style="min-width:10rem" @bind="_filterDeleteKind" />
+            </div>
+            <div>
+                <label>Status (Queued/Confirmed/NonExistent)</label>
+                <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteStatus" />
+            </div>
+            <div>
+                <label>Found by contains</label>
+                <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteDiscoveredBy" />
+            </div>
+            <div>
+                <label>Confirm filtered delete phrase</label>
+                <input type="text" class="ops-filter" style="min-width:18rem" @bind="_phraseClearFiltered" placeholder="@DataMaintenanceEndpoints.PhraseClearAssetsFiltered" />
+            </div>
+            <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsFilteredAsync">Delete filtered assets</button>
+        </div>
+        @if (!string.IsNullOrWhiteSpace(_maintenanceMessage))
+        {
+            <p class="muted">@_maintenanceMessage</p>
+        }
+    }
 
     <div class="row">
         <label>Target filter</label>
@@ -195,135 +175,74 @@
 </section>
 
 <section class="panel">
-    <div class="ops-bottom-grid">
-        <div class="ops-events-pane">
-            <h2>Event system</h2>
-            <p class="muted">Recent message bus journal entries (publishes in a short window, plus the newest tail of the full journal).</p>
-            <div class="ops-bus-block">
-                <h3 class="subhead">Recent publishes</h3>
-                <NightmareDataGrid TGridItem="BusJournalRowDto"
-                                   Items="LiveBusRows"
-                                   @bind-SearchText="_busLiveSearch"
-                                   SearchPlaceholder="Filter direction, type, host, payload…"
-                                   ScrollPreset="NightmareDataGridScrollPreset.Medium"
-                                   Virtualize="true"
-                                   ItemSize="36"
-                                   ItemKey="@(e => e.Id)"
-                                   OverscanCount="5"
-                                   RowMatches="@BusJournalRowMatches"
-                                   HostTabIndex="@(-1)">
-                    <PropertyColumn Title="Occurred (UTC)" Property="@(e => e.OccurredAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
-                    <PropertyColumn Title="Direction" Property="@(e => e.Direction)" Sortable="true" />
-                    <PropertyColumn Title="Message type" Property="@(e => e.MessageType)" Sortable="true" />
-                    <PropertyColumn Title="Host" Property="@(e => e.HostName)" Sortable="true" />
-                    <PropertyColumn Title="Consumer" Property="@(e => e.ConsumerType ?? "")" Sortable="true" />
-                    <TemplateColumn Title="Payload" Context="e">
-                        <span class="mono small" title="@e.PayloadJson">@(string.IsNullOrEmpty(e.PayloadJson) ? "—" : (e.PayloadJson.Length > 160 ? e.PayloadJson[..160] + "…" : e.PayloadJson))</span>
-                    </TemplateColumn>
-                </NightmareDataGrid>
+    <h2>HTTP Request Queue</h2>
+    @if (_queueSettings is not null)
+    {
+        <div class="row" style="align-items:flex-end">
+            <button type="button" disabled="@_queueSettingsBusy" @onclick="ToggleHttpQueueAsync">
+                @(_queueSettings.Enabled ? "Disable new requests" : "Enable new requests")
+            </button>
+            <div>
+                <label>Global req/min</label>
+                <input type="number" min="1" class="ops-filter" @bind="_queueGlobalRequestsPerMinute" />
             </div>
-            <div class="ops-bus-block">
-                <h3 class="subhead">Journal tail</h3>
-                <NightmareDataGrid TGridItem="BusJournalRowDto"
-                                   Items="HistoryBusRows"
-                                   @bind-SearchText="_busHistorySearch"
-                                   SearchPlaceholder="Filter direction, type, host, payload…"
-                                   ScrollPreset="NightmareDataGridScrollPreset.Medium"
-                                   Virtualize="true"
-                                   ItemSize="36"
-                                   ItemKey="@(e => e.Id)"
-                                   OverscanCount="5"
-                                   RowMatches="@BusJournalRowMatches"
-                                   HostTabIndex="@(-1)">
-                    <PropertyColumn Title="Id" Property="@(e => e.Id)" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
-                    <PropertyColumn Title="Occurred (UTC)" Property="@(e => e.OccurredAtUtc)" Format="u" Sortable="true" />
-                    <PropertyColumn Title="Direction" Property="@(e => e.Direction)" Sortable="true" />
-                    <PropertyColumn Title="Message type" Property="@(e => e.MessageType)" Sortable="true" />
-                    <PropertyColumn Title="Host" Property="@(e => e.HostName)" Sortable="true" />
-                    <PropertyColumn Title="Consumer" Property="@(e => e.ConsumerType ?? "")" Sortable="true" />
-                    <TemplateColumn Title="Payload" Context="e">
-                        <span class="mono small" title="@e.PayloadJson">@(string.IsNullOrEmpty(e.PayloadJson) ? "—" : (e.PayloadJson.Length > 160 ? e.PayloadJson[..160] + "…" : e.PayloadJson))</span>
-                    </TemplateColumn>
-                </NightmareDataGrid>
+            <div>
+                <label>Per-domain req/min</label>
+                <input type="number" min="1" class="ops-filter" @bind="_queuePerDomainRequestsPerMinute" />
             </div>
+            <div>
+                <label>Max concurrency</label>
+                <input type="number" min="1" class="ops-filter" @bind="_queueMaxConcurrency" />
+            </div>
+            <div>
+                <label>Timeout seconds</label>
+                <input type="number" min="5" max="300" class="ops-filter" @bind="_queueRequestTimeoutSeconds" />
+            </div>
+            <button type="button" disabled="@_queueSettingsBusy" @onclick="SaveHttpQueueSettingsAsync">Save queue settings</button>
         </div>
-        <div class="ops-devtools-pane">
-            <h2>Maintenance &amp; debug</h2>
-            <p class="muted">Dangerous operations require the maintenance API key (if configured) and confirmation phrases.</p>
-            <div class="ops-devtools-actions">
-                <a href="/health" target="_blank" rel="noopener noreferrer">Open /health</a>
-                <a href="/health/ready" target="_blank" rel="noopener noreferrer">Open /health/ready</a>
-            </div>
-            @if (_maintenanceStatus is { Enabled: true })
+        <p class="muted">Queue is @(_queueSettings.Enabled ? "enabled" : "disabled"); updated @(_queueSettings.UpdatedAtUtc.ToString("u")). @_queueSettingsMessage</p>
+    }
+    <div class="row">
+        <label>Queue column filters</label>
+        <input type="text" class="ops-filter" placeholder="Kind" @bind="_filterQueueKindCol" />
+        <input type="text" class="ops-filter" placeholder="URL/domain" @bind="_filterQueueRawCol" />
+        <input type="text" class="ops-filter" placeholder="State" @bind="_filterQueuePipelineCol" />
+        <button type="button" @onclick="ClearQueueFilters">Clear all filters</button>
+    </div>
+    <NightmareDataGrid TGridItem="HttpRequestQueueRowDto"
+                       Items="FilteredRequestQueue"
+                       @bind-SearchText="_filterQueueSearch"
+                       SearchPlaceholder="Filter queue rows…"
+                       ScrollPreset="NightmareDataGridScrollPreset.Medium"
+                       Virtualize="true"
+                       ItemSize="40"
+                       ItemKey="@(q => q.Id)"
+                       OverscanCount="6"
+                       HostTabIndex="@(-1)">
+        <PropertyColumn Title="Created (UTC)" Property="@(q => q.CreatedAtUtc)" Format="u" Sortable="true" IsDefaultSortColumn="true" InitialSortDirection="Descending" />
+        <PropertyColumn Title="State" Property="@(q => q.State)" Sortable="true" />
+        <PropertyColumn Title="Kind" Property="@(q => q.AssetKind)" Sortable="true" />
+        <TemplateColumn Title="Request URL" Context="q" SortBy="@(GridSort<HttpRequestQueueRowDto>.ByAscending(x => x.RequestUrl))">
+            @{
+                var href = ToLiveHref(q);
+            }
+            @if (string.IsNullOrEmpty(href))
             {
-                @if (_maintenanceStatus.ApiKeyConfigured)
-                {
-                    <div class="row" style="align-items:flex-end">
-                        <div>
-                            <label>Maintenance API key</label>
-                            <input type="password" class="ops-filter" style="min-width:16rem" @bind="_maintenanceApiKey" autocomplete="off" />
-                        </div>
-                    </div>
-                }
-                <div class="row" style="align-items:flex-end">
-                    <div>
-                        <label>Confirm all-target delete phrase</label>
-                        <input type="text" class="ops-filter" style="min-width:16rem" @bind="_phraseClearTargets" placeholder="@DataMaintenanceEndpoints.PhraseClearAllTargets" />
-                    </div>
-                    <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAllTargetsAsync">Delete all targets</button>
-                </div>
-                <div class="row" style="align-items:flex-end">
-                    <div>
-                        <label>Confirm all-assets delete phrase</label>
-                        <input type="text" class="ops-filter" style="min-width:16rem" @bind="_phraseClearAssets" placeholder="@DataMaintenanceEndpoints.PhraseClearAllAssets" />
-                    </div>
-                    <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAllAssetsAsync">Delete all assets</button>
-                </div>
-                <div class="row" style="align-items:flex-end">
-                    <div>
-                        <label>Domain root</label>
-                        <input type="text" class="ops-filter" style="min-width:12rem" @bind="_phraseClearDomainRoot" placeholder="example.com" />
-                    </div>
-                    <div>
-                        <label>Confirm domain delete phrase</label>
-                        <input type="text" class="ops-filter" style="min-width:18rem" @bind="_phraseClearDomain" placeholder="@DataMaintenanceEndpoints.PhraseClearAssetsForDomain" />
-                    </div>
-                    <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsForDomainAsync">Delete assets for domain</button>
-                </div>
-                <div class="row" style="align-items:flex-end">
-                    <div>
-                        <label>Asset kind (e.g. Url)</label>
-                        <input type="text" class="ops-filter" style="min-width:10rem" @bind="_filterDeleteKind" />
-                    </div>
-                    <div>
-                        <label>Status (Queued/Confirmed/NonExistent)</label>
-                        <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteStatus" />
-                    </div>
-                    <div>
-                        <label>Found by contains</label>
-                        <input type="text" class="ops-filter" style="min-width:12rem" @bind="_filterDeleteDiscoveredBy" />
-                    </div>
-                    <div>
-                        <label>Confirm filtered delete phrase</label>
-                        <input type="text" class="ops-filter" style="min-width:18rem" @bind="_phraseClearFiltered" placeholder="@DataMaintenanceEndpoints.PhraseClearAssetsFiltered" />
-                    </div>
-                    <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsFilteredAsync">Delete filtered assets</button>
-                </div>
-                <div class="row" style="align-items:flex-end">
-                    <button type="button" disabled="@_maintenanceBusy" @onclick="ClearAssetsMatchingAssetGridFiltersAsync">Delete assets matching Assets grid column filters</button>
-                    <span class="muted small">Uses Kind, Status, and Pipeline (discovered-by) filters from the Assets section above.</span>
-                </div>
-                @if (!string.IsNullOrWhiteSpace(_maintenanceMessage))
-                {
-                    <p class="muted">@_maintenanceMessage</p>
-                }
+                <span>@q.RequestUrl</span>
             }
             else
             {
-                <p class="muted">Maintenance API is disabled. Enable <code>Nightmare:Maintenance:Enabled</code> to use these controls.</p>
+                <a href="@href" target="_blank" rel="noopener noreferrer">@q.RequestUrl</a>
             }
-        </div>
-    </div>
+        </TemplateColumn>
+        <PropertyColumn Title="Domain" Property="@(q => q.DomainKey)" Sortable="true" />
+        <PropertyColumn Title="Attempts" Property="@(q => q.AttemptCount)" Sortable="true" />
+        <PropertyColumn Title="HTTP" Property="@(q => q.LastHttpStatus)" Sortable="true" />
+        <PropertyColumn Title="Duration ms" Property="@(q => q.DurationMs)" Sortable="true" />
+        <TemplateColumn Title="Last error" Context="q">
+            <span title="@q.LastError">@(string.IsNullOrWhiteSpace(q.LastError) ? "—" : q.LastError)</span>
+        </TemplateColumn>
+    </NightmareDataGrid>
 </section>
 
 @code {
@@ -362,8 +281,6 @@
     private int _queuePerDomainRequestsPerMinute = 6;
     private int _queueMaxConcurrency = 8;
     private int _queueRequestTimeoutSeconds = 30;
-    private string _busLiveSearch = "";
-    private string _busHistorySearch = "";
 
     protected override async Task OnInitializedAsync()
     {
@@ -380,7 +297,6 @@
                 await Task.Delay(2000, _pollCts.Token).ConfigureAwait(false);
                 await ReloadVolatileAsync().ConfigureAwait(false);
                 await ReloadHttpQueueAsync().ConfigureAwait(false);
-                await ReloadBusAsync().ConfigureAwait(false);
                 await InvokeAsync(StateHasChanged).ConfigureAwait(false);
             }
         }
@@ -422,7 +338,6 @@
         await ReloadHttpQueueAsync().ConfigureAwait(false);
         await ReloadHttpQueueSettingsAsync().ConfigureAwait(false);
         await ReloadVolatileAsync().ConfigureAwait(false);
-        await ReloadBusAsync().ConfigureAwait(false);
         try
         {
             _maintenanceStatus = await Http.GetFromJsonAsync<MaintenanceStatusDto>("/api/maintenance/status").ConfigureAwait(false);
@@ -452,33 +367,6 @@
         catch
         {
             _assets.Clear();
-        }
-    }
-
-    private async Task ReloadBusAsync()
-    {
-        try
-        {
-            var live = await Http.GetFromJsonAsync<List<BusJournalRowDto>>("/api/bus/live?minutes=5&take=200").ConfigureAwait(false);
-            _liveBus.Clear();
-            if (live is not null)
-                _liveBus.AddRange(live);
-        }
-        catch
-        {
-            _liveBus.Clear();
-        }
-
-        try
-        {
-            var hist = await Http.GetFromJsonAsync<List<BusJournalRowDto>>("/api/bus/history?take=400").ConfigureAwait(false);
-            _historyBus.Clear();
-            if (hist is not null)
-                _historyBus.AddRange(hist);
-        }
-        catch
-        {
-            _historyBus.Clear();
         }
     }
 
@@ -673,34 +561,6 @@
             var resp = await MaintenancePostAsync("/api/maintenance/clear-assets-filtered", body).ConfigureAwait(false);
             var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
             _maintenanceMessage = resp.IsSuccessStatusCode ? $"Deleted filtered assets: {txt}" : $"Delete filtered assets failed ({(int)resp.StatusCode}): {txt}";
-            if (resp.IsSuccessStatusCode)
-                await ReloadAllAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            _maintenanceBusy = false;
-        }
-    }
-
-    private async Task ClearAssetsMatchingAssetGridFiltersAsync()
-    {
-        var kind = string.IsNullOrWhiteSpace(_filterKindCol) ? null : _filterKindCol.Trim();
-        var status = string.IsNullOrWhiteSpace(_filterStatusCol) ? null : _filterStatusCol.Trim();
-        var discoveredBy = string.IsNullOrWhiteSpace(_filterPipelineCol) ? null : _filterPipelineCol.Trim();
-        if (kind is null && status is null && discoveredBy is null)
-        {
-            _maintenanceMessage = "Set at least one Assets column filter (Kind, Status, or Pipeline) before deleting.";
-            return;
-        }
-
-        _maintenanceBusy = true;
-        _maintenanceMessage = "";
-        try
-        {
-            var body = new MaintenanceClearAssetsFilteredBody(_phraseClearFiltered.Trim(), kind, status, discoveredBy);
-            var resp = await MaintenancePostAsync("/api/maintenance/clear-assets-filtered", body).ConfigureAwait(false);
-            var txt = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            _maintenanceMessage = resp.IsSuccessStatusCode ? $"Deleted assets (grid filters): {txt}" : $"Delete failed ({(int)resp.StatusCode}): {txt}";
             if (resp.IsSuccessStatusCode)
                 await ReloadAllAsync().ConfigureAwait(false);
         }

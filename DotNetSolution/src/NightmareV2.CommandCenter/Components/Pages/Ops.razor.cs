@@ -8,9 +8,6 @@ namespace NightmareV2.CommandCenter.Components.Pages;
 
 public partial class Ops
 {
-    private readonly List<BusJournalRowDto> _liveBus = [];
-    private readonly List<BusJournalRowDto> _historyBus = [];
-
     private static readonly GridSort<AssetGridRowDto> SortAssetDiscoveryContext =
         GridSort<AssetGridRowDto>.ByAscending(static a => a.DiscoveryContext);
 
@@ -38,7 +35,7 @@ public partial class Ops
              || GridTextFilter.Matches(q.RequestUrl, _filterQueueSearch)
              || GridTextFilter.Matches(q.DomainKey, _filterQueueSearch)
              || GridTextFilter.Matches(q.State, _filterQueueSearch)
-             || GridTextFilter.Matches(q.LastHttpStatus == null ? "" : q.LastHttpStatus.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), _filterQueueSearch)
+             || GridTextFilter.Matches(q.LastHttpStatus?.ToString(), _filterQueueSearch)
              || GridTextFilter.Matches(q.LastError, _filterQueueSearch))
             && GridTextFilter.Matches(q.AssetKind, _filterQueueKindCol)
             && GridTextFilter.Matches(q.RequestUrl, _filterQueueRawCol)
@@ -57,19 +54,6 @@ public partial class Ops
             return absolute.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
         return null;
     }
-
-    private IQueryable<BusJournalRowDto> LiveBusRows =>
-        _liveBus.AsQueryable().OrderByDescending(e => e.OccurredAtUtc);
-
-    private IQueryable<BusJournalRowDto> HistoryBusRows =>
-        _historyBus.AsQueryable().OrderByDescending(e => e.Id);
-
-    private static bool BusJournalRowMatches(BusJournalRowDto e, string q) =>
-        GridTextFilter.Matches(e.Direction, q)
-        || GridTextFilter.Matches(e.MessageType, q)
-        || GridTextFilter.Matches(e.ConsumerType, q)
-        || GridTextFilter.Matches(e.HostName, q)
-        || GridTextFilter.Matches(e.PayloadJson, q);
 
     private static string? ToLiveHref(AssetGridRowDto row)
     {

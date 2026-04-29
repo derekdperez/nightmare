@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Assets;
 using NightmareV2.Application.FileStore;
@@ -24,7 +23,6 @@ using NightmareV2.Infrastructure.Data;
 using NightmareV2.Infrastructure.Messaging;
 
 var builder = WebApplication.CreateBuilder(args);
-ApplyListenPlainHttpDefaultForContainers(builder);
 
 OpsSnapshotBuilder.RegisterHttpClient(builder);
 
@@ -806,17 +804,3 @@ app.MapPut(
     .WithName("PatchWorker");
 
 app.Run();
-
-static void ApplyListenPlainHttpDefaultForContainers(WebApplicationBuilder b)
-{
-    if (!string.Equals(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"), "true", StringComparison.OrdinalIgnoreCase))
-        return;
-    // Respect explicit operator configuration (e.g. compose env Nightmare__ListenPlainHttp).
-    if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("Nightmare__ListenPlainHttp")))
-        return;
-    if (b.Configuration is not ConfigurationManager mgr)
-        return;
-    // Official ASP.NET images set DOTNET_RUNNING_IN_CONTAINER; plain HTTP on :8080 is typical.
-    // Without this, appsettings.json defaults ListenPlainHttp=false and UseHttpsRedirection breaks browser access.
-    mgr["Nightmare:ListenPlainHttp"] = "true";
-}
