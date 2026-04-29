@@ -1,5 +1,13 @@
 # Run from DotNetSolution: ./deploy/deploy.sh  (installs Docker on Linux if needed; see deploy/lib-install-deps.sh)
 # Or: docker compose -f deploy/docker-compose.yml --project-directory . up -d --build
+#
+# Troubleshooting:
+# - "failed to execute bake: exit status 1": deploy scripts default COMPOSE_BAKE=false. If you invoke compose
+#   yourself, try:  COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml build
+# - Inspecting the Command Center image without Postgres: the app ENTRYPOINT is the web DLL; appsettings default
+#   Postgres is localhost. Use compose (sets ConnectionStrings__Postgres=Host=postgres) or override env. To run
+#   the dotnet CLI in the image:  docker run --rm --entrypoint dotnet <image> --info
+# - Skip DB creation on startup (smoke tests only): NIGHTMARE_SKIP_STARTUP_DATABASE=1 (see Nightmare:SkipStartupDatabase).
 name: nightmare-v2
 
 x-dotnet-build-args: &dotnet-build-args

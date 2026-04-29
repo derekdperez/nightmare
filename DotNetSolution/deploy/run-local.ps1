@@ -39,6 +39,11 @@ else {
   Write-Error "Docker is not on PATH. Install Docker Desktop for Windows."
 }
 
+# See deploy/lib-nightmare-compose.sh — bake can fail opaquely on some hosts; allow override with COMPOSE_BAKE=true.
+if ([string]::IsNullOrWhiteSpace($env:COMPOSE_BAKE)) {
+  $env:COMPOSE_BAKE = "false"
+}
+
 $ScriptRoot = $PSScriptRoot
 if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 

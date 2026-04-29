@@ -10,8 +10,16 @@
 # - Remove commands when no longer needed.
 # =============================================================================
 
+# Harmless workflow validation (paths + optional Docker Compose file check):
+pwd
+test -f deploy/docker-compose.yml && echo compose_file_ok
+dotnet --version 2>&1 || true
+
+# Docker (may fail if daemon missing or user lacks permission — still useful output):
+COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml version 2>&1 || true
+COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml config -q 2>&1 && echo compose_config_ok || true
+
 # Examples (commented — uncomment or copy when needed):
-# pwd
 # git status -sb
 # git rev-parse HEAD
 # dotnet --info

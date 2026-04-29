@@ -31,6 +31,13 @@ This **DotNetSolution** folder includes a **machine-run diagnostic harness** for
 
 `debug_results.json` is **gitignored**; it is generated locally and may contain machine-specific paths.
 
+## Docker / Compose (agents)
+
+- **Bake build failures** (`failed to execute bake: exit status 1`): `deploy/lib-nightmare-compose.sh` and `deploy/run-local.ps1` default **`COMPOSE_BAKE=false`**. For manual compose: `COMPOSE_BAKE=false docker compose -f deploy/docker-compose.yml build`.
+- **`docker run … dotnet --info` starts the web app**: the image **ENTRYPOINT** is `dotnet NightmareV2.CommandCenter.dll`; extra words become **app arguments**, not a new process. Use: `docker run --rm --entrypoint dotnet <image> --info`.
+- **Postgres `127.0.0.1` inside a standalone container**: published `appsettings.json` uses `localhost` for Postgres. Compose sets `ConnectionStrings__Postgres` to `Host=postgres`. Run through compose, or pass `-e ConnectionStrings__Postgres=…` pointing at a reachable host.
+- **Smoke test without DB** (not for production): `NIGHTMARE_SKIP_STARTUP_DATABASE=1` or config `Nightmare:SkipStartupDatabase` skips startup `EnsureCreated`; APIs that touch the DB will still fail until Postgres is configured.
+
 ## Safety rules (agents)
 
 - No destructive commands (no `rm -rf`, `docker system prune`, database drops, etc.).

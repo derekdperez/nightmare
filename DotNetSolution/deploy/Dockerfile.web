@@ -24,4 +24,6 @@ EXPOSE 8080
 COPY --from=build /app/publish .
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1
+# Default process is the web app. To run the dotnet host inside this image (e.g. --info), override entrypoint:
+#   docker run --rm --entrypoint dotnet <this-image> --info
 ENTRYPOINT ["dotnet", "NightmareV2.CommandCenter.dll"]

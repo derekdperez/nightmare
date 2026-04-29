@@ -41,24 +41,40 @@ builder.Services.AddNightmareRabbitMq(builder.Configuration, _ => { });
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
-    await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
-    await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db).ConfigureAwait(false);
-    await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
+var skipStartupDatabase = app.Configuration.GetValue("Nightmare:SkipStartupDatabase", false)
+    || string.Equals(
+        Environment.GetEnvironmentVariable("NIGHTMARE_SKIP_STARTUP_DATABASE"),
+        "1",
+        StringComparison.OrdinalIgnoreCase);
 
-    try
+if (!skipStartupDatabase)
+{
+    using (var scope = app.Services.CreateScope())
     {
-        var fileStoreFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FileStoreDbContext>>();
-        await using var fs = await fileStoreFactory.CreateDbContextAsync().ConfigureAwait(false);
-        await fs.Database.EnsureCreatedAsync().ConfigureAwait(false);
+        var db = scope.ServiceProvider.GetRequiredService<NightmareDbContext>();
+        await db.Database.EnsureCreatedAsync().ConfigureAwait(false);
+        await NightmareDbSchemaPatches.ApplyAfterEnsureCreatedAsync(db).ConfigureAwait(false);
+        await NightmareDbSeeder.SeedWorkerSwitchesAsync(db).ConfigureAwait(false);
+
+        try
+        {
+            var fileStoreFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FileStoreDbContext>>();
+            await using var fs = await fileStoreFactory.CreateDbContextAsync().ConfigureAwait(false);
+            await fs.Database.EnsureCreatedAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            var log = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+            log.LogWarning(ex, "File store database unavailable; create database nightmare_v2_files or set ConnectionStrings:FileStore.");
+        }
     }
-    catch (Exception ex)
-    {
-        var log = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
-        log.LogWarning(ex, "File store database unavailable; create database nightmare_v2_files or set ConnectionStrings:FileStore.");
-    }
+}
+else
+{
+    var startupLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+    startupLog.LogWarning(
+        "Startup database EnsureCreated skipped (Nightmare:SkipStartupDatabase or NIGHTMARE_SKIP_STARTUP_DATABASE=1). "
+        + "APIs that need Postgres will still fail until a database is reachable.");
 }
 
 var listenPlainHttp = app.Configuration.GetValue("Nightmare:ListenPlainHttp", false);

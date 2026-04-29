@@ -16,6 +16,7 @@
 #   NIGHTMARE_NO_CACHE=1   docker compose build --no-cache
 #   NIGHTMARE_SKIP_INSTALL=1   Do not auto-install Docker; fail if missing
 #   NIGHTMARE_DEPLOY_FRESH=1   Same as -fresh
+#   COMPOSE_BAKE=true|false   deploy/lib-nightmare-compose.sh defaults to false (see docker-compose.yml header).
 #
 # Requires: Docker Engine + Compose V2 ("docker compose") or V1 ("docker-compose").
 # On Linux, missing Docker/Compose is installed automatically (see deploy/lib-install-deps.sh).

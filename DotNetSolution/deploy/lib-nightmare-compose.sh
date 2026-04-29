@@ -96,6 +96,9 @@ nightmare_maybe_git_pull() {
 
 compose() {
   : "${ROOT:?ROOT must point to DotNetSolution root}"
+  # Compose v2 can delegate multi-service builds to "bake", which has had stability issues on some
+  # Linux installs (opaque "failed to execute bake: exit status 1"). Default off; set COMPOSE_BAKE=true to opt in.
+  export COMPOSE_BAKE="${COMPOSE_BAKE:-false}"
   local cf="$ROOT/deploy/docker-compose.yml"
   if nightmare_docker compose version >/dev/null 2>&1; then
     nightmare_docker compose -f "$cf" "$@"

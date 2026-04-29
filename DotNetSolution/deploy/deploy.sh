@@ -19,6 +19,7 @@
 #   NIGHTMARE_NO_CACHE=1   docker compose build --no-cache (also implied by -fresh)
 #   NIGHTMARE_SKIP_INSTALL=1   Do not install Docker / curl / git; fail if docker or compose is missing.
 #   NIGHTMARE_DEPLOY_FRESH=1   Same as passing -fresh on the command line.
+#   COMPOSE_BAKE=true|false   Multi-service compose builds may use "bake"; scripts default to false for stability.
 #
 # If you see: unknown shorthand flag: 'd' in -d
 #   you ran "docker compose ..." without the Compose plugin — "compose" was ignored and
