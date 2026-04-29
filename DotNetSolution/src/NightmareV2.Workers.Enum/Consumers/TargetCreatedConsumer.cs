@@ -9,7 +9,11 @@ namespace NightmareV2.Workers.Enum.Consumers;
 /// <summary>
 /// Passive discovery entry point. Stub emits subdomains as Raw assets for Gatekeeper.
 /// </summary>
-public sealed class TargetCreatedConsumer(ILogger<TargetCreatedConsumer> logger, IWorkerToggleReader toggles, IEventOutbox outbox)
+public sealed class TargetCreatedConsumer(
+    ILogger<TargetCreatedConsumer> logger,
+    IWorkerToggleReader toggles,
+    IEnumerationService enumeration,
+    IEventOutbox outbox)
     : IConsumer<TargetCreated>
 {
     public async Task Consume(ConsumeContext<TargetCreated> context)
@@ -25,7 +29,12 @@ public sealed class TargetCreatedConsumer(ILogger<TargetCreatedConsumer> logger,
 
         var correlation = m.CorrelationId == Guid.Empty ? NewId.NextGuid() : m.CorrelationId;
         var causation = m.EventId == Guid.Empty ? correlation : m.EventId;
-        var subs = new[] { $"www.{m.RootDomain}", $"api.{m.RootDomain}", $"dev.{m.RootDomain}" };
+        var subs = await enumeration.DiscoverSubdomainsAsync(m, context.CancellationToken).ConfigureAwait(false);
+        if (subs.Count == 0)
+        {
+            logger.LogInformation("Enumeration found no resolvable subdomains for {Domain}.", m.RootDomain);
+            return;
+        }
 
         foreach (var sub in subs)
         {
