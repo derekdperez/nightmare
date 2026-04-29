@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using Microsoft.AspNetCore.Components.QuickGrid;
 using NightmareV2.CommandCenter.Components.DataGrid;
@@ -35,7 +36,11 @@ public partial class Ops
              || GridTextFilter.Matches(q.RequestUrl, _filterQueueSearch)
              || GridTextFilter.Matches(q.DomainKey, _filterQueueSearch)
              || GridTextFilter.Matches(q.State, _filterQueueSearch)
-             || GridTextFilter.Matches(q.LastHttpStatus?.ToString(), _filterQueueSearch)
+             || GridTextFilter.Matches(
+                 q.LastHttpStatus != null
+                     ? q.LastHttpStatus.Value.ToString(CultureInfo.InvariantCulture)
+                     : string.Empty,
+                 _filterQueueSearch)
              || GridTextFilter.Matches(q.LastError, _filterQueueSearch))
             && GridTextFilter.Matches(q.AssetKind, _filterQueueKindCol)
             && GridTextFilter.Matches(q.RequestUrl, _filterQueueRawCol)

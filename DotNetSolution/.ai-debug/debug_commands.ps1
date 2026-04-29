@@ -15,10 +15,9 @@ Get-Location
 if (Test-Path -LiteralPath 'deploy/docker-compose.yml') { 'compose_file_ok' }
 dotnet --version 2>&1
 
-# Docker (may fail if Docker Desktop is not running — stderr is still captured):
-$env:COMPOSE_BAKE = 'false'
-docker compose -f deploy/docker-compose.yml version 2>&1
-docker compose -f deploy/docker-compose.yml config -q 2>&1; if ($LASTEXITCODE -eq 0) { 'compose_config_ok' }
+# Docker (each line is its own process — set COMPOSE_BAKE per line; may fail if Docker is not running):
+$env:COMPOSE_BAKE = 'false'; docker compose -f deploy/docker-compose.yml version 2>&1
+$env:COMPOSE_BAKE = 'false'; docker compose -f deploy/docker-compose.yml config -q 2>&1; if ($LASTEXITCODE -eq 0) { 'compose_config_ok' }
 
 # Examples (commented — uncomment or copy when needed):
 # git status -sb
