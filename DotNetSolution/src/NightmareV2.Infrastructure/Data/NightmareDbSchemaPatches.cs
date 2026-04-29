@@ -74,6 +74,43 @@ public static class NightmareDbSchemaPatches
                 cancellationToken)
             .ConfigureAwait(false);
 
+        await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS outbox_messages (
+                    id uuid NOT NULL PRIMARY KEY,
+                    message_type character varying(512) NOT NULL,
+                    payload_json text NOT NULL,
+                    event_id uuid NOT NULL,
+                    correlation_id uuid NOT NULL,
+                    causation_id uuid NOT NULL,
+                    occurred_at_utc timestamp with time zone NOT NULL,
+                    producer character varying(128) NOT NULL,
+                    state character varying(32) NOT NULL DEFAULT 'Pending',
+                    attempt_count integer NOT NULL DEFAULT 0,
+                    created_at_utc timestamp with time zone NOT NULL DEFAULT now(),
+                    updated_at_utc timestamp with time zone NOT NULL DEFAULT now(),
+                    next_attempt_at_utc timestamp with time zone NOT NULL DEFAULT now(),
+                    dispatched_at_utc timestamp with time zone NULL,
+                    last_error character varying(2048) NULL,
+                    locked_by character varying(256) NULL,
+                    locked_until_utc timestamp with time zone NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_outbox_messages_event_id ON outbox_messages (event_id);
+                CREATE INDEX IF NOT EXISTS ix_outbox_messages_state_next_attempt ON outbox_messages (state, next_attempt_at_utc);
+                CREATE INDEX IF NOT EXISTS ix_outbox_messages_created_at ON outbox_messages (created_at_utc DESC);
+
+                CREATE TABLE IF NOT EXISTS inbox_messages (
+                    id uuid NOT NULL PRIMARY KEY,
+                    event_id uuid NOT NULL,
+                    consumer character varying(256) NOT NULL,
+                    processed_at_utc timestamp with time zone NOT NULL DEFAULT now()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_inbox_messages_event_consumer ON inbox_messages (event_id, consumer);
+                """,
+                cancellationToken)
+            .ConfigureAwait(false);
+
 
 
         await db.Database.ExecuteSqlRawAsync(

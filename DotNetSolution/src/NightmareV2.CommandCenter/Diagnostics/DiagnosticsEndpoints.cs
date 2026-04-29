@@ -46,8 +46,15 @@ public static class DiagnosticsEndpoints
                         return Results.NotFound();
 
                     var requiredKey = config["Nightmare:Diagnostics:ApiKey"]?.Trim();
-                    if (!string.IsNullOrEmpty(requiredKey)
-                        && !string.Equals(
+                    if (string.IsNullOrWhiteSpace(requiredKey))
+                    {
+                        return Results.Problem(
+                            title: "Diagnostics endpoint misconfigured",
+                            detail: "Nightmare:Diagnostics:Enabled=true requires Nightmare:Diagnostics:ApiKey to be configured.",
+                            statusCode: StatusCodes.Status503ServiceUnavailable);
+                    }
+
+                    if (!string.Equals(
                             http.Request.Headers["X-Nightmare-Diagnostics-Key"].ToString(),
                             requiredKey,
                             StringComparison.Ordinal))

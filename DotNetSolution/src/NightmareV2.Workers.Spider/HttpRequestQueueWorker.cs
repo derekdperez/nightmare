@@ -6,6 +6,7 @@ using System.Text.Json;
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using NightmareV2.Application.Assets;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.Gatekeeping;
 using NightmareV2.Application.Workers;
 using NightmareV2.Contracts;
@@ -19,7 +20,7 @@ public sealed class HttpRequestQueueWorker(
     IDbContextFactory<NightmareDbContext> dbFactory,
     IHttpClientFactory httpFactory,
     IServiceScopeFactory scopeFactory,
-    IPublishEndpoint publish,
+    IEventOutbox outbox,
     IWorkerToggleReader workerToggles,
     ILogger<HttpRequestQueueWorker> logger) : BackgroundService
 {
@@ -475,10 +476,11 @@ public sealed class HttpRequestQueueWorker(
 
         var parentPage = baseUri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
         var spiderContext = TruncateDiscoveryContext($"Spider: link extracted from fetched page {parentPage}");
+        var correlation = NewId.NextGuid();
         foreach (var link in LinkHarvest.Extract(body, contentType, baseUri).Take(MaxLinksPerAsset))
         {
             var kind = LinkHarvest.GuessKindForUrl(link);
-            await publish.Publish(
+            await outbox.EnqueueAsync(
                     new AssetDiscovered(
                         asset.TargetId,
                         asset.Target?.RootDomain ?? "",
@@ -488,10 +490,13 @@ public sealed class HttpRequestQueueWorker(
                         link,
                         "spider-worker",
                         DateTimeOffset.UtcNow,
-                        NewId.NextGuid(),
+                        correlation,
                         AssetAdmissionStage.Raw,
                         null,
-                        spiderContext),
+                        spiderContext,
+                        EventId: NewId.NextGuid(),
+                        CausationId: correlation,
+                        Producer: "worker-spider"),
                     ct)
                 .ConfigureAwait(false);
         }

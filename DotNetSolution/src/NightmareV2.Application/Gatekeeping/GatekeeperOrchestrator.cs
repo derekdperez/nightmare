@@ -1,4 +1,5 @@
 using MassTransit;
+using NightmareV2.Application.Events;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Workers;
 using NightmareV2.Contracts;
@@ -14,7 +15,7 @@ public sealed class GatekeeperOrchestrator(
     IAssetDeduplicator deduplicator,
     ITargetScopeEvaluator scope,
     IAssetPersistence persistence,
-    IPublishEndpoint publish,
+    IEventOutbox outbox,
     IWorkerToggleReader workerToggles,
     ILogger<GatekeeperOrchestrator> logger)
 {
@@ -63,7 +64,8 @@ public sealed class GatekeeperOrchestrator(
             if (message.Kind == AssetKind.IpAddress
                 && await workerToggles.IsWorkerEnabledAsync(WorkerKeys.PortScan, cancellationToken).ConfigureAwait(false))
             {
-                await publish.Publish(
+                var causation = message.EventId == Guid.Empty ? message.CorrelationId : message.EventId;
+                await outbox.EnqueueAsync(
                         new PortScanRequested(
                             message.TargetId,
                             message.TargetRootDomain,
@@ -71,7 +73,11 @@ public sealed class GatekeeperOrchestrator(
                             message.Depth,
                             canonical.NormalizedDisplay,
                             assetId,
-                            message.CorrelationId),
+                            message.CorrelationId,
+                            EventId: NewId.NextGuid(),
+                            CausationId: causation,
+                            OccurredAtUtc: DateTimeOffset.UtcNow,
+                            Producer: "gatekeeper"),
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -92,8 +98,9 @@ public sealed class GatekeeperOrchestrator(
         var rawForWorkers = canonical.NormalizedDisplay;
         if (message.Kind is AssetKind.Subdomain or AssetKind.Domain)
             rawForWorkers = canonical.NormalizedDisplay.Trim().TrimEnd('/');
+        var causation = message.EventId == Guid.Empty ? message.CorrelationId : message.EventId;
 
-        return publish.Publish(
+        return outbox.EnqueueAsync(
             new AssetDiscovered(
                 message.TargetId,
                 message.TargetRootDomain,
@@ -106,7 +113,10 @@ public sealed class GatekeeperOrchestrator(
                 message.CorrelationId,
                 AssetAdmissionStage.Indexed,
                 assetId,
-                message.DiscoveryContext),
+                message.DiscoveryContext,
+                EventId: NewId.NextGuid(),
+                CausationId: causation,
+                Producer: "gatekeeper"),
             cancellationToken);
     }
 }

@@ -1,4 +1,5 @@
 using MassTransit;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.Workers;
 using NightmareV2.Contracts;
 using NightmareV2.Contracts.Events;
@@ -8,7 +9,7 @@ namespace NightmareV2.Workers.Enum.Consumers;
 /// <summary>
 /// Passive discovery entry point. Stub emits subdomains as Raw assets for Gatekeeper.
 /// </summary>
-public sealed class TargetCreatedConsumer(ILogger<TargetCreatedConsumer> logger, IWorkerToggleReader toggles)
+public sealed class TargetCreatedConsumer(ILogger<TargetCreatedConsumer> logger, IWorkerToggleReader toggles, IEventOutbox outbox)
     : IConsumer<TargetCreated>
 {
     public async Task Consume(ConsumeContext<TargetCreated> context)
@@ -23,11 +24,12 @@ public sealed class TargetCreatedConsumer(ILogger<TargetCreatedConsumer> logger,
         logger.LogInformation("Enumeration starting for {Domain} target {TargetId}", m.RootDomain, m.TargetId);
 
         var correlation = m.CorrelationId == Guid.Empty ? NewId.NextGuid() : m.CorrelationId;
+        var causation = m.EventId == Guid.Empty ? correlation : m.EventId;
         var subs = new[] { $"www.{m.RootDomain}", $"api.{m.RootDomain}", $"dev.{m.RootDomain}" };
 
         foreach (var sub in subs)
         {
-            await context.Publish(
+            await outbox.EnqueueAsync(
                     new AssetDiscovered(
                         m.TargetId,
                         m.RootDomain,
@@ -40,7 +42,10 @@ public sealed class TargetCreatedConsumer(ILogger<TargetCreatedConsumer> logger,
                         CorrelationId: correlation,
                         AdmissionStage: AssetAdmissionStage.Raw,
                         AssetId: null,
-                        DiscoveryContext: "Enumeration stub: suggested subdomain emitted when target was created"),
+                        DiscoveryContext: "Enumeration stub: suggested subdomain emitted when target was created",
+                        EventId: NewId.NextGuid(),
+                        CausationId: causation,
+                        Producer: "worker-enum"),
                     context.CancellationToken)
                 .ConfigureAwait(false);
         }

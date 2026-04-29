@@ -7,8 +7,10 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Assets;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.FileStore;
 using NightmareV2.Application.HighValue;
+using NightmareV2.Application.Workers;
 using NightmareV2.CommandCenter;
 using NightmareV2.CommandCenter.Components;
 using NightmareV2.CommandCenter.DataMaintenance;
@@ -91,7 +93,7 @@ app.MapPost(
         async (
             CreateTargetRequest dto,
             NightmareDbContext db,
-            IPublishEndpoint bus,
+            IEventOutbox outbox,
             IHubContext<DiscoveryHub> hub,
             CancellationToken ct) =>
         {
@@ -110,8 +112,17 @@ app.MapPost(
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
 
             var correlation = NewId.NextGuid();
-            await bus.Publish(
-                    new TargetCreated(target.Id, target.RootDomain, target.GlobalMaxDepth, target.CreatedAtUtc, correlation),
+            var eventId = NewId.NextGuid();
+            await outbox.EnqueueAsync(
+                    new TargetCreated(
+                        target.Id,
+                        target.RootDomain,
+                        target.GlobalMaxDepth,
+                        target.CreatedAtUtc,
+                        correlation,
+                        EventId: eventId,
+                        CausationId: correlation,
+                        Producer: "command-center"),
                     ct)
                 .ConfigureAwait(false);
 
@@ -163,7 +174,7 @@ app.MapDelete(
 
 app.MapPost(
         "/api/targets/bulk",
-        async (HttpRequest httpRequest, NightmareDbContext db, IPublishEndpoint bus, IHubContext<DiscoveryHub> hub, CancellationToken ct) =>
+        async (HttpRequest httpRequest, NightmareDbContext db, IEventOutbox outbox, IHubContext<DiscoveryHub> hub, CancellationToken ct) =>
         {
             const int maxLines = 50_000;
             var rawLines = new List<string>();
@@ -269,8 +280,17 @@ app.MapPost(
             foreach (var target in newTargets)
             {
                 var correlation = NewId.NextGuid();
-                await bus.Publish(
-                        new TargetCreated(target.Id, target.RootDomain, target.GlobalMaxDepth, target.CreatedAtUtc, correlation),
+                var eventId = NewId.NextGuid();
+                await outbox.EnqueueAsync(
+                        new TargetCreated(
+                            target.Id,
+                            target.RootDomain,
+                            target.GlobalMaxDepth,
+                            target.CreatedAtUtc,
+                            correlation,
+                            EventId: eventId,
+                            CausationId: correlation,
+                            Producer: "command-center"),
                         ct)
                     .ConfigureAwait(false);
                 await hub.Clients.All.SendAsync("TargetQueued", target.Id, target.RootDomain, cancellationToken: ct)
@@ -742,6 +762,87 @@ app.MapGet(
     .WithName("ListWorkers");
 
 app.MapGet(
+        "/api/workers/capabilities",
+        () =>
+        {
+            var rows = new[]
+            {
+                new WorkerCapabilityDto(WorkerKeys.Gatekeeper, "Gatekeeper", "v1", true, true, false, false),
+                new WorkerCapabilityDto(WorkerKeys.Spider, "Spider HTTP Queue", "v1", false, true, true, false),
+                new WorkerCapabilityDto(WorkerKeys.Enumeration, "Enumeration", "v1", true, true, false, true),
+                new WorkerCapabilityDto(WorkerKeys.PortScan, "Port Scan", "v1", true, false, true, true),
+                new WorkerCapabilityDto(WorkerKeys.HighValueRegex, "High Value Regex", "v1", true, false, false, false),
+                new WorkerCapabilityDto(WorkerKeys.HighValuePaths, "High Value Paths", "v1", true, true, false, false),
+            };
+            return Results.Ok(rows);
+        })
+    .WithName("WorkerCapabilities");
+
+app.MapGet(
+        "/api/workers/health",
+        async (NightmareDbContext db, CancellationToken ct) =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var since1 = now.AddHours(-1);
+            var since24 = now.AddHours(-24);
+
+            var toggles = await db.WorkerSwitches.AsNoTracking()
+                .ToDictionaryAsync(w => w.WorkerKey, w => w.IsEnabled, ct)
+                .ConfigureAwait(false);
+
+            var consumeRows = await db.BusJournal.AsNoTracking()
+                .Where(e => e.Direction == "Consume" && e.ConsumerType != null && e.OccurredAtUtc >= since24)
+                .Select(e => new { e.ConsumerType, e.OccurredAtUtc })
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+
+            var byKind = consumeRows
+                .Select(r => new { Kind = WorkerConsumerKindResolver.KindFromConsumerType(r.ConsumerType), r.OccurredAtUtc })
+                .Where(r => !string.IsNullOrWhiteSpace(r.Kind))
+                .GroupBy(r => r.Kind!)
+                .ToDictionary(
+                    g => g.Key,
+                    g => new
+                    {
+                        Last = g.Max(x => x.OccurredAtUtc),
+                        Last1h = g.LongCount(x => x.OccurredAtUtc >= since1),
+                        Last24h = g.LongCount(),
+                    },
+                    StringComparer.Ordinal);
+
+            var keys = new[]
+            {
+                WorkerKeys.Gatekeeper,
+                WorkerKeys.Spider,
+                WorkerKeys.Enumeration,
+                WorkerKeys.PortScan,
+                WorkerKeys.HighValueRegex,
+                WorkerKeys.HighValuePaths,
+            };
+
+            var rows = keys.Select(
+                    key =>
+                    {
+                        var enabled = toggles.GetValueOrDefault(key, true);
+                        var has = byKind.TryGetValue(key, out var stats);
+                        var last = has ? stats!.Last : (DateTimeOffset?)null;
+                        var c1 = has ? stats!.Last1h : 0;
+                        var c24 = has ? stats!.Last24h : 0;
+                        var healthy = !enabled || c1 > 0 || (last is not null && (now - last.Value) <= TimeSpan.FromMinutes(15));
+                        var reason = !enabled
+                            ? "worker toggle is disabled"
+                            : healthy
+                                ? "worker consumed events recently"
+                                : "worker has no recent consume activity";
+                        return new WorkerHealthDto(key, enabled, last, c1, c24, healthy, reason);
+                    })
+                .ToList();
+
+            return Results.Ok(rows);
+        })
+    .WithName("WorkerHealth");
+
+app.MapGet(
         "/api/workers/activity",
         async (NightmareDbContext db, CancellationToken ct) =>
         {
@@ -823,6 +924,57 @@ app.MapGet(
                     domains10OrFewer));
         })
     .WithName("OpsOverview");
+
+app.MapGet(
+        "/api/ops/reliability-slo",
+        async (NightmareDbContext db, CancellationToken ct) =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var since = now.AddHours(-1);
+
+            var publishes = await db.BusJournal.AsNoTracking()
+                .LongCountAsync(e => e.Direction == "Publish" && e.OccurredAtUtc >= since, ct)
+                .ConfigureAwait(false);
+            var consumes = await db.BusJournal.AsNoTracking()
+                .LongCountAsync(e => e.Direction == "Consume" && e.OccurredAtUtc >= since, ct)
+                .ConfigureAwait(false);
+            var successRate = publishes <= 0 ? 1m : Math.Min(1m, consumes / (decimal)publishes);
+
+            var queued = await db.HttpRequestQueue.AsNoTracking()
+                .LongCountAsync(q => q.State == HttpRequestQueueState.Queued, ct)
+                .ConfigureAwait(false);
+            var readyRetry = await db.HttpRequestQueue.AsNoTracking()
+                .LongCountAsync(q => q.State == HttpRequestQueueState.Retry && q.NextAttemptAtUtc <= now, ct)
+                .ConfigureAwait(false);
+            var backlog = queued + readyRetry;
+            var completed = await db.HttpRequestQueue.AsNoTracking()
+                .LongCountAsync(q => q.State == HttpRequestQueueState.Succeeded && q.CompletedAtUtc >= since, ct)
+                .ConfigureAwait(false);
+            var failedLastHour = await db.HttpRequestQueue.AsNoTracking()
+                .LongCountAsync(q => q.State == HttpRequestQueueState.Failed && q.UpdatedAtUtc >= since, ct)
+                .ConfigureAwait(false);
+            var oldestQueuedAt = await db.HttpRequestQueue.AsNoTracking()
+                .Where(q => q.State == HttpRequestQueueState.Queued
+                    || (q.State == HttpRequestQueueState.Retry && q.NextAttemptAtUtc <= now))
+                .OrderBy(q => q.CreatedAtUtc)
+                .Select(q => (DateTimeOffset?)q.CreatedAtUtc)
+                .FirstOrDefaultAsync(ct)
+                .ConfigureAwait(false);
+
+            var apiReady = await db.Database.CanConnectAsync(ct).ConfigureAwait(false);
+            return Results.Ok(
+                new ReliabilitySloSnapshotDto(
+                    now,
+                    publishes,
+                    consumes,
+                    successRate,
+                    backlog,
+                    oldestQueuedAt is null ? null : (long)(now - oldestQueuedAt.Value).TotalSeconds,
+                    completed,
+                    failedLastHour,
+                    apiReady));
+        })
+    .WithName("ReliabilitySloSnapshot");
 
 app.MapPut(
         "/api/workers/{key}",

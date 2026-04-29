@@ -17,4 +17,11 @@ public record AssetDiscovered(
     /// <summary>Set when <see cref="AdmissionStage"/> is <see cref="AssetAdmissionStage.Indexed"/>.</summary>
     Guid? AssetId,
     /// <summary>Human-readable provenance (parent URL, wordlist, etc.). Kept short for DB and bus payloads.</summary>
-    string DiscoveryContext = "");
+    string DiscoveryContext = "",
+    Guid EventId = default,
+    Guid CausationId = default,
+    string SchemaVersion = "1",
+    string Producer = "nightmare-v2") : IEventEnvelope
+{
+    public DateTimeOffset OccurredAtUtc => OccurredAt;
+}

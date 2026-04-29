@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using MassTransit;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Assets;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.Gatekeeping;
 using NightmareV2.Application.Workers;
 using NightmareV2.Contracts;
@@ -19,6 +20,7 @@ namespace NightmareV2.Workers.Spider.Consumers;
 public sealed class SpiderAssetDiscoveredConsumer(
     IHttpClientFactory httpFactory,
     IAssetPersistence persistence,
+    IEventOutbox outbox,
     IWorkerToggleReader workerToggles,
     ILogger<SpiderAssetDiscoveredConsumer> logger) : IConsumer<AssetDiscovered>
 {
@@ -89,10 +91,11 @@ public sealed class SpiderAssetDiscoveredConsumer(
         var ct = contentType ?? "";
         var parentPage = fetchUri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
         var spiderContext = TruncateDiscoveryContext($"Spider: link extracted from fetched page {parentPage}");
+        var causation = m.EventId == Guid.Empty ? m.CorrelationId : m.EventId;
         foreach (var link in LinkHarvest.Extract(body, ct, fetchUri).Take(MaxLinksPerAsset))
         {
             var kind = LinkHarvest.GuessKindForUrl(link);
-            await context.Publish(
+            await outbox.EnqueueAsync(
                     new AssetDiscovered(
                         m.TargetId,
                         m.TargetRootDomain,
@@ -105,7 +108,10 @@ public sealed class SpiderAssetDiscoveredConsumer(
                         m.CorrelationId,
                         AssetAdmissionStage.Raw,
                         null,
-                        spiderContext),
+                        spiderContext,
+                        EventId: NewId.NextGuid(),
+                        CausationId: causation,
+                        Producer: "worker-spider"),
                     context.CancellationToken)
                 .ConfigureAwait(false);
         }

@@ -9,4 +9,8 @@ public sealed record CriticalHighValueFindingAlert(
     string SourceUrl,
     string Severity,
     DateTimeOffset OccurredAtUtc,
-    Guid CorrelationId);
+    Guid CorrelationId,
+    Guid EventId = default,
+    Guid CausationId = default,
+    string SchemaVersion = "1",
+    string Producer = "nightmare-v2") : IEventEnvelope;

@@ -5,12 +5,14 @@ using NightmareV2.Application.Gatekeeping;
 using NightmareV2.Application.Workers;
 using NightmareV2.Infrastructure.Data;
 using NightmareV2.Application.FileStore;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.HighValue;
 using NightmareV2.Infrastructure.FileStore;
 using NightmareV2.Infrastructure.Gatekeeping;
 using NightmareV2.Infrastructure.HighValue;
 using NightmareV2.Infrastructure.Messaging;
 using NightmareV2.Infrastructure.Workers;
+using Microsoft.Extensions.Hosting;
 using StackExchange.Redis;
 
 namespace NightmareV2.Infrastructure;
@@ -46,6 +48,10 @@ public static class DependencyInjection
         services.AddScoped<IAssetPersistence, EfAssetPersistence>();
         services.AddScoped<IHighValueFindingWriter, EfHighValueFindingWriter>();
         services.AddScoped<IWorkerToggleReader, EfWorkerToggleReader>();
+        services.AddScoped<IEventOutbox, EfEventOutbox>();
+        services.AddHostedService<OutboxDispatcherWorker>();
+        services.AddSingleton<BusJournalBuffer>();
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<BusJournalBuffer>());
         services.AddSingleton<BusJournalPublishObserver>();
         services.AddSingleton<BusJournalConsumeObserver>();
 

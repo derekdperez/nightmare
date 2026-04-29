@@ -23,6 +23,24 @@ public sealed record AssetGridRowDto(
 
 public sealed record WorkerSwitchDto(string WorkerKey, bool IsEnabled, DateTimeOffset UpdatedAtUtc);
 
+public sealed record WorkerCapabilityDto(
+    string WorkerKey,
+    string DisplayName,
+    string Version,
+    bool CanConsumeBusEvents,
+    bool CanEmitAssets,
+    bool CanPerformNetworkIOMainPath,
+    bool IsStubbed);
+
+public sealed record WorkerHealthDto(
+    string WorkerKey,
+    bool ToggleEnabled,
+    DateTimeOffset? LastConsumeUtc,
+    long BusConsumesLast1Hour,
+    long BusConsumesLast24Hours,
+    bool Healthy,
+    string Reason);
+
 public sealed record WorkerPatchRequest(bool Enabled);
 
 /// <summary>Per process/container: last completed consume from the shared bus journal.</summary>
@@ -188,3 +206,14 @@ public sealed record HttpRequestQueueMetricsDto(
     long BacklogCount,
     DateTimeOffset? OldestQueuedAtUtc,
     long? OldestQueuedAgeSeconds);
+
+public sealed record ReliabilitySloSnapshotDto(
+    DateTimeOffset AtUtc,
+    long EventPublishesLast1Hour,
+    long EventConsumesLast1Hour,
+    decimal EventProcessingSuccessRate1Hour,
+    long QueueBacklogCount,
+    long? QueueBacklogAgeSeconds,
+    long QueueCompletedLastHour,
+    long WorkerErrorsLast1Hour,
+    bool ApiReady);

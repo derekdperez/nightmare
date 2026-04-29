@@ -9,4 +9,11 @@ public sealed record ScannableContentAvailable(
     string SourceUrl,
     Guid CorrelationId,
     DateTimeOffset StoredAtUtc,
-    ScannableContentSource Source);
+    ScannableContentSource Source,
+    Guid EventId = default,
+    Guid CausationId = default,
+    string SchemaVersion = "1",
+    string Producer = "nightmare-v2") : IEventEnvelope
+{
+    public DateTimeOffset OccurredAtUtc => StoredAtUtc;
+}

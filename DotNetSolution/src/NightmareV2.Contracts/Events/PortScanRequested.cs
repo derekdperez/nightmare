@@ -10,4 +10,9 @@ public record PortScanRequested(
     int Depth,
     string HostOrIp,
     Guid AssetId,
-    Guid CorrelationId);
+    Guid CorrelationId,
+    Guid EventId = default,
+    Guid CausationId = default,
+    DateTimeOffset OccurredAtUtc = default,
+    string SchemaVersion = "1",
+    string Producer = "nightmare-v2") : IEventEnvelope;

@@ -4,6 +4,7 @@ using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Assets;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.HighValue;
 using NightmareV2.Application.Workers;
 using NightmareV2.Contracts;
@@ -16,7 +17,7 @@ public sealed class HighValueRegexConsumer(
     NightmareDbContext db,
     IWorkerToggleReader toggles,
     IHighValueFindingWriter writer,
-    IPublishEndpoint publish,
+    IEventOutbox outbox,
     IConfiguration configuration,
     HighValueRegexMatcher matcher,
     IHttpClientFactory httpFactory,
@@ -107,7 +108,7 @@ public sealed class HighValueRegexConsumer(
         string patternName,
         CancellationToken ct)
     {
-        await publish.Publish(
+        await outbox.EnqueueAsync(
                 new CriticalHighValueFindingAlert(
                     findingId,
                     m.TargetId,
@@ -116,7 +117,10 @@ public sealed class HighValueRegexConsumer(
                     m.SourceUrl,
                     "Critical",
                     DateTimeOffset.UtcNow,
-                    m.CorrelationId),
+                    m.CorrelationId,
+                    EventId: NewId.NextGuid(),
+                    CausationId: m.EventId == Guid.Empty ? m.CorrelationId : m.EventId,
+                    Producer: "worker-highvalue-regex"),
                 ct)
             .ConfigureAwait(false);
 

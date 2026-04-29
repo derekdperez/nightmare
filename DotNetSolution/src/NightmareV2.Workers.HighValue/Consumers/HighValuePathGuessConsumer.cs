@@ -1,4 +1,5 @@
 using MassTransit;
+using NightmareV2.Application.Events;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Workers;
 using NightmareV2.Contracts;
@@ -12,6 +13,7 @@ namespace NightmareV2.Workers.HighValue.Consumers;
 /// </summary>
 public sealed class HighValuePathGuessConsumer(
     IWorkerToggleReader toggles,
+    IEventOutbox outbox,
     IConfiguration configuration,
     HighValueWordlistBootstrap wordlists,
     ILogger<HighValuePathGuessConsumer> logger) : IConsumer<AssetDiscovered>
@@ -32,6 +34,7 @@ public sealed class HighValuePathGuessConsumer(
         var host = m.RawValue.Trim().TrimEnd('/');
         if (host.Length == 0 || host.Contains(' ', StringComparison.Ordinal) || host.Contains("..", StringComparison.Ordinal))
             return;
+        var causation = m.EventId == Guid.Empty ? m.CorrelationId : m.EventId;
 
         var baseUrl = host.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                       || host.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
@@ -57,7 +60,7 @@ public sealed class HighValuePathGuessConsumer(
 
                 var url = uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped);
                 var ctx = TruncateDiscoveryContext($"High-value paths: category \"{category}\" from host {baseUrl} → {url}");
-                await context.Publish(
+                await outbox.EnqueueAsync(
                         new AssetDiscovered(
                             m.TargetId,
                             m.TargetRootDomain,
@@ -70,7 +73,10 @@ public sealed class HighValuePathGuessConsumer(
                             m.CorrelationId,
                             AssetAdmissionStage.Raw,
                             null,
-                            ctx),
+                            ctx,
+                            EventId: NewId.NextGuid(),
+                            CausationId: causation,
+                            Producer: "worker-highvalue-paths"),
                         ct)
                     .ConfigureAwait(false);
                 published++;

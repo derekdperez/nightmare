@@ -8,4 +8,11 @@ public record TargetCreated(
     string RootDomain,
     int GlobalMaxDepth,
     DateTimeOffset OccurredAt,
-    Guid CorrelationId);
+    Guid CorrelationId,
+    Guid EventId = default,
+    Guid CausationId = default,
+    string SchemaVersion = "1",
+    string Producer = "nightmare-v2") : IEventEnvelope
+{
+    public DateTimeOffset OccurredAtUtc => OccurredAt;
+}

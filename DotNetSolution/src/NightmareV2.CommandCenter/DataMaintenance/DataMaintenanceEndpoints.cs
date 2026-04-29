@@ -196,8 +196,8 @@ public static class DataMaintenanceEndpoints
         if (!config.GetValue(ConfigEnabled, false))
             return false;
         var required = config[ConfigApiKey]?.Trim();
-        if (string.IsNullOrEmpty(required))
-            return true;
+        if (string.IsNullOrWhiteSpace(required))
+            return false;
         return string.Equals(http.Headers["X-Nightmare-Maintenance-Key"].ToString(), required, StringComparison.Ordinal);
     }
 
@@ -205,6 +205,14 @@ public static class DataMaintenanceEndpoints
     {
         if (!config.GetValue(ConfigEnabled, false))
             return Results.NotFound();
+        if (string.IsNullOrWhiteSpace(config[ConfigApiKey]))
+        {
+            return Results.Problem(
+                title: "Maintenance endpoints misconfigured",
+                detail: "Nightmare:DataMaintenance:Enabled=true requires Nightmare:DataMaintenance:ApiKey to be configured.",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
         return Results.Unauthorized();
     }
 }

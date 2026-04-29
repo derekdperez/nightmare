@@ -12,6 +12,8 @@ public sealed class NightmareDbContext(DbContextOptions<NightmareDbContext> opti
     public DbSet<HighValueFinding> HighValueFindings => Set<HighValueFinding>();
     public DbSet<HttpRequestQueueItem> HttpRequestQueue => Set<HttpRequestQueueItem>();
     public DbSet<HttpRequestQueueSettings> HttpRequestQueueSettings => Set<HttpRequestQueueSettings>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -140,6 +142,42 @@ public sealed class NightmareDbContext(DbContextOptions<NightmareDbContext> opti
                 .WithMany()
                 .HasForeignKey(x => x.TargetId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<OutboxMessage>(e =>
+        {
+            e.ToTable("outbox_messages");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.MessageType).HasColumnName("message_type").HasMaxLength(512).IsRequired();
+            e.Property(x => x.PayloadJson).HasColumnName("payload_json").IsRequired();
+            e.Property(x => x.EventId).HasColumnName("event_id");
+            e.Property(x => x.CorrelationId).HasColumnName("correlation_id");
+            e.Property(x => x.CausationId).HasColumnName("causation_id");
+            e.Property(x => x.OccurredAtUtc).HasColumnName("occurred_at_utc");
+            e.Property(x => x.Producer).HasColumnName("producer").HasMaxLength(128).IsRequired();
+            e.Property(x => x.State).HasColumnName("state").HasMaxLength(32).IsRequired();
+            e.Property(x => x.AttemptCount).HasColumnName("attempt_count");
+            e.Property(x => x.CreatedAtUtc).HasColumnName("created_at_utc");
+            e.Property(x => x.UpdatedAtUtc).HasColumnName("updated_at_utc");
+            e.Property(x => x.NextAttemptAtUtc).HasColumnName("next_attempt_at_utc");
+            e.Property(x => x.DispatchedAtUtc).HasColumnName("dispatched_at_utc");
+            e.Property(x => x.LastError).HasColumnName("last_error").HasMaxLength(2048);
+            e.Property(x => x.LockedBy).HasColumnName("locked_by").HasMaxLength(256);
+            e.Property(x => x.LockedUntilUtc).HasColumnName("locked_until_utc");
+            e.HasIndex(x => new { x.State, x.NextAttemptAtUtc });
+            e.HasIndex(x => x.EventId).IsUnique();
+        });
+
+        modelBuilder.Entity<InboxMessage>(e =>
+        {
+            e.ToTable("inbox_messages");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.EventId).HasColumnName("event_id");
+            e.Property(x => x.Consumer).HasColumnName("consumer").HasMaxLength(256).IsRequired();
+            e.Property(x => x.ProcessedAtUtc).HasColumnName("processed_at_utc");
+            e.HasIndex(x => new { x.EventId, x.Consumer }).IsUnique();
         });
     }
 }

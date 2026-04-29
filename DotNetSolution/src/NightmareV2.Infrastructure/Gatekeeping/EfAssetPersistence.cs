@@ -1,8 +1,8 @@
 using System.Text.Json;
-using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NightmareV2.Application.Assets;
+using NightmareV2.Application.Events;
 using NightmareV2.Application.Gatekeeping;
 using NightmareV2.Contracts;
 using NightmareV2.Contracts.Events;
@@ -14,10 +14,16 @@ namespace NightmareV2.Infrastructure.Gatekeeping;
 
 public sealed class EfAssetPersistence(
     NightmareDbContext db,
-    IPublishEndpoint publish,
+    IEventOutbox outbox,
     ILogger<EfAssetPersistence> logger) : IAssetPersistence
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
+    private static readonly TimeSpan[] PublishRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(150),
+        TimeSpan.FromMilliseconds(350),
+        TimeSpan.FromMilliseconds(750),
+    ];
 
     public async Task<(Guid AssetId, bool Inserted)> PersistNewAssetAsync(
         AssetDiscovered message,
@@ -256,22 +262,46 @@ public sealed class EfAssetPersistence(
         if (!isConfirmedResponse)
             return;
 
-        try
+        var correlation = correlationId == Guid.Empty ? NewId.NextGuid() : correlationId;
+        var causation = correlation;
+
+        async Task DelayAsync(int failedAttempt)
         {
-            await publish.Publish(
-                    new ScannableContentAvailable(
-                        assetId,
-                        meta.TargetId,
-                        meta.RawValue ?? "",
-                        correlationId == Guid.Empty ? NewId.NextGuid() : correlationId,
-                        DateTimeOffset.UtcNow,
-                        ScannableContentSource.UrlHttpResponse),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            if (failedAttempt >= PublishRetryDelays.Length)
+                return;
+            await Task.Delay(PublishRetryDelays[failedAttempt], cancellationToken).ConfigureAwait(false);
         }
-        catch
+
+        for (var attempt = 1; attempt <= PublishRetryDelays.Length + 1; attempt++)
         {
-            // Bus publish must not fail persistence; workers can still use stored JSON if needed.
+            try
+            {
+                await outbox.EnqueueAsync(
+                        new ScannableContentAvailable(
+                            assetId,
+                            meta.TargetId,
+                            meta.RawValue ?? "",
+                            correlation,
+                            DateTimeOffset.UtcNow,
+                            ScannableContentSource.UrlHttpResponse,
+                            EventId: NewId.NextGuid(),
+                            CausationId: causation,
+                            Producer: "gatekeeper"),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (attempt <= PublishRetryDelays.Length)
+            {
+                logger.LogWarning(
+                    ex,
+                    "ScannableContentAvailable publish retry {Attempt} failed for asset {AssetId}.",
+                    attempt,
+                    assetId);
+                await DelayAsync(attempt - 1).ConfigureAwait(false);
+            }
         }
+
+        throw new InvalidOperationException($"Failed to publish ScannableContentAvailable for asset {assetId} after retries.");
     }
 }
